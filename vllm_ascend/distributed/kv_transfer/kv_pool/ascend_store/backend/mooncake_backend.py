@@ -7,6 +7,7 @@ import regex as re
 import torch
 
 # Third Party
+from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
@@ -14,6 +15,7 @@ from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
@@ -31,6 +33,8 @@ class MooncakeBackend(Backend):
             ) from e
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
+        self.preferred_segment = self.config.preferred_segment
+        self.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
@@ -80,7 +84,15 @@ class MooncakeBackend(Backend):
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            soc_version = get_ascend_device_type()
+            if soc_version in {AscendDeviceType.A2}:
+                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            else:
+                config = ReplicateConfig()
+                if self.preferred_segment:
+                    config.preferred_segment = self.local_seg
+                config.prefer_alloc_in_same_node = self.prefer_alloc_in_same_node
+                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to put key {keys},res:{res}")
@@ -105,11 +117,14 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    preferred_segment: bool
+    prefer_alloc_in_same_node: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        master_server_address = os.getenv("MOONCAKE_MASTER", None)
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
@@ -118,7 +133,12 @@ class MooncakeStoreConfig:
             local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
+            master_server_address=master_server_address
+            if master_server_address is not None else
+            config.get("master_server_address"),
+            preferred_segment=config.get("preferred_segment", False),
+            prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node",
+                                                 True),
         )
 
     @staticmethod
