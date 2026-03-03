@@ -170,7 +170,7 @@ fi
 
 if [ "${PARENT_JOB}" == "false" ];then
     CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
-    JOB_NUM="-j${CPU_NUM}"
+    JOB_NUM="-j16"
 fi
 
 CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
