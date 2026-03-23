@@ -44,14 +44,14 @@ class MooncakeBackend(Backend):
                 transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
                 self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
                 ret = self.store.setup(
-                    self.local_seg,
-                    self.config.metadata_server,
-                    self.config.global_segment_size,
-                    self.config.local_buffer_size,
-                    self.config.protocol,
-                    self.config.device_name,
-                    self.config.master_server_address,
-                    transfer_engine.get_engine(),
+                    local_hostname=self.local_seg,
+                    metadata_server=self.config.metadata_server,
+                    global_segment_size=self.config.global_segment_size,
+                    local_buffer_size=self.config.local_buffer_size,
+                    protocol=self.config.protocol,
+                    rdma_devices=self.config.device_name,
+                    master_server_addr=self.config.master_server_address,
+                    engine=transfer_engine.get_engine()
                 )
             else:
                 self.local_seg = local_hostname
