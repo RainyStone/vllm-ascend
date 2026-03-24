@@ -272,13 +272,19 @@ def get_linear_quant_type(
         The quantization type string (e.g., "W8A8_DYNAMIC").
     """
     proj_name = prefix.split(".")[-1]
+    vllm_config = get_current_vllm_config()
+    model_type = vllm_config.model_config.hf_config.model_type
     if proj_name in packed_modules_mapping:
         quant_type = None
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
-            shard_quant_type = quant_description[shard_prefix + ".weight"]
+            if model_type == "minimax_m2":
+                target_key = shard_prefix + ".weight"
+                shard_quant_type = quant_description.get(target_key, "W8A8_DYNAMIC")
+            else:
+                shard_quant_type = quant_description[shard_prefix + ".weight"]
 
             if quant_type is None:
                 quant_type = shard_quant_type
@@ -289,7 +295,10 @@ def get_linear_quant_type(
                     f"use {quant_type}. Please check quantization config."
                 )
     else:
-        quant_type = quant_description[prefix + ".weight"]
+        if model_type == "minimax_m2":
+            quant_type = quant_description.get(prefix + ".weight", "W8A8_DYNAMIC")
+        else:
+            quant_type = quant_description[prefix + ".weight"]
     return quant_type
 
 
@@ -513,6 +522,8 @@ class AscendModelSlimConfig(QuantizationConfig):
     def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
         proj_name = prefix.split(".")[-1]
+        vllm_config = get_current_vllm_config()
+        model_type = vllm_config.model_config.hf_config.model_type
         if proj_name in fused_mapping:
             shard_prefixes = [
                 prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]
@@ -520,7 +531,10 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
-                is_shard_skipped = self.quant_description[shard_prefix + ".weight"] == "FLOAT"
+                if model_type == "minimax_m2":
+                    is_shard_skipped = self.quant_description.get(shard_prefix + ".weight", "W8A8_DYNAMIC") == "FLOAT"
+                else:
+                    is_shard_skipped = self.quant_description[shard_prefix + ".weight"] == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
@@ -530,11 +544,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "are quantized. All shards of fused layers "
                         "to have the same precision."
                     )
+
         else:
-            is_skipped = any(
-                key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
-                for key, value in self.quant_description.items()
-            )
+            if model_type == "minimax_m2":
+                is_skipped = self.quant_description.get(prefix + ".weight", "W8A8_DYNAMIC") == "FLOAT"
+            else:
+                is_skipped = any(
+                    key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
+                    for key, value in self.quant_description.items()
+                )
 
         assert is_skipped is not None
         return is_skipped
