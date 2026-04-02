@@ -15,6 +15,7 @@
 #
 
 import gc
+import os
 import time
 
 import torch
@@ -45,10 +46,14 @@ class RForkModelLoader(BaseModelLoader):
 
         def _get_extra_config(key: str, default: str = "") -> str:
             value = config.get(key)
+            if value is None or not isinstance(value, str):
+                value = os.environ.get(key.upper())
             return value if isinstance(value, str) and value else default
 
         def _get_extra_config_float(key: str, default: float) -> float:
             value = config.get(key)
+            if value is None:
+                value = os.environ.get(key.upper())
             parsed_value = default
             if isinstance(value, (int, float)):
                 parsed_value = float(value)
