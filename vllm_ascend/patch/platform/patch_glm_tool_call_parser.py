@@ -54,6 +54,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.entrypoints.openai.utils import is_enable_thinking_request
 from vllm.tool_parsers import glm4_moe_tool_parser as glm4_parser
 from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 
@@ -209,6 +210,7 @@ async def _patched_chat_completion_stream_generator(
     reasoning_parser: ReasoningParser | None = None,
 ) -> AsyncGenerator[str, None]:
     created_time = int(time.time())
+    need_thinking_padding = is_enable_thinking_request(request)
     chunk_object_type: Final = "chat.completion.chunk"
     first_iteration = True
 
@@ -279,12 +281,17 @@ async def _patched_chat_completion_stream_generator(
                 num_cached_tokens = res.num_cached_tokens
                 role = self.get_chat_request_role(request)
 
+                first_chunk_content = ""
+                if need_thinking_padding:
+                    first_chunk_padding = self.reasoning_padding
+                    first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
+                
                 for i in range(num_choices):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(
                             role=role,
-                            content="",
+                            content=first_chunk_content,
                         ),
                         logprobs=None,
                         finish_reason=None,
