@@ -12,6 +12,7 @@ import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -91,6 +92,9 @@ class ReqMeta:
     remote_ptp_size: int | None
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
+    remote_dp_size: int
+    remote_pp_size: int
+    prefill_pp_layer_partition: str | None
 
 
 @dataclass
@@ -304,7 +308,7 @@ class KVCacheRecvingThread(threading.Thread):
         self,
         tp_rank: int,
         tp_size: int,
-        _prefill_pp_size: int,
+        # _prefill_pp_size: int,
         engine: TransferEngine,
         local_engine_id: str,
         local_handshake_port: int,
@@ -314,12 +318,12 @@ class KVCacheRecvingThread(threading.Thread):
         ready_event: threading.Event,
         vllm_config: VllmConfig,
         kv_caches: dict[str, Any],
-        prefill_pp_layer_partition: str | None = None,
+        # prefill_pp_layer_partition: str | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
-        self._prefill_pp_size = _prefill_pp_size
+        # self._prefill_pp_size = _prefill_pp_size
         self.local_engine_id = local_engine_id
         self.local_handshake_port = local_handshake_port
         self.side_channel_port = side_channel_port
@@ -354,10 +358,10 @@ class KVCacheRecvingThread(threading.Thread):
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_layers = self.model_config.hf_text_config.num_hidden_layers
-        self.pp_layer_indices = {
-            rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
-            for rank in range(self._prefill_pp_size)
-        }
+        # self.pp_layer_indices = {
+        #     rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
+        #     for rank in range(self._prefill_pp_size)
+        # }
         if not is_vl_model(vllm_config):
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
@@ -382,6 +386,7 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        prefill_parallelism_params: dict[str, int | None] | None = None
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -400,6 +405,7 @@ class KVCacheRecvingThread(threading.Thread):
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "remote_port_send_num": remote_port_send_num,
                 "all_task_done": all_task_done,
+                "prefill_parallelism_params":prefill_parallelism_params
             }
         )
 
@@ -440,6 +446,7 @@ class KVCacheRecvingThread(threading.Thread):
         except Exception as e:
             logger.error(f"Failed to transfer KV cache for request {remote_request_id}: {e}", exc_info=True)
         finally:
+            # TODO 释放不传kv cache的P的kv
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
                 if len(req_meta["local_block_ids"]) > 0:
@@ -450,11 +457,13 @@ class KVCacheRecvingThread(threading.Thread):
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
+            # TODO 释放传kv cache的P的kv
             self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
 
     def _send_done_signal_to_free_remote_port(
         self, request_id: str, remote_host: str, remote_port_send_num: dict[int, RemotePortInfo]
     ):
+        # TODO 只用第0张卡，避免多次释放
         if self.side_channel_port != self.local_handshake_port or not remote_port_send_num:
             return
         if request_id not in self.proc_not_transfer_request:
@@ -476,6 +485,15 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         offset = req_meta["offset"]
         tp_num_need_pulls = req_meta["tp_num_need_pulls"]
+
+        prefill_pp_size = req_meta["prefill_parallelism_params"]["prefill_pp_size"]
+        prefill_pp_layer_partition = req_meta["prefill_parallelism_params"]["prefill_pp_layer_partition"]
+
+        pp_layer_indices = {
+            rank: get_prefill_pp_indices(self.num_layers, rank, prefill_pp_size, prefill_pp_layer_partition)
+            for rank in range(prefill_pp_size)
+        }
+
 
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
@@ -512,11 +530,11 @@ class KVCacheRecvingThread(threading.Thread):
         inner_offset = offset % tp_num_need_pulls  # Offset within each PP stage
 
         remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-        first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
+        first_layer_index, end_layer_index = pp_layer_indices[prefill_pp_rank]
         # support MTP layer kv transfer
         if self.vllm_config.speculative_config is not None:
             # all MTP layer use the same kv cache layer, so only need to transfer once
-            if prefill_pp_rank == self._prefill_pp_size - 1:
+            if prefill_pp_rank == prefill_pp_size - 1:
                 end_layer_index = end_layer_index + 1
         num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
@@ -564,7 +582,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         # Determine if the current position is the offset position at the end of
         # the KV transmission.
-        is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
+        is_kv_transfer_end = global_offset == tp_num_need_pulls * prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
         use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
@@ -805,7 +823,13 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
+            # TODO P节点的PP、DP、TP都传给D节点
+            remote_dp_size=kv_transfer_params["remote_dp_size"],
+            remote_pp_size=kv_transfer_params["remote_pp_size"],
+            prefill_pp_layer_partition=kv_transfer_params["prefill_pp_layer_partition"]
         )
+
+        logger.error(f"Test 0000000 kv_transfer_params: {kv_transfer_params}")
 
 
 class MooncakeConnector(KVConnectorBase_V1):
@@ -921,6 +945,8 @@ class MooncakeConnectorScheduler:
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.max_device_id = (
             vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.data_parallel_size
@@ -1060,6 +1086,9 @@ class MooncakeConnectorScheduler:
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
 
+        prefill_parallel_config: dict[str, Any] = self.vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+        prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -1074,6 +1103,12 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
+            remote_dp_size=self.dp_size,
+            remote_pp_size=self.pp_size,
+            prefill_pp_layer_partition = prefill_pp_layer_partition,
+            xzx_test="Test By x00893896",
+            xzx_test_tp_size = f"Test By x00893896, tp_size: {self.tp_size}",
+            xzx_test_dp_size=f"Test By x00893896, dp_size: {self.dp_size}"
         )
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
@@ -1094,18 +1129,23 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
-        self._get_prefill_decode_size(vllm_config)
+        # TODO P节点并行配置修改成从请求中获取
+        # self._get_prefill_decode_size(vllm_config)
+
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
-        if self._prefill_tp_size < self._decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
-                f" or equal to the decode_tp_size: {self._decode_tp_size}"
-            )
+
+        # # TODO 校验可以移到start_load_kv
+        # if self._prefill_tp_size < self._decode_tp_size:
+        #     raise ValueError(
+        #         f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
+        #         f" or equal to the decode_tp_size: {self._decode_tp_size}"
+        #     )
 
         # Metadata.
         self.vllm_config = vllm_config
         self.ascend_config = get_ascend_config()
         self.engine_id = engine_id
+        self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
@@ -1113,6 +1153,10 @@ class MooncakeConnectorWorker:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+        if self.kv_role == "kv_consumer":
+            assert self.pp_size == 1, "decode pp size must be 1"
+
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
@@ -1123,7 +1167,6 @@ class MooncakeConnectorWorker:
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
-        self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # Handshake base port
@@ -1150,36 +1193,112 @@ class MooncakeConnectorWorker:
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        if self.vllm_config.model_config.is_deepseek_mla:
-            self.tp_num_need_pulls = 1
-        else:
-            num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
-            num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
-            self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
+        # TODO 删除，疑似与 _get_tp_num_need_pulls 函数中逻辑重复
+        # if self.vllm_config.model_config.is_deepseek_mla:
+        #     self.tp_num_need_pulls = 1
+        # else:
+        #     num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
+        #     num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
+        #     self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
 
-    def _get_prefill_decode_size(self, vllm_config: VllmConfig):
-        # get prefill tp and dp size from extra config
-        prefill_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+        self._prefill_tp_size = None
+        self._prefill_dp_size = None
+        self._prefill_pp_size = None
+        self._prefill_pp_layer_partition = None
 
-        assert "tp_size" in prefill_parallel_config
-        self._prefill_tp_size = prefill_parallel_config["tp_size"]
+        self._decode_tp_size = None
+        self._decode_pp_size = None
+        self._decode_dp_size = None
 
-        assert "dp_size" in prefill_parallel_config
-        self._prefill_dp_size = prefill_parallel_config["dp_size"]
-        # get prefill pp size from extra config
-        self._prefill_pp_size = prefill_parallel_config.get("pp_size", 1)
-        # get decode tp and dp size from extra config
-        decode_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
-        assert "tp_size" in decode_parallel_config
-        self._decode_tp_size = decode_parallel_config["tp_size"]
-        assert "dp_size" in decode_parallel_config
-        self._decode_dp_size = decode_parallel_config["dp_size"]
-        # get prefill pp size from extra config
-        self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
-        assert self._decode_pp_size == 1, "decode pp size must be 1"
-        self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+    # def _get_prefill_decode_size(self, vllm_config: VllmConfig):
+    #     # get prefill tp and dp size from extra config
+    #     prefill_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+    #
+    #     assert "tp_size" in prefill_parallel_config
+    #     self._prefill_tp_size = prefill_parallel_config["tp_size"]
+    #
+    #     assert "dp_size" in prefill_parallel_config
+    #     self._prefill_dp_size = prefill_parallel_config["dp_size"]
+    #     # get prefill pp size from extra config
+    #     self._prefill_pp_size = prefill_parallel_config.get("pp_size", 1)
+    #
+    #     # get decode tp and dp size from extra config
+    #     decode_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
+    #     assert "tp_size" in decode_parallel_config
+    #     self._decode_tp_size = decode_parallel_config["tp_size"]
+    #     assert "dp_size" in decode_parallel_config
+    #     self._decode_dp_size = decode_parallel_config["dp_size"]
+    #     # get prefill pp size from extra config
+    #     self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
+    #     assert self._decode_pp_size == 1, "decode pp size must be 1"
+    #     self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+
+    @contextmanager
+    def switch_connector_metadata_context(self,req_id:str,meta:ReqMeta):
+        is_producer = self.kv_role == "kv_producer"
+        is_consumer = self.kv_role == "kv_consumer"
+        logger.error(f"Test =======switch_connector_metadata_context===========6666666666666: req_id:{req_id}, meta: {meta}")
+
+        if is_producer:
+            self._prefill_tp_size = self.tp_size
+            self._prefill_dp_size = self.dp_size
+            self._prefill_pp_size = self.pp_size
+            # TODO 待适配 pp_layer_partition 这个参数
+            # self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+            prefill_parallel_config: dict[str, Any] = self.vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+            self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+
+            self._decode_tp_size = None
+            self._decode_pp_size = None
+            self._decode_dp_size = None
+
+        if is_consumer:
+            self._prefill_tp_size = meta.remote_ptp_size
+            self._prefill_dp_size = meta.remote_dp_size
+            self._prefill_pp_size = meta.remote_pp_size
+            # TODO 待适配 pp_layer_partition 这个参数
+            # self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+            self._prefill_pp_layer_partition = meta.prefill_pp_layer_partition
+
+            self._decode_tp_size = self.tp_size
+            self._decode_pp_size = self.pp_size
+            self._decode_dp_size = self.dp_size
+
+            if self._prefill_tp_size < self._decode_tp_size:
+                raise ValueError(
+                    f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
+                    f" or equal to the decode_tp_size: {self._decode_tp_size}"
+                )
+
+        try:
+            yield
+        finally:
+            if is_producer:
+                self._prefill_tp_size = self.tp_size
+                self._prefill_dp_size = self.dp_size
+                self._prefill_pp_size = self.pp_size
+                # TODO 待适配 pp_layer_partition 这个参数
+                # self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+                prefill_parallel_config: dict[str, Any] = self.vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+                self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+
+                self._decode_tp_size = None
+                self._decode_pp_size = None
+                self._decode_dp_size = None
+
+            if is_consumer:
+                self._prefill_tp_size = None
+                self._prefill_dp_size = None
+                self._prefill_pp_size = None
+                # TODO 待适配 pp_layer_partition 这个参数
+                # self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+                self._prefill_pp_layer_partition = None
+
+                self._decode_tp_size = self.tp_size
+                self._decode_pp_size = self.pp_size
+                self._decode_dp_size = self.dp_size
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -1247,7 +1366,7 @@ class MooncakeConnectorWorker:
             self.kv_send_thread = KVCacheSendingThread(
                 self.vllm_config,
                 self.tp_rank,
-                self._prefill_tp_size,
+                self.tp_size,
                 self.engine_id,
                 self.side_channel_host,
                 self.side_channel_port,
@@ -1261,7 +1380,7 @@ class MooncakeConnectorWorker:
             self.kv_recv_thread = KVCacheRecvingThread(
                 self.tp_rank,
                 self.tp_size,
-                self._prefill_pp_size,
+                # self._prefill_pp_size,  # TODO 需要在调用时适配   通过375行传入并适配动态
                 self.engine,
                 self.engine_id,
                 self.handshake_port,
@@ -1271,7 +1390,7 @@ class MooncakeConnectorWorker:
                 ready_event,
                 self.vllm_config,
                 self.kv_caches,
-                self._prefill_pp_layer_partition,
+                # self._prefill_pp_layer_partition,   # TODO 需要在调用时适配    通过375行传入并适配动态
             )
             self.kv_recv_thread.start()
 
@@ -1517,6 +1636,7 @@ class MooncakeConnectorWorker:
 
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
+    # TODO model_runner会调用
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id, meta in metadata.requests.items():
@@ -1529,21 +1649,63 @@ class MooncakeConnectorWorker:
                 len(meta.remote_block_ids),
             )
 
-            prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
-            tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
-            remote_req_id = meta.remote_request_id
+            with self.switch_connector_metadata_context(req_id, meta):
+                prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
 
-            if meta.remote_pcp_size * meta.remote_dcp_size > 1:
-                remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
-                    req_id, meta
-                )
+                remote_dp_size = meta.remote_dp_size
+                remote_pp_size = meta.remote_pp_size
 
-                for pcp_dcp_rank in range(len(remote_handshake_port_list)):
-                    for i in range(tp_num_need_pulls):
+                logger.error(f"Test 555555============from prefiller============remote_dp_size:{remote_dp_size}, remote_pp_size:{remote_pp_size}")
+
+                tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
+                remote_req_id = meta.remote_request_id
+
+                prefill_parallelism_params = {
+                    "prefill_tp_size": self._prefill_tp_size,
+                    "prefill_pp_size": self._prefill_pp_size,
+                    "prefill_dp_size": self._prefill_dp_size,
+                    "prefill_pp_layer_partition": self._prefill_pp_layer_partition
+                }
+
+                if meta.remote_pcp_size * meta.remote_dcp_size > 1:
+                    remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
+                        req_id, meta
+                    )
+
+                    for pcp_dcp_rank in range(len(remote_handshake_port_list)):
+                        for i in range(tp_num_need_pulls):
+                            assert self.kv_recv_thread is not None
+                            remote_host, remote_engine_id = self._get_remote_host_info_by_port(
+                                meta.remote_port,
+                                remote_handshake_port_list[pcp_dcp_rank][i],
+                                meta.remote_host,
+                                meta.remote_engine_id,
+                                meta.remote_multi_nodes_meta_mapping,
+                            )
+                            self.kv_recv_thread.add_request(
+                                request_id=req_id,
+                                remote_request_id=remote_req_id,
+                                local_block_ids=local_block_ids_list[pcp_dcp_rank],
+                                remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
+                                remote_engine_id=remote_engine_id,
+                                remote_host=remote_host,
+                                remote_handshake_port=remote_handshake_port_list[pcp_dcp_rank][i],
+                                offset=i,
+                                tp_num_need_pulls=tp_num_need_pulls,
+                                remote_port_send_num=self.remote_port_send_num[meta.remote_engine_id],
+                                all_task_done=(
+                                    pcp_dcp_rank == len(remote_handshake_port_list) - 1 and i == tp_num_need_pulls - 1
+                                ),
+                                prefill_parallelism_params=prefill_parallelism_params
+                            )
+                else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
+                    chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
+                    remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
+                    for i in range(tp_num_need_pulls * self._prefill_pp_size):
                         assert self.kv_recv_thread is not None
                         remote_host, remote_engine_id = self._get_remote_host_info_by_port(
                             meta.remote_port,
-                            remote_handshake_port_list[pcp_dcp_rank][i],
+                            remote_handshake_port_list[i][0],
                             meta.remote_host,
                             meta.remote_engine_id,
                             meta.remote_multi_nodes_meta_mapping,
@@ -1551,42 +1713,16 @@ class MooncakeConnectorWorker:
                         self.kv_recv_thread.add_request(
                             request_id=req_id,
                             remote_request_id=remote_req_id,
-                            local_block_ids=local_block_ids_list[pcp_dcp_rank],
-                            remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
+                            local_block_ids=meta.local_block_ids,
+                            remote_block_ids=meta.remote_block_ids,
                             remote_engine_id=remote_engine_id,
                             remote_host=remote_host,
-                            remote_handshake_port=remote_handshake_port_list[pcp_dcp_rank][i],
+                            remote_handshake_port=remote_handshake_port_list[i][0],
                             offset=i,
                             tp_num_need_pulls=tp_num_need_pulls,
-                            remote_port_send_num=self.remote_port_send_num[meta.remote_engine_id],
-                            all_task_done=(
-                                pcp_dcp_rank == len(remote_handshake_port_list) - 1 and i == tp_num_need_pulls - 1
-                            ),
+                            all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
+                            prefill_parallelism_params= prefill_parallelism_params
                         )
-            else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
-                chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
-                for i in range(tp_num_need_pulls * self._prefill_pp_size):
-                    assert self.kv_recv_thread is not None
-                    remote_host, remote_engine_id = self._get_remote_host_info_by_port(
-                        meta.remote_port,
-                        remote_handshake_port_list[i][0],
-                        meta.remote_host,
-                        meta.remote_engine_id,
-                        meta.remote_multi_nodes_meta_mapping,
-                    )
-                    self.kv_recv_thread.add_request(
-                        request_id=req_id,
-                        remote_request_id=remote_req_id,
-                        local_block_ids=meta.local_block_ids,
-                        remote_block_ids=meta.remote_block_ids,
-                        remote_engine_id=remote_engine_id,
-                        remote_host=remote_host,
-                        remote_handshake_port=remote_handshake_port_list[i][0],
-                        offset=i,
-                        tp_num_need_pulls=tp_num_need_pulls,
-                        all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
-                    )
 
         for req_id in metadata.reqs_in_batch:
             if self.kv_send_thread is not None:
@@ -1594,14 +1730,19 @@ class MooncakeConnectorWorker:
             if self.kv_recv_thread is not None:
                 self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
-            for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in self._prefill_get_remote_rank(req_id):
-                    self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
-                else:
-                    self.kv_send_thread.add_not_transfer_request(req_id)
+        # # TODO P节点主要执行下面流程，延迟释放
+        # if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
+        #     for req_id, delay_start_time in metadata.requests_to_send.items():
+        #         if self.tp_rank in self._prefill_get_remote_rank(req_id):
+        #             self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
+        #         else:
+        #             self.kv_send_thread.add_not_transfer_request(req_id)
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size > 1:
+        # if self.kv_send_thread is not None and self.pcp_size * self.dcp_size > 1:
+        #     for req_id, delay_start_time in metadata.requests_to_send.items():
+        #         self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
+
+        if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
@@ -1609,8 +1750,8 @@ class MooncakeConnectorWorker:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
 
-        if prefill_tp_size == self._prefill_tp_size:
-            return self.tp_num_need_pulls
+        # if prefill_tp_size == self._prefill_tp_size:
+        #     return self.tp_num_need_pulls
 
         if self.vllm_config.model_config.is_deepseek_mla:
             tp_num_need_pulls = 1
