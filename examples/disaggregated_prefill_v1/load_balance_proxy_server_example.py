@@ -119,7 +119,6 @@ import functools
 import heapq
 import ipaddress
 import json
-import math
 import os
 import sys
 import threading
@@ -133,7 +132,7 @@ from typing import List, Optional
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from dynamic_bucket_load_balancer import DynamicBucketLoadBalancer, Task, Bucket
+from dynamic_bucket_load_balancer import DynamicBucketLoadBalancer, Task, Bucket, ServerInfo
 
 try:
     from vllm.logger import init_logger
@@ -216,8 +215,10 @@ class ProxyState:
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
 
-        self.num_prefill_groups = global_args.num_prefill_groups
-        self.prefill_group_threshold = global_args.prefill_group_threshold
+        if global_args.enable_dynamic_bucket:
+            self.num_prefill_groups = 2 # 启用动态分桶时的分组数量
+        else:
+            self.num_prefill_groups = 1 # 默认不分组
 
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
@@ -243,18 +244,16 @@ class ProxyState:
         # add dynamic bucket load balancer
         self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
         if global_args.enable_dynamic_bucket:
-            # TODO 动态分桶暂仅支持长短两个桶
+            self.prefill_group_threshold = global_args.prefill_group_threshold
             prefill_buckets = [(0, self.prefill_group_threshold),
                                (self.prefill_group_threshold, global_args.max_request_tokens)]
 
             if self.num_prefill_groups != len(prefill_buckets):
-                # TODO 当前暂不支持 桶 数量的动态调整，因此约束 桶 的数量必须和 分组数量一致
                 raise ValueError("Number of prefill groups must match number of prefill buckets")
 
-            self.bucket_load_balancer = DynamicBucketLoadBalancer(num_buckets=self.num_prefill_groups,
-                                                                  buckets=prefill_buckets,
-                                                                  affinity_strength=1.0,  # todo: 待调整（0~1.0）
-                                                                  log_func=logger.info)
+            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=prefill_buckets,
+                                                                  affinity_strength=1.0  # todo: 待调整（0~1.0）
+                                                                  )
 
         self.decoder_heap:List[ServerHeapItem] = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.decoder_heap)
@@ -393,8 +392,7 @@ class ProxyState:
         self.prefillers[idx].active_tokens -= token_count
         group_idx = self.server_idx_to_group_idx[idx]
         self.prefill_group_load[group_idx] -= token_count
-        if self.bucket_load_balancer is not None and task is not None:
-            # self.bucket_load_balancer.release_task_by_bucket_idx(group_idx, token_count)
+        if global_args.enable_dynamic_bucket and task is not None:
             self.bucket_load_balancer.release_task(task.id)
         # Update priority queue after releasing
         self._update_prefiller_priority(idx)
@@ -448,36 +446,11 @@ class ProxyState:
         """
         Find Best group by request length and current load of groups
         """
-        if self.bucket_load_balancer is not None:
+        if global_args.enable_dynamic_bucket:
             group_idx, task = self.bucket_load_balancer.dispatch_single_task(req_id, request_tokens, prefill_score)
             return group_idx, task
-
-        """
-        静态分桶选择桶的原则：
-        优先遵循基于请求长度的分组策略，仅当某个其他组的负载显著低于默认组（差值超过 4 * request_length）时，才会切换到负载更低的组，从而实现轻量级的负载均衡，避免频繁切换。
-        先根据请求长度找到对应的桶A，然后根据各桶负载，如果该请求落在某个桶B上后桶B负载小于桶A，则选择负载最少的桶B；否则，选择桶A
-        """
-        if self.num_prefill_groups == 1:
+        else:
             return 0, None
-
-        group_idx = self._find_group_by_threshold(request_tokens)
-        cur_load = self.prefill_group_load[group_idx]
-
-        # find free groups by load
-        match_groups = [(idx, load) for idx, load in self.prefill_group_load.items() if
-                        self._group_load_match(cur_load, group_idx, load, idx, prefill_score)]
-        if len(match_groups) > 0:
-            match_groups.sort(key=lambda item: item[1])
-            group_idx = match_groups[0][0]
-        return group_idx, None
-
-    def _find_group_by_threshold(self, request_length: int):
-        """
-        Currently, only the case where the group number is 1 or 2 is considered.
-        """
-        if request_length > self.prefill_group_threshold:
-            return 1
-        return 0
 
     async def add_instances(self, instance_type: str, instances: list[ServerState]) -> tuple[list[str], list[str]]:
         added_nodes, waiting_nodes = [], []
@@ -500,7 +473,7 @@ class ProxyState:
             if server in self.tainted_prefillers:
                 self.tainted_prefillers.remove(server)
 
-                # TODO 适配分桶
+                # 适配动态分桶
                 for group_idx, heap in enumerate(self.prefiller_heaps):
                     re_heapify_flag = False
                     for server_heap_item in heap:
@@ -607,10 +580,10 @@ class ProxyState:
             #             new_buckets[new_group_idx].task_count += 1
             #             new_buckets[new_group_idx].total_load += task.length
             for task in tasks.values():
-                if InstanceType.PREFILL == task.server_info[0]:
+                if InstanceType.PREFILL == task.server_info.instance_type:
                     # 更新 task 信息
-                    new_idx = old_idx_to_new_idx[task.server_info[1]]
-                    task.server_info[1] = new_idx
+                    new_idx = old_idx_to_new_idx[task.server_info.instance_idx]
+                    task.server_info.instance_idx = new_idx
                     new_group_idx = self.server_idx_to_group_idx[new_idx]
                     task.bucket_idx = new_group_idx
                     # 更新 bucket 信息
@@ -644,7 +617,6 @@ class ProxyState:
                 decoder_heap.append(ServerHeapItem(server_heap_item.priority, idx, server_heap_item.server))
                 idx += 1
 
-        # decoder_heap: [(priority_0, 0, server_0), (priority_1, 1, server_1)] -> [(priority_1, 0, server_1)]
         self.decoder_heap = decoder_heap
         heapq.heapify(self.decoder_heap)
         self.print_status(f"Remove decoder instances: {instances}.")
@@ -685,12 +657,6 @@ class ProxyState:
             "decode_instances": [str(server) for server in self.decoders],
         }
         print(f"{msg} Status: {status}")
-
-    def _group_load_match(self, cur_load: int, cur_idx, load: int, idx: int, request_length: int):
-        # simple group load balance
-        # TODO 是否需要随着 TODO asw 的逻辑更新下面的比较逻辑
-        # return cur_load - load > request_length * 4
-        return cur_load - load > request_length
 
 proxy_state: Optional[ProxyState] = None
 
@@ -764,11 +730,6 @@ def parse_args(args_list = None):
         default=10,
         help="Check interval (seconds) for waiting nodes to be started",
     )
-    parser.add_argument("--num-prefill-groups",
-                        type=int,
-                        default=1,
-                        choices=[1, 2],
-                        help="Number of prefill groups")
     parser.add_argument("--prefill-group-threshold",
                         type=int,
                         default=32 * 1024,
@@ -914,9 +875,6 @@ async def stream_service_response_with_retry(
 
 
 async def _handle_select_instance(api: str, req_data: Any, request_length: int):
-    # prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-    # logger.debug(f"Request length: {request_length}, Prefiller score: {prefiller_score}")
-    # request_id = await proxy_state.next_req_id()
     prefiller_score = 0
     # TODO asw 计算 prefiller_score 的逻辑在 num_prefill_groups 取不同值时不太一致
     if proxy_state.num_prefill_groups > 1:
@@ -926,10 +884,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     logger.debug(f"Request length: {request_length}, Prefiller score: {prefiller_score}")
     request_id = await proxy_state.next_req_id()
     # Select prefiller
-    # prefiller_idx = proxy_state.select_prefiller(prefiller_score)
-    # prefiller = proxy_state.prefillers[prefiller_idx]
-    request_tokens = request_length / 4.0
-    # group_idx, task = proxy_state.select_prefill_group(request_id,request_tokens,math.ceil(prefiller_score))
+    request_tokens = proxy_state.calculate_prefill_tokens(request_length)
     group_idx, task = proxy_state.select_prefill_group(request_id, request_tokens, prefiller_score)
 
     logger.warning(f'Test =====selected group_idx: {group_idx}')
@@ -937,7 +892,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_idx = proxy_state.select_prefiller(prefiller_score, group_idx)
 
     if global_args.enable_dynamic_bucket and task is not None:
-        task.server_info = (InstanceType.PREFILL,prefiller_idx)
+        task.server_info = ServerInfo(InstanceType.PREFILL,prefiller_idx)
 
     prefiller = proxy_state.prefillers[prefiller_idx]
     # Send request to prefiller
@@ -1178,13 +1133,11 @@ async def healthcheck():
 
 @app.post("/instances/add")
 async def handle_add_instances(request: Request):
-    # TODO 重新调整堆结构
     return await _handle_adjust_instances("add", request)
 
 
 @app.post("/instances/remove")
 async def handle_remove_instances(request: Request):
-    # TODO 重新调整堆结构
     return await _handle_adjust_instances("remove", request)
 
 

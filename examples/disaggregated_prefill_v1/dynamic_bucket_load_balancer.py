@@ -1,10 +1,9 @@
-import random
-from queue import Queue
+from collections import namedtuple
 from typing import AnyStr, Tuple, List, Dict
 
 import math
-import numpy
 
+ServerInfo = namedtuple('ServerInfo', ['instance_type', 'instance_idx'])
 
 class Task:
     """模拟任务(仅包含长度信息)"""
@@ -13,11 +12,11 @@ class Task:
         self.id = task_id
         self.length = task_length
         self.bucket_idx = -1
-        self.load = 0.0
-        self.server_info = ("Unknown", -1)
+        self.load = task_load
+        self.server_info: ServerInfo = ServerInfo("Unknown", -1)
 
     def __repr__(self):
-        return f"Task(id={self.id}, length={self.length}, load={self.load},instance_type={self.server_info[0]}, instance_idx={self.server_info[1]})"
+        return f"Task(id={self.id}, length={self.length}, load={self.load},instance_type={self.server_info.instance_type}, instance_idx={self.server_info.instance_idx})"
 
 
 class Bucket:
@@ -36,18 +35,16 @@ class DynamicBucketLoadBalancer:
     基于任务长度静态分桶，并根据桶的负载和长度亲和性动态调整新任务分配以实现负载均衡
     """
 
-    def __init__(self, num_buckets: int, buckets: List[Tuple[int, int]], sensitivity=100.0,
-                 affinity_strength=1.0, log_func=print, all_neighbor=False):
+    def __init__(self, buckets: List[Tuple[int, int]], sensitivity=100.0, affinity_strength=1.0, log_func=print, all_neighbor=False):
         """
         初始化负载均衡器
-        :param num_buckets: 桶的数量
         :param buckets: 每个桶的长度范围
         :param sensitivity: 对负载差距的敏感度系数，值越大，对差距越敏感（与长度相关，常见LLM序列范围优选值为100）
         :param affinity_strength: 长度亲和因子的强度系数，值越大，长度匹配度对概率的影响越大
         :param log_func: 日志打印函数
         :param all_neighbor: 是否将所有桶作为邻居（负载均衡的范围），False时仅将左右桶作为邻居
         """
-        self.num_buckets = num_buckets
+        self.num_buckets = len(buckets)
         self.sensitivity = sensitivity
         self.affinity_strength = affinity_strength
         self.log_func = log_func
@@ -79,16 +76,15 @@ class DynamicBucketLoadBalancer:
         for bucket_idx, bucket in self.buckets.items():
             if bucket.min_length <= task_length < bucket.max_length:
                 return bucket_idx
+        # 如果长度不在各桶长度范围内，则返回最后一个桶
         return self.num_buckets - 1
 
     def _get_neighbor_indices(self, bucket_idx):
         """获取指定桶的左右邻居索引"""
-        neighbors = []
         if self.all_neighbor:
-            for idx in range(self.num_buckets):
-                neighbors.append(idx)
-            return neighbors
+            return list(range(self.num_buckets))
 
+        neighbors = []
         if bucket_idx > 0:
             neighbors.append(bucket_idx - 1)
         if bucket_idx < self.num_buckets - 1:
@@ -244,24 +240,6 @@ class DynamicBucketLoadBalancer:
             bucket.total_load = 0
         self.tasks.clear()
 
-    def print_status(self):
-        """打印当前各桶的状态"""
-        self._log_info("--- Bucket Status ---")
-        load_list = []
-        for idx in range(self.num_buckets):
-            bucket = self.buckets[idx]
-            load_list.append(bucket.total_load)
-            avg_load = bucket.total_load / bucket.task_count if bucket.task_count > 0 else 0
-            self._log_info(f"Bucket {idx}: {bucket.task_count} tasks, "
-                           f"Total Load: {bucket.total_load:.2f}, Avg Load/Task: {avg_load:.2f}")
-        if self.total_tasks > 0:
-            self._log_info(f"Total Tasks: {self.total_tasks}, Redirected: {self.redirected_tasks}, "
-                           f"Redirect Rate: {self.redirected_tasks / self.total_tasks * 100:.2f}%")
-        load_std = numpy.std(load_list, ddof=1)
-        self._log_info(f"Var Load: {load_std:.2f}")
-        self._log_info("---------------------\n")
-        return load_std
-
 
 class NoStandardBucketLoadBalancer(DynamicBucketLoadBalancer):
 
@@ -277,68 +255,3 @@ class NoStandardBucketLoadBalancer(DynamicBucketLoadBalancer):
             start_length += bucket_range
         super().__init__(num_buckets=num_buckets, buckets=buckets, log_func=log_func,
                          sensitivity=100, affinity_strength=0, all_neighbor=True)
-
-
-# --- 示例运行 ---
-if __name__ == "__main__":
-    # 1. 初始化均衡器
-    balancer = DynamicBucketLoadBalancer(num_buckets=2,
-                                         buckets=[(1, 16 * 1024), (16 * 1024, 64 * 1024)],
-                                         sensitivity=100, affinity_strength=1, all_neighbor=True)
-    # balancer = NoStandardBucketLoadBalancer(num_buckets=2, max_length=64*1024)
-
-    balancer.print_status()
-
-    # 2. 处理新任务流
-    print("Processing new incoming tasks...")
-    incoming_tasks = []
-    total_tasks = 1920
-    for i in range(total_tasks):
-        # 生成任务，参考新浪数据集
-        # 包含一些边界情况，测试亲和因子的作用
-        r = random.random()
-        if r < 0.11:  # 11% 1~4K
-            length = random.randint(1, 4 * 1024)
-        elif r < 0.25:  # 14% 4~8K
-            length = random.randint(4 * 1024, 8 * 1024)
-        elif r < 0.40:  # 15% 8~12K
-            length = random.randint(8 * 1024, 12 * 1024)
-        elif r < 0.55:  # 15% 12~16K
-            length = random.randint(12 * 1024, 16 * 1024)
-        elif r < 0.67:  # 12% 16~20K
-            length = random.randint(16 * 1024, 20 * 1024)
-        elif r < 0.76:  # 9% 20~24K
-            length = random.randint(20 * 1024, 24 * 1024)
-        elif r < 0.82:  # 6% 24~28K
-            length = random.randint(24 * 1024, 28 * 1024)
-        elif r < 0.87:  # 5% 28~32K
-            length = random.randint(28 * 1024, 32 * 1024)
-        else:  # 13% 32~64K
-            length = random.randint(32 * 1024, 64 * 1024)
-
-        incoming_tasks.append(Task(f"Incoming_{i}", length))
-
-    print("--- Task Assignment Log ---")
-    for task in incoming_tasks:
-        assigned_bucket = balancer.dispatch_task(task)
-
-    batch_num = 192
-    batch = batch_num
-    total_load_std = 0
-    for task in incoming_tasks:
-        batch -= 1
-        if batch < 0:
-            total_load_std += balancer.print_status()
-            balancer.release_all_tasks()
-            batch = batch_num - 1
-        assigned_bucket = balancer.dispatch_task(task)
-
-
-    # 3. 打印统计结果
-    total_load_std += balancer.print_status()
-    print(f"--- Total Load Std --- {total_load_std / (total_tasks / batch_num) / 1024:.2f}")
-
-    # 4. 释放请求
-    balancer.release_task("Incoming_0")
-    balancer.release_task("Incoming_1000")
-    balancer.release_all_tasks()
