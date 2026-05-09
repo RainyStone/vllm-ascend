@@ -60,7 +60,6 @@ class DynamicBucketLoadBalancer:
         self._log_info(f"Load Balance base_probability_threshold: {self.base_probability_threshold:.2f} ")
 
         # 保存task
-        # self.tasks: Dict[AnyStr, Queue] = {}
         self.tasks: Dict[AnyStr, Task] = {}
 
         # 统计信息
@@ -154,9 +153,6 @@ class DynamicBucketLoadBalancer:
     def dispatch_single_task(self, task_id: AnyStr, task_length: int,task_load):
         return self.dispatch_task(Task(task_id, task_length,task_load))
 
-    # def dispatch_task_without_id(self, task_length: int):
-    #     return self.dispatch_task(Task("Unknown", task_length))
-
     def dispatch_task(self, cur_task):
         """
         为新任务分配桶，考虑动态负载均衡和长度亲和性
@@ -191,13 +187,8 @@ class DynamicBucketLoadBalancer:
 
         # 将任务分配给最终选定的桶（更新统计信息）
         self.buckets[final_bucket_idx].task_count += 1
-        # self.buckets[final_bucket_idx].total_load += cur_task.length
         self.buckets[final_bucket_idx].total_load += cur_task.load
         cur_task.bucket_idx = final_bucket_idx
-        # if cur_task.id != "Unknown":
-        #     if cur_task.id not in self.tasks:
-        #         self.tasks[cur_task.id] = Queue()
-        #     self.tasks[cur_task.id].put(cur_task)
 
         if cur_task.id in self.tasks:
             raise RuntimeError(f"Task {cur_task.id} is existed!")
@@ -207,32 +198,16 @@ class DynamicBucketLoadBalancer:
         return final_bucket_idx, cur_task
 
     def release_task(self, task_id: AnyStr):
-        # if task_id in self.tasks and not self.tasks[task_id].empty():
-        #     found_task = self.tasks[task_id].get()
-        #     if self.tasks[task_id].empty():
-        #         self.tasks.pop(task_id)
         if task_id in self.tasks:
             found_task = self.tasks.pop(task_id)
             if 0 <= found_task.bucket_idx < self.num_buckets:
                 self.buckets[found_task.bucket_idx].task_count -= 1
-                # self.buckets[found_task.bucket_idx].total_load -= found_task.length
                 self.buckets[found_task.bucket_idx].total_load -= found_task.load
                 return True
             else:
                 raise RuntimeError(f"Bucket {found_task.bucket_idx} not found")
         else:
             raise RuntimeError(f"Task {task_id} not found")
-
-        # self._log_info(f"Task {task_id} not found")
-        # return False
-
-    # def release_task_by_bucket_idx(self, bucket_idx: int, task_length: int):
-    #     if 0 <= bucket_idx < self.num_buckets:
-    #         self.buckets[bucket_idx].task_count -= 1
-    #         self.buckets[bucket_idx].total_load -= task_length
-    #         return True
-    #     self._log_info(f"Bucket {bucket_idx} not found")
-    #     return False
 
     def release_all_tasks(self):
         for bucket in self.buckets.values():
