@@ -253,5 +253,5 @@ class NoStandardBucketLoadBalancer(DynamicBucketLoadBalancer):
                 end_length = max_length
             buckets.append((start_length, end_length))
             start_length += bucket_range
-        super().__init__(num_buckets=num_buckets, buckets=buckets, log_func=log_func,
+        super().__init__(buckets=buckets, log_func=log_func,
                          sensitivity=100, affinity_strength=0, all_neighbor=True)
