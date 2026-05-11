@@ -228,6 +228,7 @@ class ProxyState:
         # 对Server进行分组
         self.prefiller_heaps: List[List[ServerHeapItem]] = self._group_servers(prefiller_heap_items, self.num_prefill_groups)
         self.server_idx_to_group_idx = {}
+        # TODO self.prefill_group_load 可以删掉？
         self.prefill_group_load = {}
         # 堆化每一分组
         for idx, cur_heap in enumerate(self.prefiller_heaps):
