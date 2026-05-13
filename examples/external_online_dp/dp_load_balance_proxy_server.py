@@ -320,7 +320,7 @@ def parse_args():
                         default=128 * 1024,
                         help="Max tokens of request")
     parser.add_argument("--enable-dynamic-bucket",
-                        type=bool,
+                        action="store_true",
                         default=False,
                         help="Enable dynamic bucket load Balancer")
 
