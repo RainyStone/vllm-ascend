@@ -253,7 +253,7 @@ class ProxyState:
         return request_length
 
 
-proxy_state = None
+proxy_state:ProxyState = None
 
 
 def parse_args():

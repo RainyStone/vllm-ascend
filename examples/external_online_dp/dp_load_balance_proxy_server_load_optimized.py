@@ -262,11 +262,11 @@ class ProxyState:
 
         return chosen_server_idx
 
-    def release_server(self, idx: int, token_count,req_id=None):  # Changed to synchronous
+    def release_server(self, idx: int, token_count,task=None):  # Changed to synchronous
         # No lock needed - atomic operation
         self.dp_servers[idx].active_tokens -= token_count
-        if global_args.enable_dynamic_bucket and req_id is not None:
-            self.bucket_load_balancer.release_task(req_id)
+        if global_args.enable_dynamic_bucket and task is not None:
+            self.bucket_load_balancer.release_task(task.id)
         # Update priority queue after releasing
         self._update_server_priority(idx)
 
