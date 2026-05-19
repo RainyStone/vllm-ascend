@@ -1,8 +1,8 @@
 from typing import Optional
 import httpx
-from base import BaseLoadCollector
-from vllm_collector import VLLMMetricsCollector
-from metric_load_calculator import BaseLoadCalculator, DefaultLoadCalculator
+from .base import BaseLoadCollector
+from .vllm_collector import VLLMMetricsCollector
+from .metric_load_calculator import BaseLoadCalculator, DefaultLoadCalculator
 
 def create_load_collector(backend_type: str,
                           client: httpx.AsyncClient,

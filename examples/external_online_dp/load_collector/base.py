@@ -32,4 +32,4 @@ class LoadUpdateConfig:
                  scale_factor: int = 1000):
         self.interval_seconds = interval_seconds
         self.fallback_load = fallback_load      # 采集失败时使用的负载值
-        self.scale_factor = scale_factor        # 负载小数转换为整数 active_tokens 的乘数
+        self.scale_factor = scale_factor
