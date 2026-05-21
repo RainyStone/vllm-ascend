@@ -436,8 +436,7 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, decode_cp_size, remote_port_send_num)
             if all_task_done:
-                if len(req_meta["local_block_ids"]) > 0:
-                    self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
             self.request_queue.task_done()
@@ -1678,6 +1677,11 @@ class MooncakeConnectorWorker:
                     req_id, meta
                 )
                 decode_cp_size = len(meta.local_dycp_ranks) if meta.local_dycp_ranks else None
+
+                # if not remote_handshake_port_list:
+                #     assert self.kv_recv_thread is not None
+                #     self.kv_recv_thread.task_tracker.add_not_transfer_request(req_id)
+                #     continue
 
                 for pcp_dcp_rank in range(len(remote_handshake_port_list)):
                     for i in range(tp_num_need_pulls):
