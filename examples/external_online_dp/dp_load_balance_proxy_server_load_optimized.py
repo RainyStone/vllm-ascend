@@ -83,19 +83,22 @@
 import argparse
 import asyncio
 import functools
-import heapq
 import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from dynamic_bucket_load_balancer import DynamicBucketLoadBalancer, Task, Bucket, ServerInfo
+from dynamic_bucket_load_balancer_load_optimized import DynamicBucketLoadBalancer, Task, ServerInfo
+from load_collector.factory import create_load_collector
+from load_collector.base import LoadUpdateConfig
+from load_collector.metric_load_calculator import KvCacheAwareCalculator
+from token_estimator import create_token_estimator, TokenEstimator
 
 try:
     from vllm.logger import init_logger
@@ -116,7 +119,7 @@ except ImportError:
 
 
 class ServerState:
-    def __init__(self, host, port):
+    def __init__(self, host, port,total_kv_blocks: int, block_size: int,idx: int, max_num_seqs: int):
         self.host = host
         self.port = port
         self.url = f"http://{host}:{port}/v1"
@@ -125,8 +128,16 @@ class ServerState:
             base_url=self.url,
             limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
         )
-        self.active_tokens = 0
-        self.aborted_requests = set()  # Track aborted requests
+        self.idx = idx  # 在 dp_servers 中的索引
+        self.realtime_load = 0.0  # 0~1 之间的归一化负载
+        self.inflight_tokens = 0.0  # 请求进来时处理的token数 (即prompt的token数，一定程度上可反应prefill阶段的负载)
+
+        self.total_kv_blocks = total_kv_blocks  # 推理后端总 KV block 数
+        self.block_size = block_size  # 每个 block 的 token 数
+        self.max_num_seqs = max_num_seqs  # batch_size大小
+        self.latest_metrics: Dict[str, float] = {}  # 最近一次抓取的 metrics 数据
+        self.calculator = None  # 绑定的负载计算器
+
 
     def __eq__(self, other):
         self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
@@ -140,43 +151,39 @@ class ServerState:
     def __repr__(self):
         return f"{self.host}:{self.port}"
 
-@dataclass(order=True)
-class ServerHeapItem:
-    priority: float
-    server_idx: int
-    server: ServerState
-
 class ProxyState:
-    def __init__(self, server_instances):
-        self.dp_servers: list[ServerState] = [ServerState(h, p) for h, p in server_instances]
+    def __init__(
+            self,
+            server_instances,     # [(host, port, total_blocks, block_size, max_num_seqs), ...]
+            collect_config: Optional[LoadUpdateConfig] = None,
+            token_estimator: Optional[TokenEstimator] = None,
+    ):
+        # 修改：按 5 元组展开，传入 total_kv_blocks / block_size / idx / max_num_seqs
+        self.dp_servers: list[ServerState] = [
+            ServerState(h, p, total_kv_blocks=b, block_size=bs, idx=i,max_num_seqs=ms) for i, (h, p, b, bs, ms) in enumerate(server_instances)
+        ]
+
+        self.token_estimator = token_estimator or create_token_estimator("char")
         self.req_id_lock = asyncio.Lock()
-        # Removed selection locks - no longer needed for synchronous methods
 
         if global_args.enable_dynamic_bucket:
             self.num_dp_groups = 2 # 启用动态分桶时的分组数量
         else:
             self.num_dp_groups = 1 # 默认不分组
 
-        # Initialize priority queues for efficient server selection
-        # Each entry is (priority_score, server_index, server_reference)
-        # Lower priority score = higher priority (less loaded)
-        dp_heap_items = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.dp_servers)]
         # 对Server进行分组
-        self.dp_heaps: List[List[ServerHeapItem]] = self._group_servers(dp_heap_items, self.num_dp_groups)
+        self.dp_groups: List[List[ServerState]] = self._group_servers(self.dp_servers, self.num_dp_groups)
+
+        # 记录每个服务器所属的组索引（可选，用于 release_server 快速定位）
         self.server_idx_to_group_idx = {}
+        for group_idx, group in enumerate(self.dp_groups):
+            for server in group:
+                self.server_idx_to_group_idx[server.idx] = group_idx
 
-        # 堆化每一分组
-        for idx, cur_heap in enumerate(self.dp_heaps):
-            for server_item in cur_heap:
-                self.server_idx_to_group_idx[server_item.server_idx] = idx
-            heapq.heapify(cur_heap)
-
-        logger.warning(f'Test==== len(self.dp_heaps): {len(self.dp_heaps)}')
-        logger.warning(f'Test==== self.dp_heaps: {self.dp_heaps}')
-
+        logger.warning(f'Test==== self.dp_groups: {self.dp_groups}')
         logger.warning(f'Test==== global_args.enable_dynamic_bucket: {global_args.enable_dynamic_bucket}')
 
-        # add dynamic bucket load balancer
+        # 初始化 DynamicBucketLoadBalancer
         self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
         if global_args.enable_dynamic_bucket:
             self.dp_group_threshold = global_args.dp_group_threshold
@@ -187,24 +194,93 @@ class ProxyState:
                 raise ValueError("Number of dp groups must match number of dp buckets")
 
             self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=dp_buckets,
-                                                                  affinity_strength=1.0  # todo: 待调整（0~1.0）
-                                                                  )
+                                                                  sensitivity=100.0,
+                                                                  affinity_strength=1.0)
+
+        # 初始化负载采集器
+        self.collect_config = collect_config or LoadUpdateConfig()
+        self.collectors = []
+        for server in self.dp_servers:
+            calculator = KvCacheAwareCalculator(server.total_kv_blocks, server.block_size,max_num_seqs=server.max_num_seqs)
+            collector = create_load_collector("vllm", server.client, calculator)
+            server.calculator = calculator
+            self.collectors.append(collector)
+
+        self._load_update_task = None
+
+    def _update_bucket_loads_from_metrics(self):
+        """从负载采集模块获取每个服务器的负载，然后聚合到桶"""
+        if global_args.enable_dynamic_bucket:
+            group_loads = []
+            for group_idx, group in enumerate(self.dp_groups):
+                # 获取该组所有服务器的负载
+                loads = []
+                for server in group:
+                    # 这里需要从 server 获取实时负载，可以是在 ServerState 中由采集器更新的属性
+                    loads.append(server.realtime_load)
+                avg_load = sum(loads) / len(loads) if loads else 0.0
+                group_loads.append(avg_load)
+
+            self.bucket_load_balancer.update_bucket_loads(group_loads)
+
+    async def start_load_updater(self):
+        """启动后台负载更新任务（并行采集、请求超时、固定间隔）"""
+
+        async def _update_loop():
+            while True:
+                start = asyncio.get_event_loop().time()
+
+                # 单个后端的采集协程
+                async def update_one(idx, server):
+                    collector = self.collectors[idx]
+                    try:
+                        metrics = await asyncio.wait_for(
+                            collector.fetch_metrics(server.url.replace("/v1", "")),
+                            timeout=5.0
+                        )
+                        if metrics is not None:
+                            server.latest_metrics = metrics
+                            server.realtime_load = collector.load_calculator.calculate(metrics)
+                        else:
+                            # 采集失败，设为 fallback 高负载以避免分配
+                            server.latest_metrics = {}
+                            server.realtime_load = self.collect_config.fallback_load * self.collect_config.scale_factor
+                            logger.warning(f'Failed to fetch metrics for server: {server}, reason: fetched metrics is None')
+                    except asyncio.TimeoutError:
+                        server.latest_metrics = {}
+                        server.realtime_load = self.collect_config.fallback_load * self.collect_config.scale_factor
+                        logger.warning(f'Failed to fetch metrics for server: {server}, reason: Timeout')
+
+                # 并行采集所有后端
+                results = await asyncio.gather(
+                    *[update_one(i, s) for i, s in enumerate(self.dp_servers)],
+                    return_exceptions=True
+                )
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Load update failed for server {self.dp_servers[i]}: {result}")
+
+                # 更新桶的负载（仅当启用动态分桶时）
+                self._update_bucket_loads_from_metrics()
+
+                # 精确控制间隔，扣除采集耗时
+                elapsed = asyncio.get_event_loop().time() - start
+                logger.warning(f'Test=========== 采集耗时: {elapsed}')
+                await asyncio.sleep(max(0.0, self.collect_config.interval_seconds - elapsed))
+
+        self._load_update_task = asyncio.create_task(_update_loop())
+
+    async def stop_load_updater(self):
+        if self._load_update_task:
+            self._load_update_task.cancel()
+            try:
+                await self._load_update_task
+            except asyncio.CancelledError:
+                pass
 
     @staticmethod
-    def _group_servers(servers: List[ServerHeapItem], num_groups: int):
-        """
-        Group servers into num_groups groups.
-
-        Args:
-            servers (list): servers to be grouped.
-            num_groups (int): num of groups.
-
-        Returns:
-            list[list]: grouped list of servers.
-
-        Raises:
-            ValueError: if num_groups <= 0.
-        """
+    def _group_servers(servers: List[ServerState], num_groups: int):
+        """ Group servers into num_groups groups. """
         if num_groups <= 0:
             raise ValueError("Num of group is illegal")
 
@@ -230,63 +306,59 @@ class ProxyState:
 
         return groups
 
-    def _update_server_priority(self, server_idx: int):
-        """Update the priority of a decoder server in the heap."""
-        server = self.dp_servers[server_idx]
-        priority = server.active_tokens
-        # Remove old entry and add new one
-        group_idx = self.server_idx_to_group_idx[server_idx]
+    def next_req_id(self):
+        return str(uuid.uuid4())
 
-        self.dp_heaps[group_idx] = [server_heap_item for server_heap_item in self.dp_heaps[group_idx] if
-                                           server_heap_item.server_idx != server_idx]
-        self.dp_heaps[group_idx].append(ServerHeapItem(priority, server_idx, server))
-        heapq.heapify(self.dp_heaps[group_idx])
-
-    async def next_req_id(self):
-        async with self.req_id_lock:
-            return str(uuid.uuid4())
-
-    def select_server(self, token_count, group_idx=0):  # Changed to synchronous
-        # No lock needed - entire function is atomic
+    def select_server(self,group_idx,estimated_tokens):
         if not self.dp_servers:
             raise RuntimeError("No decoder servers available")
 
-        server_heap_item: ServerHeapItem = heapq.heappop(self.dp_heaps[group_idx])
-        chosen_server_idx = server_heap_item.server_idx
+        group:List[ServerState] = self.dp_groups[group_idx]
+        if not group:
+            raise RuntimeError(f"No servers in group {group_idx}")
 
-        # Update the chosen server atomically
-        self.dp_servers[chosen_server_idx].active_tokens += token_count
+        # 新增：请求感知的评分函数
+        def server_score(s: ServerState):
+            if s.calculator and s.latest_metrics and estimated_tokens > 0:
+                req_load = s.calculator.calculate(s.latest_metrics, estimated_tokens)
+            else:
+                req_load = s.realtime_load
+            # 按 inflight_tokens 惩罚，系数 1e-6 可调
+            return req_load + s.inflight_tokens * 1e-6
 
-        # Update priority and re-add to heap
-        self._update_server_priority(chosen_server_idx)
+        chosen_server = min(group, key=server_score)
+        chosen_server.inflight_tokens += estimated_tokens
+        return chosen_server.idx
 
-        return chosen_server_idx
-
-    def release_server(self, idx: int, token_count,task=None):  # Changed to synchronous
+    def release_server(self, idx: int,  release_tokens: float, req_id):  # Changed to synchronous
         # No lock needed - atomic operation
-        self.dp_servers[idx].active_tokens -= token_count
-        if global_args.enable_dynamic_bucket and task is not None:
-            self.bucket_load_balancer.release_task(task.id)
-        # Update priority queue after releasing
-        self._update_server_priority(idx)
+        server = self.dp_servers[idx]
+        server.inflight_tokens = max(0.0, server.inflight_tokens - release_tokens)
 
-    def calculate_request_score(self, request_length: int, max_tokens: int = 16, ignore_eos: bool = False) -> float:
+        if global_args.enable_dynamic_bucket and req_id is not None:
+            self.bucket_load_balancer.release_task(req_id)
+
+    def estimate_input_tokens(self, req_data: dict) -> float:
+        """使用配置的估算策略计算输入 token 数"""
+        return self.token_estimator.estimate(req_data)
+
+    def calculate_request_score(self, estimated_tokens: float, max_tokens: int = 16, ignore_eos: bool = False) -> float:
         if ignore_eos:
-            return request_length + max_tokens
+            return estimated_tokens + max_tokens
         else:
             # Note that 0.5 is an empirical value here because we don't know
             # the actual number of tokens generated before EOS.
-            return request_length + 0.5 * max_tokens
+            return estimated_tokens + 0.5 * max_tokens
 
-    def calculate_request_tokens(self, request_length: int) -> float:
-        return request_length / 4.0
+    def calculate_request_tokens(self, estimated_tokens: float) -> float:
+        return estimated_tokens
 
     def select_dp_group(self, req_id: str, request_tokens, priority_score) -> tuple[int, Task | None]:
         """
         Find Best group by request length and current load of groups
         """
         if global_args.enable_dynamic_bucket:
-            group_idx, task = self.bucket_load_balancer.dispatch_single_task(req_id, request_tokens, priority_score)
+            group_idx, task = self.bucket_load_balancer.dispatch_task(Task(req_id, request_tokens, priority_score))
             return group_idx, task
         else:
             return 0, None
@@ -319,19 +391,60 @@ def parse_args():
                         default=False,
                         help="Enable dynamic bucket load Balancer")
 
+    # 新增：KV cache 容量配置
+    parser.add_argument("--dp-total-blocks",
+                        type=int,
+                        nargs="+",
+                        required=True,
+                        help="Total KV cache blocks for each DP backend. Must match --dp-hosts count.")
+    parser.add_argument("--dp-block-size",
+                        type=int,
+                        nargs="+",
+                        required=True,
+                        help="KV cache block size (tokens per block) for each DP backend. ")
+    parser.add_argument("--max-num-seqs",
+                        type=int,
+                        nargs="+",
+                        default=None,
+                        help="vLLM max_num_seqs for each DP backend, used for compute pressure normalization. "
+                             "Must match --dp-hosts count, or provide exactly one value for all.")
+
     args = parser.parse_args()
-    if len(args.dp_hosts) != len(args.dp_ports):
+    n=len(args.dp_hosts)
+    if len(args.dp_hosts) != n:
         raise ValueError("Number of dp hosts must match number of dp ports")
-    args.server_instances = list(zip(args.dp_hosts, args.dp_ports))
+
+    # 新增：校验并补全 dp-total-blocks / dp-block-size
+    if len(args.dp_total_blocks) != n:
+        raise ValueError("--dp-total-blocks count must match --dp-hosts count")
+
+    if len(args.dp_block_size) == 1:
+        args.dp_block_size = args.dp_block_size * n
+    elif len(args.dp_block_size) != n:
+        raise ValueError("--dp-block-size count must match --dp-hosts count, or provide exactly one value")
+
+    if len(args.max_num_seqs) == 1:
+        args.max_num_seqs = args.max_num_seqs * n
+    elif len(args.max_num_seqs) != n:
+        raise ValueError("--max-num-seqs count must match --dp-hosts count, or provide exactly one value")
+
+    args.server_instances = [
+        (h, p, b, bs, ms) for h, p, b, bs, ms in zip(args.dp_hosts, args.dp_ports, args.dp_total_blocks, args.dp_block_size,args.max_num_seqs)
+    ]
+
+    logger.warning(f"Test===========args.server_instances: {args.server_instances}")
+
     return args
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy_state
-    proxy_state = ProxyState(global_args.server_instances)
+    proxy_state = ProxyState(global_args.server_instances, LoadUpdateConfig(interval_seconds=1.0))
     print(f"Initialized {len(proxy_state.dp_servers)} dp server clients.")
+    await proxy_state.start_load_updater()
     yield
+    await proxy_state.stop_load_updater()
     for p in proxy_state.dp_servers:
         await p.client.aclose()
 
@@ -402,28 +515,28 @@ async def stream_service_response_with_retry(
                     raise e
 
 
-async def _select_instance(api: str, req_data: Any, request_length: int):
+async def _select_instance(api: str, req_data: Any, estimated_tokens: float):
     # refer to vLLM sampling_params: max_token default value
     max_tokens = req_data.get("max_tokens", 16)
     ignore_eos = req_data.get("ignore_eos", False)
     priority_score = 0
     if proxy_state.num_dp_groups > 1:
-        priority_score = proxy_state.calculate_request_tokens(request_length)
+        priority_score = proxy_state.calculate_request_tokens(estimated_tokens)
     else:
-        priority_score = proxy_state.calculate_request_score(request_length, max_tokens=max_tokens, ignore_eos=ignore_eos)
+        priority_score = proxy_state.calculate_request_score(estimated_tokens, max_tokens=max_tokens,ignore_eos=ignore_eos)
 
     logger.debug(
-        f"Request length: {request_length}, max tokens: {max_tokens}, "
+        f"Estimated tokens: {estimated_tokens}, max tokens: {max_tokens}, "
         f"ignore_eos: {ignore_eos}, Priority score: {priority_score}"
     )
-    request_id = await proxy_state.next_req_id()
+    request_id = proxy_state.next_req_id()
     # Select dp server based on priority score
-    request_tokens = proxy_state.calculate_request_tokens(request_length)
+    request_tokens = proxy_state.calculate_request_tokens(estimated_tokens)
     group_idx, task = proxy_state.select_dp_group(request_id, request_tokens, priority_score)
 
     logger.warning(f'Test =====selected group_idx: {group_idx}')
 
-    server_idx = proxy_state.select_server(priority_score, group_idx)
+    server_idx = proxy_state.select_server(group_idx,estimated_tokens)
 
     if global_args.enable_dynamic_bucket and task is not None:
         task.server_info = ServerInfo("DP",server_idx)
@@ -448,9 +561,8 @@ class InstanceInfo:
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
-        req_body = await request.body()
-        request_length = len(req_body)
-        instance_info = await _select_instance(api, req_data, request_length)
+        estimated_tokens = proxy_state.estimate_input_tokens(req_data)
+        instance_info = await _select_instance(api, req_data, estimated_tokens)
 
         async def generate_stream():
             nonlocal instance_info
@@ -470,9 +582,9 @@ async def _handle_completions(api: str, request: Request):
                     f"Error during streaming from server {instance_info.server_state.url}: {str(e)}, "
                     f"the aborted request is: {instance_info.request_id}."
                 )
-
-            # After streaming done, release tokens
-            proxy_state.release_server(instance_info.server_idx, instance_info.priority_score)
+            finally:
+                # After streaming done, release tokens
+                proxy_state.release_server(instance_info.server_idx,estimated_tokens,instance_info.request_id)
 
         return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:

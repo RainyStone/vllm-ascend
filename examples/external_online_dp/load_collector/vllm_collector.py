@@ -1,9 +1,10 @@
 import re
-from typing import Optional
+from collections import defaultdict
+from typing import Optional, Dict
 
 import httpx
-from base import BaseLoadCollector
-from metric_load_calculator import BaseLoadCalculator, DefaultLoadCalculator
+from .base import BaseLoadCollector
+from .metric_load_calculator import BaseLoadCalculator, DefaultLoadCalculator
 
 class VLLMMetricsCollector(BaseLoadCollector):
     """基于 vLLM /metrics 端点的负载采集器"""
@@ -12,18 +13,28 @@ class VLLMMetricsCollector(BaseLoadCollector):
         self.client = client
         self.load_calculator = load_calculator or DefaultLoadCalculator()
 
-    async def fetch_load(self, server_url: str) -> Optional[float]:
-        """获取负载值（0~1 之间）"""
+    # 新增：获取原始 metrics 字典
+    async def fetch_metrics(self, server_url: str) -> Optional[Dict[str, float]]:
         try:
             resp = await self.client.get(f"{server_url}/metrics")
             resp.raise_for_status()
-            metrics_text = resp.text
-            metrics = self._parse_metrics(metrics_text)
-            load = self.load_calculator.calculate(metrics)
-            return load
-        except Exception as e:
-            # 日志记录
+            return self._parse_metrics(resp.text)
+        except httpx.HTTPStatusError as e:
+            print(f"Metrics fetch HTTP error from {server_url}: {e.response.status_code}")
             return None
+        except httpx.RequestError as e:
+            print(f"Metrics fetch connection error from {server_url}: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error fetching metrics from {server_url}: {e}")
+            return None
+
+     # 修改：通过 fetch_metrics 计算 load # TODO 代码架构需要优化，现在外面是使用 fetch_metrics 再计算 load，而不是直接使用 fetch_load
+    async def fetch_load(self, server_url: str) -> Optional[float]:
+        metrics = await self.fetch_metrics(server_url)
+        if metrics is None:
+            return None
+        return self.load_calculator.calculate(metrics)
 
     async def health_check(self, server_url: str) -> bool:
         try:
@@ -34,16 +45,24 @@ class VLLMMetricsCollector(BaseLoadCollector):
 
     def _parse_metrics(self, text: str) -> dict:
         """解析 Prometheus 格式的 metrics，返回关键指标的字典"""
-        result = {}
-        # 指标名称与值的映射
+        accumulators = defaultdict(list)
         patterns = {
-            "kv_cache_usage_perc": r'vllm:kv_cache_usage_perc\s+([0-9.]+)',
-            "num_requests_running": r'vllm:num_requests_running\s+([0-9.]+)',
-            "num_requests_waiting": r'vllm:num_requests_waiting\s+([0-9.]+)',
-            # 可以继续添加其他需要的指标
+            "kv_cache_usage_perc": r'^vllm:kv_cache_usage_perc(?:\{[^}]*\})?\s+([0-9.eE+-]+)',
+            "num_requests_running": r'^vllm:num_requests_running(?:\{[^}]*\})?\s+([0-9.eE+-]+)',
+            "num_requests_waiting": r'^vllm:num_requests_waiting(?:\{[^}]*\})?\s+([0-9.eE+-]+)',
         }
-        for key, pattern in patterns.items():
-            match = re.search(pattern, text)
-            if match:
-                result[key] = float(match.group(1))
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            for key, pattern in patterns.items():
+                match = re.search(pattern, line)
+                if match:
+                    try:
+                        accumulators[key].append(float(match.group(1)))
+                    except ValueError:
+                        pass
+                    break
+        # TODO 取均值还是取总值
+        result = {k: sum(v) / len(v) for k, v in accumulators.items()}
         return result

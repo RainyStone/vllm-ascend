@@ -1,6 +1,5 @@
-import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 class BaseLoadCollector(ABC):
     """负载采集器抽象基类"""
