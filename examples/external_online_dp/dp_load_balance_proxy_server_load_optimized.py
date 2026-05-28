@@ -223,49 +223,49 @@ class ProxyState:
 
             self.bucket_load_balancer.update_bucket_loads(group_loads)
 
+    async def update_load_once(self) -> float:
+        """执行一轮负载更新，返回本次采集耗时（秒）。"""
+        start = asyncio.get_event_loop().time()
+        # 单个后端的采集协程
+        async def update_one(idx, server):
+            collector = self.collectors[idx]
+            try:
+                metrics = await asyncio.wait_for(collector.fetch_metrics(server.url.replace("/v1", "")), timeout=5.0)
+                if metrics is not None:
+                    server.latest_metrics = metrics
+                    server.realtime_load = collector.load_calculator.calculate(metrics)
+                else:
+                    # 采集失败，设为 fallback 高负载以避免分配
+                    server.latest_metrics = {}
+                    server.realtime_load = self.collect_config.fallback_load * self.collect_config.scale_factor
+                    logger.warning(f'Failed to fetch metrics for server: {server}, reason: fetched metrics is None')
+            except asyncio.TimeoutError:
+                server.latest_metrics = {}
+                server.realtime_load = self.collect_config.fallback_load * self.collect_config.scale_factor
+                logger.warning(f'Failed to fetch metrics for server: {server}, reason: Timeout')
+
+        # 并行采集所有后端
+        results = await asyncio.gather(
+            *[update_one(i, s) for i, s in enumerate(self.dp_servers)],
+            return_exceptions=True
+        )
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(f"Load update failed for server {self.dp_servers[i]}: {result}")
+
+        # 更新桶的负载（仅当启用动态分桶时）
+        self._update_bucket_loads_from_metrics()
+
+        elapsed = asyncio.get_event_loop().time() - start
+        return elapsed
+
     async def start_load_updater(self):
         """启动后台负载更新任务（并行采集、请求超时、固定间隔）"""
 
         async def _update_loop():
             while True:
-                start = asyncio.get_event_loop().time()
-
-                # 单个后端的采集协程
-                async def update_one(idx, server):
-                    collector = self.collectors[idx]
-                    try:
-                        metrics = await asyncio.wait_for(
-                            collector.fetch_metrics(server.url.replace("/v1", "")),
-                            timeout=5.0
-                        )
-                        if metrics is not None:
-                            server.latest_metrics = metrics
-                            server.realtime_load = collector.load_calculator.calculate(metrics)
-                        else:
-                            # 采集失败，设为 fallback 高负载以避免分配
-                            server.latest_metrics = {}
-                            server.realtime_load = self.collect_config.fallback_load * self.collect_config.scale_factor
-                            logger.warning(f'Failed to fetch metrics for server: {server}, reason: fetched metrics is None')
-                    except asyncio.TimeoutError:
-                        server.latest_metrics = {}
-                        server.realtime_load = self.collect_config.fallback_load * self.collect_config.scale_factor
-                        logger.warning(f'Failed to fetch metrics for server: {server}, reason: Timeout')
-
-                # 并行采集所有后端
-                results = await asyncio.gather(
-                    *[update_one(i, s) for i, s in enumerate(self.dp_servers)],
-                    return_exceptions=True
-                )
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logger.warning(f"Load update failed for server {self.dp_servers[i]}: {result}")
-
-                # 更新桶的负载（仅当启用动态分桶时）
-                self._update_bucket_loads_from_metrics()
-
+                elapsed = await self.update_load_once()
                 # 精确控制间隔，扣除采集耗时
-                elapsed = asyncio.get_event_loop().time() - start
-                logger.warning(f'Test=========== 采集耗时: {elapsed}')
                 await asyncio.sleep(max(0.0, self.collect_config.interval_seconds - elapsed))
 
         self._load_update_task = asyncio.create_task(_update_loop())
