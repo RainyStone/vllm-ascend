@@ -126,13 +126,17 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict
 from typing import List, Optional
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from dynamic_bucket_load_balancer import DynamicBucketLoadBalancer, Task, Bucket, ServerInfo
+from load_collector.base import LoadUpdateConfig
+from load_collector.factory import create_load_collector
+from load_collector.metric_load_calculator import KvCacheAwareCalculator
+from load_collector.token_estimator import create_token_estimator
 
 try:
     from vllm.logger import init_logger
@@ -160,9 +164,11 @@ class InstanceType:
 
 TAINT_PRIORITY = 1e15
 
+DECODER_MAX_LOAD = float('inf')
+
 
 class ServerState:
-    def __init__(self, host, port):
+    def __init__(self, host, port,total_kv_blocks: int|None, block_size: int|None,max_num_seqs: int|None):
         self.host = host
         self.port = port
         self.url = f"http://{host}:{port}/v1"
@@ -182,6 +188,17 @@ class ServerState:
         self.active_requests = 0  # Number of active requests
         self.aborted_requests = set()  # Track aborted requests
         # Removed individual server lock - will use global locks instead
+
+        # 仅为Decoder更新负载使用，TODO 后续上库时代码需要重构优化
+        self.realtime_load = 0.0  # 0~1 之间的归一化负载
+        self.inflight_tokens = 0.0  # 请求进来时处理的token数 (即prompt的token数，一定程度上可反应prefill阶段的负载)
+
+        self.total_kv_blocks = total_kv_blocks  # 推理后端总 KV block 数
+        self.block_size = block_size  # 每个 block 的 token 数
+        self.max_num_seqs = max_num_seqs  # batch_size大小
+        self.latest_metrics: Dict[str, float] = {}  # 最近一次抓取的 metrics 数据
+        self.calculator = None  # 绑定的负载计算器
+
 
     def __eq__(self, other):
         self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
@@ -209,8 +226,11 @@ class ProxyState:
         self.tainted_decoders: list[ServerState] = []
         self.node_listener = NodeListener(self)
 
-        self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
-        self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
+        self.prefillers: list[ServerState] = [ServerState(h, p,None,None,None) for h, p in prefiller_instances]
+        self.decoders: list[ServerState] = [ServerState(h, p,decoder_total_blocks,decoder_block_size,decoder_max_num_seqs) for h, p,decoder_total_blocks, decoder_block_size,decoder_max_num_seqs in decoder_instances]
+
+        self.token_estimator = create_token_estimator("char")
+
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
@@ -256,8 +276,76 @@ class ProxyState:
                                                                   affinity_strength=1.0  # todo: 待调整（0~1.0）
                                                                   )
 
-        self.decoder_heap:List[ServerHeapItem] = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.decoders)]
-        heapq.heapify(self.decoder_heap)
+        # 初始化decoder负载采集器
+        self.decoder_collect_config =  LoadUpdateConfig()
+        self.decoder_collectors = []
+        for server in self.decoders:
+            calculator = KvCacheAwareCalculator(server.total_kv_blocks, server.block_size,max_num_seqs=server.max_num_seqs)
+            collector = create_load_collector("vllm", server.client, calculator)
+            server.calculator = calculator
+            self.decoder_collectors.append(collector)
+
+        self._decoder_load_update_task = None
+
+
+    async def update_load_once(self) -> float:
+        """执行一轮负载更新，返回本次采集耗时（秒）。"""
+        start = asyncio.get_event_loop().time()
+        # 单个后端的采集协程
+        async def update_one(idx, server):
+            # 跳过在 tainted_decoders 中的 decoder 的负载更新
+            if server in self.tainted_decoders:
+                server.latest_metrics = {}
+                server.realtime_load = DECODER_MAX_LOAD
+                return
+
+            collector = self.decoder_collectors[idx]
+            try:
+                metrics = await asyncio.wait_for(collector.fetch_metrics(server.url.replace("/v1", "")), timeout=5.0)
+                if metrics is not None:
+                    server.latest_metrics = metrics
+                    server.realtime_load = collector.load_calculator.calculate(metrics)
+                else:
+                    # 采集失败，设为 fallback 高负载以避免分配
+                    server.latest_metrics = {}
+                    server.realtime_load = self.decoder_collect_config.fallback_load * self.decoder_collect_config.scale_factor
+                    logger.warning(f'Failed to fetch metrics for server: {server}, reason: fetched metrics is None')
+            except asyncio.TimeoutError:
+                server.latest_metrics = {}
+                server.realtime_load = self.decoder_collect_config.fallback_load * self.decoder_collect_config.scale_factor
+                logger.warning(f'Failed to fetch metrics for server: {server}, reason: Timeout')
+
+        # 并行采集所有后端
+        results = await asyncio.gather(
+            *[update_one(i, s) for i, s in enumerate(self.decoders)],
+            return_exceptions=True
+        )
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(f"Load update failed for decoder server {self.decoders[i]}: {result}")
+
+        elapsed = asyncio.get_event_loop().time() - start
+        return elapsed
+
+    async def start_load_updater(self):
+        """启动后台负载更新任务（并行采集、请求超时、固定间隔）"""
+
+        async def _update_loop():
+            while True:
+                elapsed = await self.update_load_once()
+                # 精确控制间隔，扣除采集耗时
+                await asyncio.sleep(max(0.0, self.decoder_collect_config.interval_seconds - elapsed))
+
+        self._decoder_load_update_task = asyncio.create_task(_update_loop())
+
+    async def stop_load_updater(self):
+        if self._decoder_load_update_task:
+            self._decoder_load_update_task.cancel()
+            try:
+                await self._decoder_load_update_task
+            except asyncio.CancelledError:
+                pass
+
 
     @staticmethod
     def _group_servers(servers: List[ServerHeapItem], num_groups: int):
@@ -333,15 +421,6 @@ class ProxyState:
         self.prefiller_heaps[group_idx].append(ServerHeapItem(priority, server_idx, server))
         heapq.heapify(self.prefiller_heaps[group_idx])
 
-    def _update_decoder_priority(self, server_idx: int):
-        """Update the priority of a decoder server in the heap."""
-        server = self.decoders[server_idx]
-        priority = server.active_tokens
-        # Remove old entry and add new one
-        self.decoder_heap = [server_heap_item for server_heap_item in self.decoder_heap if server_heap_item.server_idx != server_idx]
-        self.decoder_heap.append(ServerHeapItem(priority, server_idx, server))
-        heapq.heapify(self.decoder_heap)
-
     def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
         Mark a request as aborted. This will helps to release kv cache in
@@ -365,8 +444,7 @@ class ProxyState:
         return aborted_requests
 
     async def next_req_id(self):
-        async with self.req_id_lock:
-            return str(uuid.uuid4())
+        return str(uuid.uuid4())
 
     def select_prefiller(self, token_count, group_idx=0):  # Changed to synchronous
         # No lock needed - entire function is atomic
@@ -407,29 +485,27 @@ class ProxyState:
         # Update priority queue after releasing
         self._update_prefiller_priority(idx)
 
-    def select_decoder(self, token_count):  # Changed to synchronous
+    def select_decoder(self, estimated_tokens):  # Changed to synchronous
         # No lock needed - entire function is atomic
-        if not self.decoder_heap:
+        if not self.decoders:
             raise RuntimeError("No decoder servers available")
 
-        server_heap_item = heapq.heappop(self.decoder_heap)
-        chosen_server_idx = server_heap_item.server_idx
+        def server_score(s: ServerState):
+            req_load = s.realtime_load
+            # 按 inflight_tokens 惩罚，系数 1e-6 可调
+            return req_load + s.inflight_tokens * 1e-6
 
-        # Update the chosen server atomically
-        self.decoders[chosen_server_idx].active_tokens += token_count
+        chosen_server = min(self.decoders, key=server_score)
+        chosen_server.inflight_tokens += estimated_tokens
+        return self.decoders.index(chosen_server)
 
-        # Update priority and re-add to heap
-        self._update_decoder_priority(chosen_server_idx)
-
-        return chosen_server_idx
-
-    def release_decoder(self, idx, token_count):  # Changed to synchronous
+    def release_decoder(self, idx, release_tokens):  # Changed to synchronous
         # No lock needed - atomic operation
         if idx >= len(self.decoders):
             return
-        self.decoders[idx].active_tokens -= token_count
-        # Update priority queue after releasing
-        self._update_decoder_priority(idx)
+
+        server = self.decoders[idx]
+        server.inflight_tokens = max(0.0, server.inflight_tokens - release_tokens)
 
     # Omni_infer's calculate_input_scores function
     def calculate_prefill_scores(self, request_length: int) -> float:
@@ -437,8 +513,8 @@ class ProxyState:
         input_score = length_score * 0.0345 + 120.0745
         return input_score
 
-    def calculate_decode_scores(self, request_length: int) -> float:
-        return request_length
+    def calculate_decode_scores(self, req_data) -> float:
+        return self.token_estimator.estimate(req_data)
 
     def calculate_prefill_tokens(self, request_length: int) -> float:
         return request_length / 4.0
@@ -499,15 +575,15 @@ class ProxyState:
             if server in self.tainted_decoders:
                 self.tainted_decoders.remove(server)
 
-                for server_heap_item in self.decoder_heap:
-                    if server_heap_item.server == server:
-                        server_heap_item.priority = 0
-                heapq.heapify(self.decoder_heap)
+                server.realtime_load = 0.0
 
             elif server not in self.decoders:
                 self.decoders.append(server)
-                # decoder_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.decoder_heap, ServerHeapItem(0, len(self.decoders) - 1, server))
+                calculator = KvCacheAwareCalculator(server.total_kv_blocks, server.block_size,
+                                                    max_num_seqs=server.max_num_seqs)
+                collector = create_load_collector("vllm", server.client, calculator)
+                server.calculator = calculator
+                self.decoder_collectors.append(collector)
         self.print_status(f"Add decoder instances: {instances}.")
 
     def remove_prefillers(self, instances: list[ServerState]) -> bool:
@@ -609,17 +685,11 @@ class ProxyState:
 
         instances_to_remove = set(instances)
         self.decoders = [server for server in self.decoders if server not in instances_to_remove]
-        decoder_heap_copy:List[ServerHeapItem] = self.decoder_heap.copy()
-        decoder_heap_copy.sort(key=lambda x: x.server_idx)  # sorted by key: decoder_idx
-        decoder_heap = []
-        idx = 0
-        for server_heap_item in decoder_heap_copy:
-            if server_heap_item.server not in instances_to_remove:
-                decoder_heap.append(ServerHeapItem(server_heap_item.priority, idx, server_heap_item.server))
-                idx += 1
 
-        self.decoder_heap = decoder_heap
-        heapq.heapify(self.decoder_heap)
+        client_to_remove = [server.client for server in instances_to_remove]
+
+        self.decoder_collectors =[collector for collector in self.decoder_collectors if collector.client not in client_to_remove]
+
         self.print_status(f"Remove decoder instances: {instances}.")
         return False
 
@@ -640,17 +710,13 @@ class ProxyState:
 
     def _taint_decoders(self, instances: list[ServerState]) -> None:
         instances_to_taint = set(instances)
+
+        for decoder_server in instances_to_taint:
+            decoder_server.realtime_load = DECODER_MAX_LOAD
+
         for server in self.decoders:
             if server in instances_to_taint and server not in self.tainted_decoders:
                 self.tainted_decoders.append(server)
-
-        re_heapify_flag = False
-        for server_item in self.decoder_heap:
-            if server_item.server in instances_to_taint:
-                server_item.priority = TAINT_PRIORITY
-                re_heapify_flag = True
-        if re_heapify_flag:
-            heapq.heapify(self.decoder_heap)
 
     def print_status(self, msg: str) -> None:
         status = {
@@ -743,13 +809,49 @@ def parse_args(args_list = None):
                         action="store_true",
                         default=False,
                         help="Enable dynamic bucket load Balancer")
+
+    # Decoder KV cache 容量配置
+    parser.add_argument("--decoder-total-blocks",
+                        type=int,
+                        nargs="+",
+                        required=True,
+                        help="Total KV cache blocks for each decoder backend. Must match --decoder-hosts count.")
+    parser.add_argument("--decoder-block-size",
+                        type=int,
+                        nargs="+",
+                        required=True,
+                        help="KV cache block size (tokens per block) for each decoder backend. ")
+    parser.add_argument("--decoder-max-num-seqs",
+                        type=int,
+                        nargs="+",
+                        default=None,
+                        help="vLLM max_num_seqs for each decoder backend, used for compute pressure normalization. "
+                             "Must match --decoder-hosts count, or provide exactly one value for all.")
+
+
     args = parser.parse_args(args_list)
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
         raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError("Number of decoder hosts must match number of decoder ports")
+
+    n = len(args.decoder_hosts)
+    if len(args.decoder_total_blocks) != n:
+        raise ValueError("--decoder-total-blocks count must match --decoder-hosts count")
+
+    if len(args.decoder_block_size) == 1:
+        args.decoder_block_size = args.decoder_block_size * n
+    elif len(args.decoder_block_size) != n:
+        raise ValueError("--decoder-block-size count must match --decoder-hosts count, or provide exactly one value")
+
+    if len(args.decoder_max_num_seqs) == 1:
+        args.decoder_max_num_seqs = args.decoder_max_num_seqs * n
+    elif len(args.decoder_max_num_seqs) != n:
+        raise ValueError("--decoder-max-num-seqs count must match --decoder-hosts count, or provide exactly one value")
+
+
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
-    args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
+    args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports,args.decoder_total_blocks, args.decoder_block_size,args.decoder_max_num_seqs))
     return args
 
 
@@ -758,7 +860,9 @@ async def lifespan(app: FastAPI):
     global proxy_state
     proxy_state = ProxyState(global_args.prefiller_instances, global_args.decoder_instances)
     print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
+    await proxy_state.start_load_updater()
     yield
+    await proxy_state.stop_load_updater()
     for p in proxy_state.prefillers:
         await p.client.aclose()
     for d in proxy_state.decoders:
@@ -912,7 +1016,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
     # Select decoder
-    decoder_score = proxy_state.calculate_decode_scores(request_length)
+    decoder_score = proxy_state.calculate_decode_scores(req_data)
     logger.debug("Decoder score: %f", decoder_score)
     # Use the prefiller's kv_transfer_params to select decoder
     decoder_idx = proxy_state.select_decoder(decoder_score)
@@ -1067,9 +1171,18 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
         req_data = await request.json()
         instance_type = req_data.get("type", "")
         instances = req_data.get("instances", [])
+        # 添加 decoder 时需要带的额外信息
+        """
+        "decoder_extra_info":{
+            "decoder_total_blocks":[1024,1024,1024],
+            "decoder_block_size":[128,128,128],
+            "decoder_max_num_seqs":[8,8,8]
+        }
+        """
+        decoder_extra_info = req_data.get("decoder_extra_info", {})
         if isinstance(instances, str):
             instances = [instances]
-        instances = trans_instances(instances)
+        instances = trans_instances(instances,instance_type,decoder_extra_info)
         all_msg = f"{adjust_mode} {instance_type} instances: {[str(server) for server in instances]}."
 
         if instance_type not in [InstanceType.PREFILL, InstanceType.DECODE]:
@@ -1103,11 +1216,17 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
         raise e
 
 
-def trans_instances(instances: list[str]) -> list[ServerState]:
+def trans_instances(instances: list[str],instance_type,decoder_extra_info) -> list[ServerState]:
     server_list = []
-    for instance in instances:
+    for idx,instance in enumerate(instances):
         h, p = instance.split(":")
-        server_list.append(ServerState(h, int(p)))
+        server = None
+        if instance_type == InstanceType.DECODE:
+            server = ServerState(h, int(p),decoder_extra_info["decoder_total_blocks"][idx],decoder_extra_info["decoder_block_size"][idx],decoder_extra_info["decoder_max_num_seqs"][idx])
+        else:
+            server = ServerState(h, int(p),None,None,None)
+
+        server_list.append(server)
     return server_list
 
 

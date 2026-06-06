@@ -98,7 +98,7 @@ from dynamic_bucket_load_balancer_load_optimized import DynamicBucketLoadBalance
 from load_collector.factory import create_load_collector
 from load_collector.base import LoadUpdateConfig
 from load_collector.metric_load_calculator import KvCacheAwareCalculator
-from token_estimator import create_token_estimator, TokenEstimator
+from load_collector.token_estimator import create_token_estimator, TokenEstimator
 
 try:
     from vllm.logger import init_logger
@@ -319,11 +319,12 @@ class ProxyState:
 
         # 新增：请求感知的评分函数
         def server_score(s: ServerState):
-            if s.calculator and s.latest_metrics and estimated_tokens > 0:
-                req_load = s.calculator.calculate(s.latest_metrics, estimated_tokens)
-            else:
-                req_load = s.realtime_load
-            # 按 inflight_tokens 惩罚，系数 1e-6 可调
+            # if s.calculator and s.latest_metrics and estimated_tokens > 0:
+            #     req_load = s.calculator.calculate(s.latest_metrics, estimated_tokens)
+            # else:
+            #     req_load = s.realtime_load
+            req_load = s.realtime_load
+            # 按 inflight_tokens 惩罚，系数 1e-6 可调 TODO 惩罚系数根据 total_block、block_size计算每个token的比例？
             return req_load + s.inflight_tokens * 1e-6
 
         chosen_server = min(group, key=server_score)
@@ -411,7 +412,7 @@ def parse_args():
 
     args = parser.parse_args()
     n=len(args.dp_hosts)
-    if len(args.dp_hosts) != n:
+    if len(args.dp_ports) != n:
         raise ValueError("Number of dp hosts must match number of dp ports")
 
     # 新增：校验并补全 dp-total-blocks / dp-block-size
