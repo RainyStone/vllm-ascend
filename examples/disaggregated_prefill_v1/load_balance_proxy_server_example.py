@@ -252,9 +252,7 @@ class ProxyState:
             if self.num_prefill_groups != len(prefill_buckets):
                 raise ValueError("Number of prefill groups must match number of prefill buckets")
 
-            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=prefill_buckets,
-                                                                  affinity_strength=1.0  # todo: 待调整（0~1.0）
-                                                                  )
+            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=prefill_buckets)
 
         self.decoder_heap:List[ServerHeapItem] = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.decoder_heap)

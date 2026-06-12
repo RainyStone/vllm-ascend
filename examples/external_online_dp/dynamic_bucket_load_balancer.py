@@ -35,7 +35,7 @@ class DynamicBucketLoadBalancer:
     基于任务长度静态分桶，并根据桶的负载和长度亲和性动态调整新任务分配以实现负载均衡
     """
 
-    def __init__(self, buckets: List[Tuple[int, int]], sensitivity=100.0, affinity_strength=1.0, log_func=print, all_neighbor=False):
+    def __init__(self, buckets: List[Tuple[int, int]], sensitivity=1.0, affinity_strength=0.1, log_func=print, all_neighbor=False):
         """
         初始化负载均衡器
         :param buckets: 每个桶的长度范围
@@ -56,7 +56,8 @@ class DynamicBucketLoadBalancer:
         }
 
         # 负载均衡的阈值概率，与桶的数量相关，数量越多，阈值越低
-        self.base_probability_threshold = 1 / (self.num_buckets * 2.0)
+        # self.base_probability_threshold = 1 / (self.num_buckets * 2.0)
+        self.base_probability_threshold = 0.12
         self._log_info(f"Load Balance base_probability_threshold: {self.base_probability_threshold:.2f} ")
 
         # 保存task
@@ -90,33 +91,37 @@ class DynamicBucketLoadBalancer:
             neighbors.append(bucket_idx + 1)
         return neighbors
 
-    def _calculate_length_affinity(self, task_length, target_bucket_idx):
+    def _calculate_length_affinity(self, task_length, neighbor_bucket_idx):
         """
-        计算任务长度与目标桶的亲和因子 (0.0 到 1.0)
-        1.0 表示完美匹配（长度在桶中心），0.0 表示在桶的边缘。
+        计算任务长度与邻居桶的亲和因子 (0.0 到 1.0)
+        1.0 表示紧靠邻居桶，0.0 表示离邻居桶很远。
         """
-        target_bucket = self.buckets[target_bucket_idx]
-        bucket_min = target_bucket.min_length
-        bucket_max = target_bucket.max_length
+        neighbor_bucket = self.buckets[neighbor_bucket_idx]
+        neighbor_bucket_min = neighbor_bucket.min_length
+        neighbor_bucket_max = neighbor_bucket.max_length
 
-        bucket_center = (bucket_min + bucket_max) / 2.0
-        bucket_half_width = (bucket_max - bucket_min) / 2.0
+        if neighbor_bucket_min < task_length < neighbor_bucket_max:
+            raise RuntimeError(f'task_length必须在邻居桶范围外')
 
-        # 计算任务长度到桶中心的距离
-        distance_to_center = abs(task_length - bucket_center)
+        neighbor_bucket_center = (neighbor_bucket_min + neighbor_bucket_max) / 2.0
+        neighbor_bucket_half_width = (neighbor_bucket_max - neighbor_bucket_min) / 2.0
+
+        # 计算任务长度到邻居桶中心的距离
+        distance_to_center = abs(task_length - neighbor_bucket_center)
 
         # 计算亲和因子：距离中心越近，因子越接近1
         # 使用钟形曲线 (e.g., Gaussian-like) 来平滑衰减
-        if bucket_half_width > 0:
+        if neighbor_bucket_half_width > 0:
             # 归一化距离
-            normalized_distance = distance_to_center / bucket_half_width
+            normalized_distance = (distance_to_center - neighbor_bucket_half_width) / neighbor_bucket_half_width
             # 使用指数衰减计算亲和因子
-            affinity = math.exp(-self.affinity_strength * normalized_distance)
+            # normalized_distance=0.1，self.affinity_strength=1.0，有0.9的neighbor_affinity
+            neighbor_affinity = math.exp(-self.affinity_strength * normalized_distance)
         else:
-            affinity = 1.0  # 理论上不会发生，但作为保护
+            neighbor_affinity = 1.0  # 理论上不会发生，但作为保护
 
         # 确保在 [0, 1] 范围内
-        return max(0.0, min(affinity, 1.0))
+        return max(0.0, min(neighbor_affinity, 1.0))
 
     def _calculate_redirect_probability(self, task_length, standard_bucket_idx, neighbor_bucket_idx):
         """
@@ -129,14 +134,19 @@ class DynamicBucketLoadBalancer:
         if standard_load <= 0:
             load_probability = 0.0  # 标准桶无负载，无需重定向
         else:
-            # 计算负载比率
-            load_ratio = standard_load / max(neighbor_load, 1e-9)  # 防止除以零
+            # # 计算负载比率
+            # load_ratio = standard_load / max(neighbor_load, 1e-9)  # 防止除以零
+            #
+            # # 使用对数函数使概率增长更平滑，对差距更敏感
+            # raw_probability = math.log(load_ratio) if load_ratio > 1 else 0
+            #
+            # # 应用敏感度系数并限制在 [0, 1] 范围内
+            # load_probability = 1 - math.exp(-self.sensitivity * raw_probability)
+            # load_probability = max(0.0, min(load_probability, 1))
 
-            # 使用对数函数使概率增长更平滑，对差距更敏感
-            raw_probability = math.log(load_ratio) if load_ratio > 1 else 0
-
-            # 应用敏感度系数并限制在 [0, 1] 范围内
-            load_probability = 1 - math.exp(-self.sensitivity * raw_probability)
+            # 邻居桶的负载比标准桶的负载越小，重定向概率越大
+            # neighbor_load / standard_load = 5/6，self.sensitivity=1.0时，load_probability=1/6=0.16666
+            load_probability = 1 - (neighbor_load / standard_load) ** self.sensitivity
             load_probability = max(0.0, min(load_probability, 1))
 
         # --- 2. 计算长度亲和因子 ---

@@ -186,9 +186,7 @@ class ProxyState:
             if self.num_dp_groups != len(dp_buckets):
                 raise ValueError("Number of dp groups must match number of dp buckets")
 
-            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=dp_buckets,
-                                                                  affinity_strength=1.0  # todo: 待调整（0~1.0）
-                                                                  )
+            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=dp_buckets)
 
     @staticmethod
     def _group_servers(servers: List[ServerHeapItem], num_groups: int):
