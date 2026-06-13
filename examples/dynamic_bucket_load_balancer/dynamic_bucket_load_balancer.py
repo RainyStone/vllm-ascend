@@ -6,7 +6,7 @@ import math
 ServerInfo = namedtuple('ServerInfo', ['instance_type', 'instance_idx'])
 
 class Task:
-    """模拟任务(仅包含长度信息)"""
+    """请求任务(包含请求长度信息)"""
 
     def __init__(self, task_id: AnyStr, task_length: int, task_load: float):
         self.id = task_id
@@ -23,6 +23,7 @@ class Bucket:
     """ 桶 """
 
     def __init__(self, bucket_ranges: Tuple[int, int]):
+        # 桶的上下边界
         self.min_length = bucket_ranges[0]
         self.max_length = bucket_ranges[1]
         # 统计信息
@@ -32,15 +33,15 @@ class Bucket:
 
 class DynamicBucketLoadBalancer:
     """
-    基于任务长度静态分桶，并根据桶的负载和长度亲和性动态调整新任务分配以实现负载均衡
+    优先基于请求长度静态分桶，并根据桶的负载和长度亲和性动态调整新请求分配以实现负载均衡
     """
 
     def __init__(self, buckets: List[Tuple[int, int]], sensitivity=1.0, affinity_strength=0.1, log_func=print, all_neighbor=False):
         """
         初始化负载均衡器
         :param buckets: 每个桶的长度范围
-        :param sensitivity: 对负载差距的敏感度系数，值越大，对差距越敏感（与长度相关，常见LLM序列范围优选值为100）
-        :param affinity_strength: 长度亲和因子的强度系数，值越大，长度匹配度对概率的影响越大
+        :param sensitivity: 对负载差距的敏感度系数，值越大，对差距越敏感
+        :param affinity_strength: 长度亲和因子的强度系数，值越大，请求更倾向于分配到标准桶
         :param log_func: 日志打印函数
         :param all_neighbor: 是否将所有桶作为邻居（负载均衡的范围），False时仅将左右桶作为邻居
         """
@@ -55,13 +56,18 @@ class DynamicBucketLoadBalancer:
             idx: Bucket(bucket_ranges) for idx, bucket_ranges in enumerate(buckets)
         }
 
-        # 负载均衡的阈值概率，与桶的数量相关，数量越多，阈值越低
-        # self.base_probability_threshold = 1 / (self.num_buckets * 2.0)
+        bucket_boundaries = ", ".join(
+            f"bucket {idx}: [{bucket.min_length}, {bucket.max_length})"
+            for idx, bucket in self.buckets.items()
+        )
+        self._log_info(f"Initialized {self.num_buckets} buckets: {bucket_boundaries}")
+
+        # 负载均衡的阈值概率，请求重定向概率超过该阈值，则会被重定向
         self.base_probability_threshold = 0.12
         self._log_info(f"Load Balance base_probability_threshold: {self.base_probability_threshold:.2f} ")
 
-        # 保存task
-        self.tasks: Dict[AnyStr, Task] = {}
+        # 保存请求Task
+        self.tasks: Dict[AnyStr, Task] = {} # type: ignore
 
         # 统计信息
         self.redirected_tasks = 0
@@ -72,7 +78,7 @@ class DynamicBucketLoadBalancer:
             self.log_func(msg, *args, **kwargs)
 
     def _get_standard_bucket_index(self, task_length):
-        """根据任务长度确定其标准所属的桶索引"""
+        """根据请求长度确定其所属的标准桶索引"""
         for bucket_idx, bucket in self.buckets.items():
             if bucket.min_length <= task_length < bucket.max_length:
                 return bucket_idx
@@ -101,21 +107,20 @@ class DynamicBucketLoadBalancer:
         neighbor_bucket_max = neighbor_bucket.max_length
 
         if neighbor_bucket_min < task_length < neighbor_bucket_max:
-            raise RuntimeError(f'task_length必须在邻居桶范围外')
+            raise RuntimeError(f'task_length 必须在邻居桶范围外')
 
         neighbor_bucket_center = (neighbor_bucket_min + neighbor_bucket_max) / 2.0
         neighbor_bucket_half_width = (neighbor_bucket_max - neighbor_bucket_min) / 2.0
 
-        # 计算任务长度到邻居桶中心的距离
+        # 计算请求长度到邻居桶中心的距离
         distance_to_center = abs(task_length - neighbor_bucket_center)
 
-        # 计算亲和因子：距离中心越近，因子越接近1
-        # 使用钟形曲线 (e.g., Gaussian-like) 来平滑衰减
+        # 计算亲和因子：距离邻居桶边界越近，因子越接近1
         if neighbor_bucket_half_width > 0:
-            # 归一化距离
+            # 归一化距离，计算请求长度与邻居桶半径的相对距离
             normalized_distance = (distance_to_center - neighbor_bucket_half_width) / neighbor_bucket_half_width
             # 使用指数衰减计算亲和因子
-            # normalized_distance=0.1，self.affinity_strength=1.0，有0.9的neighbor_affinity
+            # 例：normalized_distance=0.1、self.affinity_strength=1.0时，有0.9的neighbor_affinity
             neighbor_affinity = math.exp(-self.affinity_strength * normalized_distance)
         else:
             neighbor_affinity = 1.0  # 理论上不会发生，但作为保护
@@ -134,28 +139,22 @@ class DynamicBucketLoadBalancer:
         if standard_load <= 0:
             load_probability = 0.0  # 标准桶无负载，无需重定向
         else:
-            # # 计算负载比率
-            # load_ratio = standard_load / max(neighbor_load, 1e-9)  # 防止除以零
-            #
-            # # 使用对数函数使概率增长更平滑，对差距更敏感
-            # raw_probability = math.log(load_ratio) if load_ratio > 1 else 0
-            #
-            # # 应用敏感度系数并限制在 [0, 1] 范围内
-            # load_probability = 1 - math.exp(-self.sensitivity * raw_probability)
-            # load_probability = max(0.0, min(load_probability, 1))
+            # 计算邻居桶与标准桶的负载比率
+            load_ratio = neighbor_load / max(standard_load, 1e-9)  # 防止除以零
 
+            # 应用敏感度系数并限制在 [0, 1] 范围内
             # 邻居桶的负载比标准桶的负载越小，重定向概率越大
             # neighbor_load / standard_load = 5/6，self.sensitivity=1.0时，load_probability=1/6=0.16666
-            load_probability = 1 - (neighbor_load / standard_load) ** self.sensitivity
+            load_probability = 1 - load_ratio ** self.sensitivity
             load_probability = max(0.0, min(load_probability, 1))
 
         # --- 2. 计算长度亲和因子 ---
         affinity_factor = self._calculate_length_affinity(task_length, neighbor_bucket_idx)
 
-        # --- 3. 结合两者计算最终概率 ---
+        # --- 3. 结合两者计算重定向到邻居桶的最终概率 ---
         # 最终概率 = 基础负载概率 * 长度亲和因子
-        # 这意味着：即使负载差距很大，如果长度不匹配，重定向概率也会被抑制。
-        # 反之，如果长度非常匹配，即使负载差距一般，也可能获得较高的重定向概率。
+        # 这意味着：即使邻居桶与标准桶负载差距很大，如果请求长度不接近邻居桶，重定向到邻居桶的概率也会被抑制。
+        # 反之，如果请求长度接近邻居桶，即使负载差距一般，邻居桶也可能获得较高的重定向概率。
         final_probability = load_probability * affinity_factor
 
         return final_probability
@@ -165,7 +164,7 @@ class DynamicBucketLoadBalancer:
 
     def dispatch_task(self, cur_task):
         """
-        为新任务分配桶，考虑动态负载均衡和长度亲和性
+        为新请求分配桶，考虑动态负载均衡和长度亲和性
         """
         self.total_tasks += 1
         standard_bucket_idx = self._get_standard_bucket_index(cur_task.length)
@@ -195,7 +194,7 @@ class DynamicBucketLoadBalancer:
                 self._log_info(f"{cur_task} redirected from bucket {standard_bucket_idx} to {final_bucket_idx}"
                                f"(prob={best_redirect_prob:.4f})")
 
-        # 将任务分配给最终选定的桶（更新统计信息）
+        # 将请求任务分配给最终选定的桶（更新统计信息）
         self.buckets[final_bucket_idx].task_count += 1
         self.buckets[final_bucket_idx].total_load += cur_task.load
         cur_task.bucket_idx = final_bucket_idx
@@ -208,6 +207,7 @@ class DynamicBucketLoadBalancer:
         return final_bucket_idx, cur_task
 
     def release_task(self, task_id: AnyStr):
+        """释放请求负载"""
         if task_id in self.tasks:
             found_task = self.tasks.pop(task_id)
             if 0 <= found_task.bucket_idx < self.num_buckets:
@@ -227,7 +227,7 @@ class DynamicBucketLoadBalancer:
 
 
 class NoStandardBucketLoadBalancer(DynamicBucketLoadBalancer):
-
+    """仅根据负载进行请求分发，无标准桶"""
     def __init__(self, num_buckets: int, max_length: int, log_func=print):
         bucket_range = math.ceil(max_length / num_buckets)
         start_length = 0

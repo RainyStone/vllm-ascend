@@ -112,6 +112,8 @@
 #
 # For more details, see the code and comments in this file.
 
+# TODO 文档描述待优化
+
 import argparse
 import asyncio
 import copy
@@ -384,7 +386,7 @@ class ProxyState:
 
         return chosen_server_idx
 
-    def release_prefiller(self, idx, token_count,task=None):  # Changed to synchronous
+    def release_prefiller(self, idx, token_count,task):  # Changed to synchronous
         # No lock needed - atomic operation
         if idx >= len(self.prefillers):
             return

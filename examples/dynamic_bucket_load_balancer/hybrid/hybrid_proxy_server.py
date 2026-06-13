@@ -80,6 +80,8 @@
 #
 # For more details, see the code and comments in this file.
 
+# TODO 文档描述待优化
+
 import argparse
 import asyncio
 import functools
@@ -95,7 +97,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from dynamic_bucket_load_balancer import DynamicBucketLoadBalancer, Task, Bucket, ServerInfo
+from dynamic_bucket_load_balancer import DynamicBucketLoadBalancer, Task, ServerInfo
 
 try:
     from vllm.logger import init_logger
@@ -148,45 +150,41 @@ class ServerHeapItem:
 
 class ProxyState:
     def __init__(self, server_instances):
-        self.dp_servers: list[ServerState] = [ServerState(h, p) for h, p in server_instances]
+        self.infer_servers: list[ServerState] = [ServerState(h, p) for h, p in server_instances]
         self.req_id_lock = asyncio.Lock()
-        # Removed selection locks - no longer needed for synchronous methods
+
+        # 动态分桶负载均衡器
+        self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
 
         if global_args.enable_dynamic_bucket:
-            self.num_dp_groups = 2 # 启用动态分桶时的分组数量
+            self.num_buckets = 2 # 启用动态分桶时的分长短两个桶
+            self.server_group_threshold = global_args.server_group_threshold
+            buckets = [(0, self.server_group_threshold),
+                               (self.server_group_threshold, global_args.max_request_tokens)]
+
+            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=buckets)
         else:
-            self.num_dp_groups = 1 # 默认不分组
+            self.num_buckets = 1 # 默认不分桶
 
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
-        dp_heap_items = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.dp_servers)]
+        server_heap_items = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.infer_servers)]
         # 对Server进行分组
-        self.dp_heaps: List[List[ServerHeapItem]] = self._group_servers(dp_heap_items, self.num_dp_groups)
+        self.server_heaps: List[List[ServerHeapItem]] = self._group_servers(server_heap_items, self.num_buckets)
         self.server_idx_to_group_idx = {}
 
         # 堆化每一分组
-        for idx, cur_heap in enumerate(self.dp_heaps):
+        for idx, cur_heap in enumerate(self.server_heaps):
             for server_item in cur_heap:
                 self.server_idx_to_group_idx[server_item.server_idx] = idx
             heapq.heapify(cur_heap)
 
-        logger.warning(f'Test==== len(self.dp_heaps): {len(self.dp_heaps)}')
-        logger.warning(f'Test==== self.dp_heaps: {self.dp_heaps}')
-
-        logger.warning(f'Test==== global_args.enable_dynamic_bucket: {global_args.enable_dynamic_bucket}')
-
-        # add dynamic bucket load balancer
-        self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
-        if global_args.enable_dynamic_bucket:
-            self.dp_group_threshold = global_args.dp_group_threshold
-            dp_buckets = [(0, self.dp_group_threshold),
-                               (self.dp_group_threshold, global_args.max_request_tokens)]
-
-            if self.num_dp_groups != len(dp_buckets):
-                raise ValueError("Number of dp groups must match number of dp buckets")
-
-            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=dp_buckets)
+        # 记录动态分桶状态、分组数量及各分组完整实例信息
+        logger.info(f"Dynamic bucket enabled: {global_args.enable_dynamic_bucket}, "
+                    f"number of groups: {len(self.server_heaps)}")
+        for group_idx, cur_heap in enumerate(self.server_heaps):
+            logger.info(f"Group {group_idx}: {cur_heap}")
 
     @staticmethod
     def _group_servers(servers: List[ServerHeapItem], num_groups: int):
@@ -230,39 +228,39 @@ class ProxyState:
 
     def _update_server_priority(self, server_idx: int):
         """Update the priority of a decoder server in the heap."""
-        server = self.dp_servers[server_idx]
+        server = self.infer_servers[server_idx]
         priority = server.active_tokens
         # Remove old entry and add new one
         group_idx = self.server_idx_to_group_idx[server_idx]
 
-        self.dp_heaps[group_idx] = [server_heap_item for server_heap_item in self.dp_heaps[group_idx] if
+        self.server_heaps[group_idx] = [server_heap_item for server_heap_item in self.server_heaps[group_idx] if
                                            server_heap_item.server_idx != server_idx]
-        self.dp_heaps[group_idx].append(ServerHeapItem(priority, server_idx, server))
-        heapq.heapify(self.dp_heaps[group_idx])
+        self.server_heaps[group_idx].append(ServerHeapItem(priority, server_idx, server))
+        heapq.heapify(self.server_heaps[group_idx])
 
     async def next_req_id(self):
         async with self.req_id_lock:
             return str(uuid.uuid4())
 
-    def select_server(self, token_count, group_idx=0):  # Changed to synchronous
+    def select_server(self, token_count, group_idx: int):  # Changed to synchronous
         # No lock needed - entire function is atomic
-        if not self.dp_servers:
-            raise RuntimeError("No decoder servers available")
+        if not self.infer_servers:
+            raise RuntimeError("No inference servers available")
 
-        server_heap_item: ServerHeapItem = heapq.heappop(self.dp_heaps[group_idx])
+        server_heap_item: ServerHeapItem = heapq.heappop(self.server_heaps[group_idx])
         chosen_server_idx = server_heap_item.server_idx
 
         # Update the chosen server atomically
-        self.dp_servers[chosen_server_idx].active_tokens += token_count
+        self.infer_servers[chosen_server_idx].active_tokens += token_count
 
         # Update priority and re-add to heap
         self._update_server_priority(chosen_server_idx)
 
         return chosen_server_idx
 
-    def release_server(self, idx: int, token_count,req_id=None):  # Changed to synchronous
+    def release_server(self, idx: int, token_count, req_id):  # Changed to synchronous
         # No lock needed - atomic operation
-        self.dp_servers[idx].active_tokens -= token_count
+        self.infer_servers[idx].active_tokens -= token_count
         if global_args.enable_dynamic_bucket and req_id is not None:
             self.bucket_load_balancer.release_task(req_id)
         # Update priority queue after releasing
@@ -279,7 +277,7 @@ class ProxyState:
     def calculate_request_tokens(self, request_length: int) -> float:
         return request_length / 4.0
 
-    def select_dp_group(self, req_id: str, request_tokens, priority_score) -> tuple[int, Task | None]:
+    def select_server_group(self, req_id: str, request_tokens, priority_score) -> tuple[int, Task | None]:
         """
         Find Best group by request length and current load of groups
         """
@@ -304,10 +302,10 @@ def parse_args():
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
 
-    parser.add_argument("--dp-group-threshold",
+    parser.add_argument("--server-group-threshold",
                         type=int,
                         default=32 * 1024,
-                        help="Threshold of dp groups")
+                        help="Threshold of server groups")
     parser.add_argument("--max-request-tokens",
                         type=int,
                         default=128 * 1024,
@@ -328,9 +326,9 @@ def parse_args():
 async def lifespan(app: FastAPI):
     global proxy_state
     proxy_state = ProxyState(global_args.server_instances)
-    print(f"Initialized {len(proxy_state.dp_servers)} dp server clients.")
+    logger.info(f"Initialized {len(proxy_state.infer_servers)} dp server clients.")
     yield
-    for p in proxy_state.dp_servers:
+    for p in proxy_state.infer_servers:
         await p.client.aclose()
 
 
@@ -405,7 +403,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     max_tokens = req_data.get("max_tokens", 16)
     ignore_eos = req_data.get("ignore_eos", False)
     priority_score = 0
-    if proxy_state.num_dp_groups > 1:
+    if global_args.enable_dynamic_bucket:
         priority_score = proxy_state.calculate_request_tokens(request_length)
     else:
         priority_score = proxy_state.calculate_request_score(request_length, max_tokens=max_tokens, ignore_eos=ignore_eos)
@@ -417,7 +415,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     request_id = await proxy_state.next_req_id()
     # Select dp server based on priority score
     request_tokens = proxy_state.calculate_request_tokens(request_length)
-    group_idx, task = proxy_state.select_dp_group(request_id, request_tokens, priority_score)
+    group_idx, task = proxy_state.select_server_group(request_id, request_tokens, priority_score)
 
     logger.warning(f'Test =====selected group_idx: {group_idx}')
 
@@ -428,7 +426,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
 
     logger.warning(f'Test =====chosen_server_idx: {server_idx}')
 
-    chosen_server = proxy_state.dp_servers[server_idx]
+    chosen_server = proxy_state.infer_servers[server_idx]
     logger.debug(f"Choose server {chosen_server.url} to process request {request_id}")
     return InstanceInfo(
         request_id=request_id, server_idx=server_idx, priority_score=priority_score, server_state=chosen_server
@@ -470,7 +468,7 @@ async def _handle_completions(api: str, request: Request):
                 )
 
             # After streaming done, release tokens
-            proxy_state.release_server(instance_info.server_idx, instance_info.priority_score)
+            proxy_state.release_server(instance_info.server_idx, instance_info.priority_score, instance_info.request_id)
 
         return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:
@@ -499,7 +497,7 @@ async def handle_chat_completions(request: Request):
 async def healthcheck():
     return {
         "status": "ok",
-        "dp_instances": len(proxy_state.dp_servers),
+        "dp_instances": len(proxy_state.infer_servers),
     }
 
 
