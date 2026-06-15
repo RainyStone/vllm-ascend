@@ -295,8 +295,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--dp-hosts", type=str, nargs="+", default=["localhost"])
-    parser.add_argument("--dp-ports", type=int, nargs="+", default=[8001])
+    parser.add_argument("--server-hosts", type=str, nargs="+", default=["localhost"])
+    parser.add_argument("--server-ports", type=int, nargs="+", default=[8001])
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
@@ -316,9 +316,9 @@ def parse_args():
                         help="Enable dynamic bucket load Balancer")
 
     args = parser.parse_args()
-    if len(args.dp_hosts) != len(args.dp_ports):
+    if len(args.server_hosts) != len(args.server_ports):
         raise ValueError("Number of dp hosts must match number of dp ports")
-    args.server_instances = list(zip(args.dp_hosts, args.dp_ports))
+    args.server_instances = list(zip(args.server_hosts, args.server_ports))
     return args
 
 
@@ -423,17 +423,13 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     request_tokens = proxy_state.calculate_request_tokens(request_length)
     group_idx, task = proxy_state.select_server_group(request_id, request_tokens, priority_score)
 
-    logger.warning(f'Test =====selected group_idx: {group_idx}')
-
     server_idx = proxy_state.select_server(priority_score, group_idx)
 
     if global_args.enable_dynamic_bucket and task is not None:
         task.server_info = ServerInfo("DP",server_idx)
 
-    logger.warning(f'Test =====chosen_server_idx: {server_idx}')
-
     chosen_server = proxy_state.infer_servers[server_idx]
-    logger.debug(f"Choose server {chosen_server.url} to process request {request_id}")
+    logger.debug(f"[group_idx={group_idx}, server_idx={server_idx}] Choose server {chosen_server.url} to process request {request_id}")
     return InstanceInfo(
         request_id=request_id, server_idx=server_idx, priority_score=priority_score, server_state=chosen_server
     )
