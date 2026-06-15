@@ -217,10 +217,18 @@ class ProxyState:
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
 
+        # 动态分桶负载均衡器
+        self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
+
         if global_args.enable_dynamic_bucket:
-            self.num_prefill_groups = 2 # 启用动态分桶时的分组数量
+            self.num_prefill_buckets = 2 # 启用动态分桶时的分组数量
+            self.prefill_group_threshold = global_args.prefill_group_threshold
+            prefill_buckets = [(0, self.prefill_group_threshold),
+                               (self.prefill_group_threshold, global_args.max_request_tokens)]
+
+            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=prefill_buckets)
         else:
-            self.num_prefill_groups = 1 # 默认不分组
+            self.num_prefill_buckets = 1 # 默认不分组
 
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
@@ -228,7 +236,7 @@ class ProxyState:
         prefiller_heap_items = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.prefillers)]
         # TODO self.prefiller_heaps、self.server_idx_to_group_idx、self.prefill_group_load 等分桶变量在动态扩缩容时需要适配
         # 对Server进行分组
-        self.prefiller_heaps: List[List[ServerHeapItem]] = self._group_servers(prefiller_heap_items, self.num_prefill_groups)
+        self.prefiller_heaps: List[List[ServerHeapItem]] = self._group_servers(prefiller_heap_items, self.num_prefill_buckets)
         self.server_idx_to_group_idx = {}
         # TODO self.prefill_group_load 可以删掉？
         self.prefill_group_load = {}
@@ -239,22 +247,11 @@ class ProxyState:
             heapq.heapify(cur_heap)
             self.prefill_group_load[idx] = 0
 
-        logger.warning(f'Test==== len(self.prefiller_heaps): {len(self.prefiller_heaps)}')
-        logger.warning(f'Test==== self.prefiller_heaps: {self.prefiller_heaps}')
-
-        logger.warning(f'Test==== global_args.enable_dynamic_bucket: {global_args.enable_dynamic_bucket}')
-
-        # add dynamic bucket load balancer
-        self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
-        if global_args.enable_dynamic_bucket:
-            self.prefill_group_threshold = global_args.prefill_group_threshold
-            prefill_buckets = [(0, self.prefill_group_threshold),
-                               (self.prefill_group_threshold, global_args.max_request_tokens)]
-
-            if self.num_prefill_groups != len(prefill_buckets):
-                raise ValueError("Number of prefill groups must match number of prefill buckets")
-
-            self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=prefill_buckets)
+        # 记录动态分桶状态、分组数量及各分组完整实例信息
+        logger.info(f"Dynamic bucket enabled: {global_args.enable_dynamic_bucket}, "
+                    f"number of prefill groups: {len(self.prefiller_heaps)}")
+        for group_idx, cur_heap in enumerate(self.prefiller_heaps):
+            logger.info(f"Prefill Group {group_idx}: {cur_heap}")
 
         self.decoder_heap:List[ServerHeapItem] = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.decoder_heap)
@@ -298,7 +295,7 @@ class ProxyState:
             start_index = end_index
 
         return groups
-
+    
     @staticmethod
     def _add_new_server_to_heaps(server_heaps: List[List[ServerHeapItem]], new_server_heap_item:ServerHeapItem):
         """
@@ -368,7 +365,7 @@ class ProxyState:
         async with self.req_id_lock:
             return str(uuid.uuid4())
 
-    def select_prefiller(self, token_count, group_idx=0):  # Changed to synchronous
+    def select_prefiller(self, token_count, group_idx):  # Changed to synchronous
         # No lock needed - entire function is atomic
         if not self.prefillers:
             raise RuntimeError("No prefiller servers available")
@@ -386,10 +383,10 @@ class ProxyState:
 
         return chosen_server_idx
 
-    def release_prefiller(self, idx, token_count,task):  # Changed to synchronous
+    def release_prefiller(self, idx, token_count, task):  # Changed to synchronous
         # No lock needed - atomic operation
         if idx >= len(self.prefillers):
-            return
+            raise ValueError(f'No prefiller servers with idx = {idx}')
         self.prefillers[idx].active_tokens -= token_count
         group_idx = self.server_idx_to_group_idx[idx]
         self.prefill_group_load[group_idx] -= token_count
@@ -521,12 +518,10 @@ class ProxyState:
 
         instances_to_remove = set(instances)
 
-        if len(self.prefillers) - len(instances_to_remove) < self.num_prefill_groups:
-            logger.warning("Number of prefillers must greater than or equal to number of groups")
+        if len(self.prefillers) - len(instances_to_remove) < self.num_prefill_buckets:
+            logger.warning("Number of prefillers must greater than or equal to number of prefill buckets")
             return False
 
-        #################################11111
-        # TODO 需要适配，删除prefill时，由于被删除的prefill导致prefillers列表变化，需要更新桶的负载
         new_prefillers = []
         old_idx_to_new_idx = {}
         for idx, server in enumerate(self.prefillers):
@@ -540,13 +535,19 @@ class ProxyState:
 
         self.prefillers = new_prefillers
 
-        old_idx_to_new_heap_item = {}
+        new_prefiller_heaps: List[List[ServerHeapItem]] = []
         for group_idx, heap in enumerate(self.prefiller_heaps):
+            new_heap = []
             for server_item in heap:
                 if server_item.server not in instances_to_remove:
-                    old_idx_to_new_heap_item[server_item.server_idx] = ServerHeapItem(server_item.priority, old_idx_to_new_idx[server_item.server_idx], server_item.server)
+                    old_idx = server_item.server_idx
+                    server_item.server_idx = old_idx_to_new_idx[old_idx]
+                    new_heap.append(server_item)
 
-        self.prefiller_heaps = self._group_servers(list(old_idx_to_new_heap_item.values()), self.num_prefill_groups)
+            new_prefiller_heaps.append(new_heap)
+
+        self.prefiller_heaps = new_prefiller_heaps
+
         for group_idx, heap in enumerate(self.prefiller_heaps):
             for server_item in heap:
                 self.server_idx_to_group_idx[server_item.server_idx] = group_idx
@@ -558,45 +559,8 @@ class ProxyState:
             for server_item in heap:
                 self.prefill_group_load[group_idx] += server_item.server.active_tokens
 
-        # 更新桶的负载 TODO 待验证
-        if global_args.enable_dynamic_bucket:
-            tasks = self.bucket_load_balancer.tasks
-
-            # 创建新桶，并清空原始桶的统计消息
-            new_buckets: dict[int, Bucket] = copy.deepcopy(self.bucket_load_balancer.buckets)
-            for bucket in new_buckets.values():
-                bucket.task_count = 0
-                bucket.total_load = 0.0
-
-            # TODO 会有线程安全问题？
-            # for task_queue in tasks.values():
-            #     for task in list(task_queue.queue):
-            #         if InstanceType.PREFILL == task.server_info[0]:
-            #             # 更新 task 信息
-            #             new_idx = old_idx_to_new_idx[task.server_info[1]]
-            #             task.server_info[1] = new_idx
-            #             new_group_idx = self.server_idx_to_group_idx[new_idx]
-            #             task.bucket_idx = new_group_idx
-            #             # 更新 bucket 信息
-            #             new_buckets[new_group_idx].task_count += 1
-            #             new_buckets[new_group_idx].total_load += task.length
-            for task in tasks.values():
-                if InstanceType.PREFILL == task.server_info.instance_type:
-                    # 更新 task 信息
-                    new_idx = old_idx_to_new_idx[task.server_info.instance_idx]
-                    task.server_info.instance_idx = new_idx
-                    new_group_idx = self.server_idx_to_group_idx[new_idx]
-                    task.bucket_idx = new_group_idx
-                    # 更新 bucket 信息
-                    new_buckets[new_group_idx].task_count += 1
-                    new_buckets[new_group_idx].total_load += task.load
-
-
-            self.bucket_load_balancer.buckets = new_buckets
-
-            self.print_status(f"Remove prefiller instances: {instances}.")
+        self.print_status(f"Remove prefiller instances: {instances}.")
         return False
-        #################################11111
 
     def remove_decoders(self, instances: list[ServerState]) -> bool:
         if not instances:
@@ -877,8 +841,8 @@ async def stream_service_response_with_retry(
 
 async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_score = 0
-    # TODO asw 计算 prefiller_score 的逻辑在 num_prefill_groups 取不同值时不太一致
-    if proxy_state.num_prefill_groups > 1:
+    # TODO asw 计算 prefiller_score 的逻辑在 num_prefill_buckets 取不同值时不太一致
+    if proxy_state.num_prefill_buckets > 1:
         prefiller_score = proxy_state.calculate_prefill_tokens(request_length)
     else:
         prefiller_score = proxy_state.calculate_prefill_scores(request_length)
@@ -1043,9 +1007,9 @@ async def _handle_completions(api: str, request: Request):
                 )
                 proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
                 proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
-
-            # After streaming done, release tokens
-            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+            finally:
+                # After streaming done, release tokens
+                proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
 
         # Determine the correct media type based on stream flag
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"

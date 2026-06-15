@@ -466,9 +466,9 @@ async def _handle_completions(api: str, request: Request):
                     f"Error during streaming from server {instance_info.server_state.url}: {str(e)}, "
                     f"the aborted request is: {instance_info.request_id}."
                 )
-
-            # After streaming done, release tokens
-            proxy_state.release_server(instance_info.server_idx, instance_info.priority_score, instance_info.request_id)
+            finally:
+                # After streaming done, release tokens
+                proxy_state.release_server(instance_info.server_idx, instance_info.priority_score, instance_info.request_id)
 
         return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:
