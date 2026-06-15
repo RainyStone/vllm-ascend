@@ -572,6 +572,13 @@ class ProxyState:
             return True
 
         instances_to_remove = set(instances)
+        # [fix #2] refuse to remove a decoder that still has in-flight requests, mirroring
+        # remove_prefillers; otherwise the rebuild + reindex below invalidates in-flight
+        # decoder_idx held by active streams (release_decoder would hit the wrong decoder).
+        for server in self.decoders:
+            if server in instances_to_remove and server.active_tokens != 0:
+                logger.warning("Decode server is not empty, please wait for all requests to be completed")
+                return False
         self.decoders = [server for server in self.decoders if server not in instances_to_remove]
         decoder_heap_copy:List[ServerHeapItem] = self.decoder_heap.copy()
         decoder_heap_copy.sort(key=lambda x: x.server_idx)  # sorted by key: decoder_idx
@@ -861,15 +868,22 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
 
     prefiller = proxy_state.prefillers[prefiller_idx]
     # Send request to prefiller
-    response = await send_request_to_service(
-        prefiller.client,
-        prefiller_idx,
-        api,
-        req_data,
-        request_id,
-        max_retries=global_args.max_retries,
-        base_delay=global_args.retry_delay,
-    )
+    try:
+        response = await send_request_to_service(
+            prefiller.client,
+            prefiller_idx,
+            api,
+            req_data,
+            request_id,
+            max_retries=global_args.max_retries,
+            base_delay=global_args.retry_delay,
+        )
+    except Exception:
+        # [fix #4] prefill failed: roll back what select_prefiller acquired (active_tokens,
+        # active_kv_cache, prefill_group_load and the bucket task) before re-raising
+        proxy_state.release_prefiller(prefiller_idx, prefiller_score,task)
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        raise
     proxy_state.release_prefiller(prefiller_idx, prefiller_score,task)
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
@@ -905,6 +919,10 @@ class InstanceInfo:
 
 
 async def _handle_completions(api: str, request: Request):
+    # [fix #1] request_num must cover the whole streaming lifetime, not just instance
+    # selection. streaming_started distinguishes the "selection failed, stream never
+    # ran" path from the "stream ran and releases via its own finally" path.
+    streaming_started = False
     try:
         proxy_state.request_num += 1
         req_data = await request.json()
@@ -935,6 +953,9 @@ async def _handle_completions(api: str, request: Request):
             try:
                 while retry:
                     retry = False
+                    # [fix #3] reset per (prefiller, decoder) attempt so the KV of the
+                    # newly selected prefiller gets released on its first decode chunk
+                    released_kv = False
                     async for chunk in stream_service_response_with_retry(
                             instance_info.decoder.client,
                             api,
@@ -990,6 +1011,10 @@ async def _handle_completions(api: str, request: Request):
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
+                            # [fix #3] release the decoder we are abandoning before picking a
+                            # new one, otherwise its active_tokens leak (the finally below
+                            # only releases the final instance_info.decoder)
+                            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
                             instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
                             break
                         if retry_count > 0 and not stream_flag:
@@ -1006,13 +1031,21 @@ async def _handle_completions(api: str, request: Request):
                     "prefiller when new request is ready to dispatch to it"
                 )
                 proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
-                proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
             finally:
+                # [fix #9] KV release moved here so it also covers early client disconnect
+                # (CancelledError is a BaseException and is not caught by `except Exception`).
+                # released_kv is True once the first decode chunk already triggered release.
+                if not released_kv:
+                    proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
                 # After streaming done, release tokens
                 proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                # [fix #1] the request is only truly done once its stream finishes; decrement
+                # here so request_num reflects in-flight streams (used as a scaling guard rail)
+                proxy_state.request_num -= 1
 
         # Determine the correct media type based on stream flag
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
+        streaming_started = True
         return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
@@ -1023,7 +1056,10 @@ async def _handle_completions(api: str, request: Request):
         print("".join(traceback.format_exception(*exc_info)))
         raise
     finally:
-        proxy_state.request_num -= 1
+        # [fix #1] only decrement here when the stream never started (e.g. instance
+        # selection failed); the successful path is handled by generate_stream's finally
+        if not streaming_started:
+            proxy_state.request_num -= 1
 
 
 async def _handle_adjust_instances(adjust_mode: str, request: Request):

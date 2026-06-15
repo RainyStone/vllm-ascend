@@ -369,15 +369,22 @@ async def stream_service_response_with_retry(
 ):
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
     for attempt in range(1, max_retries + 1):
+        # [fix #4] reset per attempt so a stale True from a previous iteration
+        # cannot leak across retries
+        first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            # [fix #4] once any chunk has been forwarded to the client we must not
+            # retry, otherwise the client receives a duplicated/corrupted stream.
+            if first_chunk_sent:
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                return
             if attempt < max_retries:
                 logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -385,17 +392,16 @@ async def stream_service_response_with_retry(
                 logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
-            # If any chunk has been sent, do not retry, just log and drop
-            if "first_chunk_sent" in locals() and first_chunk_sent:
+            # [fix #4] same guard as above for non-HTTP exceptions
+            if first_chunk_sent:
                 logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
+            if attempt < max_retries:
+                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                if attempt < max_retries:
-                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
-                    await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-                else:
-                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
-                    raise e
+                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                raise e
 
 
 async def _select_instance(api: str, req_data: Any, request_length: int):
@@ -442,6 +448,10 @@ class InstanceInfo:
 
 
 async def _handle_completions(api: str, request: Request):
+    # [fix #3] track ownership so release_server runs exactly once: either in
+    # generate_stream's finally (normal path) or here (stream never started).
+    instance_info = None
+    streaming_started = False
     try:
         req_data = await request.json()
         req_body = await request.body()
@@ -470,6 +480,7 @@ async def _handle_completions(api: str, request: Request):
                 # After streaming done, release tokens
                 proxy_state.release_server(instance_info.server_idx, instance_info.priority_score, instance_info.request_id)
 
+        streaming_started = True
         return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:
         import traceback
@@ -479,6 +490,12 @@ async def _handle_completions(api: str, request: Request):
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
+    finally:
+        # [fix #3] the stream never started (e.g. client disconnect / error during
+        # instance selection): release here so active_tokens and the bucket task
+        # do not leak. Skipped on the normal path where generate_stream released.
+        if instance_info is not None and not streaming_started:
+            proxy_state.release_server(instance_info.server_idx, instance_info.priority_score, instance_info.request_id)
 
 
 @app.post("/v1/completions")
