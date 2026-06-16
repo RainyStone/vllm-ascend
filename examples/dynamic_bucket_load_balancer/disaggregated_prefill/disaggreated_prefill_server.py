@@ -94,7 +94,7 @@
 # Step 5: Add or Remove Prefiller or Decoder Instances (Optional)
 # ---------------------------------------------------------------
 # You can add or remove prefiller or decoder instances after the proxy is started.
-# For example, add 2 prefiller instances:
+# For example, add 2 prefiller instances (dynamic bucketing off):
 #
 #   curl -X POST http://localhost:8000/instances/add \
 #     -H "Content-Type: application/json" \
@@ -103,7 +103,21 @@
 #           "instances": ["127.0.0.1:8102", "127.0.0.1:8103"]
 #         }'
 #
-# or remove 1 decoder instance ("instances" may be a string or a list):
+# When dynamic bucketing is enabled (--enable-dynamic-bucket), adding a prefiller
+# REQUIRES a "bucket" field that selects which prefill bucket it joins: "short"
+# (short-request bucket) or "long" (long-request bucket). Omitting it for a
+# prefiller is rejected while dynamic bucketing is on. "bucket" only applies to
+# prefillers and is ignored when dynamic bucketing is off or for decode instances:
+#
+#   curl -X POST http://localhost:8000/instances/add \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#           "type": "prefill",
+#           "instances": ["127.0.0.1:8102"],
+#           "bucket": "long"
+#         }'
+#
+# Remove 1 decoder instance ("instances" may be a string or a list):
 #
 #   curl -X POST http://localhost:8000/instances/remove \
 #     -H "Content-Type: application/json" \
@@ -159,6 +173,14 @@ class InstanceType:
 
 
 TAINT_PRIORITY = 1e15
+
+# Bucket name -> group index. Only meaningful when dynamic bucketing is on, in
+# which case the prefiller pool is split into two buckets: group 0 serves short
+# requests ([0, threshold)) and group 1 serves long requests ([threshold, max)).
+# Used to place an explicitly added prefiller into a chosen bucket.
+BUCKET_SHORT = "short"
+BUCKET_LONG = "long"
+BUCKET_NAME_TO_GROUP = {BUCKET_SHORT: 0, BUCKET_LONG: 1}
 
 
 class ServerState:
@@ -483,23 +505,49 @@ class ProxyState:
         else:
             return 0, None
 
-    async def add_instances(self, instance_type: str, instances: list[ServerState]) -> tuple[list[str], list[str]]:
+    async def add_instances(
+        self,
+        instance_type: str,
+        instances: list[ServerState],
+        bucket: Optional[str] = None,
+    ) -> tuple[list[str], list[str]]:
         added_nodes, waiting_nodes = [], []
         for server in instances:
             is_valid = await self.node_listener.check_instance_status(server.client)
             if is_valid and instance_type == InstanceType.PREFILL:
-                self.add_prefillers([server])
+                self.add_prefillers([server], bucket)
                 added_nodes.append(str(server))
             elif is_valid and instance_type == InstanceType.DECODE:
                 self.add_decoders([server])
                 added_nodes.append(str(server))
             else:
                 node = str(server)
-                self.node_listener.waiting_nodes[node] = (instance_type, server, 0)
+                # Remember the requested bucket so a later retry (once the
+                # instance is healthy) places it into the same bucket.
+                self.node_listener.waiting_nodes[node] = (instance_type, server, 0, bucket)
                 waiting_nodes.append(node)
         return added_nodes, waiting_nodes
 
-    def add_prefillers(self, instances: list[ServerState]) -> None:
+    def add_prefillers(self, instances: list[ServerState], bucket: Optional[str] = None) -> None:
+        # Resolve the target bucket for genuinely new prefillers. An explicit
+        # "short"/"long" only applies under dynamic bucketing (two buckets); with
+        # a single bucket every prefiller lives in group 0, so the request is
+        # ignored with a warning. A prefiller that is merely being un-tainted
+        # keeps its existing bucket (we never move servers across buckets on add,
+        # mirroring the removal policy: a bucket reflects a server's capability).
+        if bucket is not None and self.num_prefill_buckets > 1:
+            target_group_idx = BUCKET_NAME_TO_GROUP.get(bucket)
+            if target_group_idx is None:
+                logger.warning(
+                    f"Unsupported bucket '{bucket}'; falling back to automatic "
+                    f"placement.")
+        else:
+            if bucket is not None and self.num_prefill_buckets <= 1:
+                logger.warning(
+                    f"Bucket '{bucket}' requested but dynamic bucketing is off; "
+                    f"the instance is added to the single prefill bucket.")
+            target_group_idx = None  # automatic placement via _add_new_server_to_heaps
+
         for server in instances:
             if server in self.tainted_prefillers:
                 self.tainted_prefillers.remove(server)
@@ -519,7 +567,11 @@ class ProxyState:
 
                 new_prefiller_server_idx = len(self.prefillers) - 1
                 new_server_heap_item = ServerHeapItem(0, new_prefiller_server_idx, server)
-                self.prefiller_heaps, group_idx = self._add_new_server_to_heaps(self.prefiller_heaps, new_server_heap_item)
+                if target_group_idx is not None:
+                    heapq.heappush(self.prefiller_heaps[target_group_idx], new_server_heap_item)
+                    group_idx = target_group_idx
+                else:
+                    self.prefiller_heaps, group_idx = self._add_new_server_to_heaps(self.prefiller_heaps, new_server_heap_item)
                 self.server_idx_to_group_idx[new_prefiller_server_idx] = group_idx
 
         self.print_status(f"Add prefiller instances: {instances}.")
@@ -722,7 +774,8 @@ proxy_state: Optional[ProxyState] = None
 class NodeListener:
     def __init__(self, proxy):
         self.proxy_state = proxy
-        self.waiting_nodes: dict[str, tuple[str, Any, int]] = {}
+        # value: (instance_type, server, check_times, requested_bucket)
+        self.waiting_nodes: dict[str, tuple[str, Any, int, Optional[str]]] = {}
         # Capture the main event loop. The background thread never touches the
         # shared prefiller/decoder structures directly; it marshals the whole poll
         # cycle onto this loop instead. This keeps every mutation of shared state
@@ -747,13 +800,13 @@ class NodeListener:
 
     async def _cycle(self) -> None:
         """One poll cycle; executed on the main event loop."""
-        for node, (instance_type, server, check_times) in list(self.waiting_nodes.items()):
+        for node, (instance_type, server, check_times, bucket) in list(self.waiting_nodes.items()):
             print(f"Checking instance {node}...")
             check_times += 1
             is_valid = await self.check_instance_status(server.client)
             if is_valid:
                 if instance_type == InstanceType.PREFILL:
-                    self.proxy_state.add_prefillers([server])
+                    self.proxy_state.add_prefillers([server], bucket)
                 else:
                     self.proxy_state.add_decoders([server])
                 self.waiting_nodes.pop(node)
@@ -761,7 +814,7 @@ class NodeListener:
                 print(f"Instance {node} was not added to the proxy.")
                 self.waiting_nodes.pop(node)
             else:
-                self.waiting_nodes[node] = (instance_type, server, check_times)
+                self.waiting_nodes[node] = (instance_type, server, check_times, bucket)
 
         self.proxy_state._drain_tainted_instances()
 
@@ -1174,7 +1227,25 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
             }
 
         if adjust_mode == "add":
-            added_nodes, waiting_nodes = await proxy_state.add_instances(instance_type, instances)
+            # "bucket" selects which prefill bucket a newly added prefiller joins
+            # ("short" or "long"). When dynamic bucketing is on it is REQUIRED for
+            # prefillers; otherwise it is ignored (decode, or dynamic bucketing off).
+            bucket = req_data.get("bucket")
+            if instance_type == InstanceType.PREFILL and proxy_state.num_prefill_buckets > 1:
+                if bucket not in BUCKET_NAME_TO_GROUP:
+                    return {
+                        "error": f"'bucket' is required for prefill instances when "
+                                 f"dynamic bucketing is enabled. Expected one of "
+                                 f"{list(BUCKET_NAME_TO_GROUP)} (got {bucket!r})."
+                    }
+            elif bucket is not None:
+                if instance_type == InstanceType.DECODE:
+                    logger.warning("'bucket' is ignored for decode instances.")
+                else:
+                    logger.warning(
+                        "'bucket' is ignored because dynamic bucketing is off.")
+                bucket = None
+            added_nodes, waiting_nodes = await proxy_state.add_instances(instance_type, instances, bucket)
             if waiting_nodes:
                 all_msg = (
                     f"{adjust_mode} {instance_type} instances: {added_nodes}. "
