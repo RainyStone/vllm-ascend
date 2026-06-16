@@ -2,51 +2,56 @@
 
 # SPDX-License-Identifier: Apache-2.0
 #
-# Tutorial: Using the Load Balance Proxy Server For External DP
+# Tutorial: Dynamic Bucketing-Based Hybrid Load Balance Proxy Server
 #
-# This proxy server is designed to distribute requests between multiple
-# vLLM servers running in data parallel for large language model inference.
-# It is useful for scaling out inference workloads and balancing load across
-# multiple vLLM instances.
-#
-# Features:
-# - Load balances requests to multiple vLLM servers.
-# - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
-# - Streams responses from backend servers to clients.
+# This proxy server distributes requests across multiple vLLM servers running
+# for large language model inference. For each request it estimates a load
+# score, picks the least-loaded backend instance, and can optionally split
+# the backend pool into a short-request group and a long-request
+# group (dynamic bucket load balancing).
 #
 # Prerequisites:
 # - Python 3.10+
 # - Install dependencies:
-#     pip install fastapi<0.124.0 httpx uvicorn
+#     pip install "fastapi<0.124.0" httpx uvicorn
 #
 # Step 1: Start Your Backend Servers
 # ----------------------------------
-# You need to have at least two vLLM servers running in data parallel.
-# These can be mock servers or actual vLLM servers.
-# Note that this proxy also works with only one vLLM server running, but
-# will fall back to direct request forwarding which is meaningless.
+# Start at least two vLLM servers , each as a separate process on its own port.
+# The proxy also works with a single backend, but load balancing is only 
+# meaningful with two or more.
 #
-# For testing, you can use the provided mock server:
-#
-#   vllm serve --host 0.0.0.0 --port 8100 --data-parallel-rank 0 ... # vLLM DP0
-#   vllm serve --host 0.0.0.0 --port 8101 --data-parallel-rank 1 ... # vLLM DP1
+#   vllm serve --host 0.0.0.0 --port 8100 ... # vLLM Server0
+#   vllm serve --host 0.0.0.0 --port 8101 ... # vLLM Server1
 #
 # Step 2: Start the Proxy Server
 # ------------------------------
-# Run the proxy server, specifying the host/port for each vLLM DP Instance:
+# From examples/dynamic_bucket_load_balancer/, point the proxy at each backend
+# with --server-hosts / --server-ports:
 #
-#   python dp_load_balance_proxy_server.py \
-#     --host 0.0.0.0 --port 9000 \
-#     --dp-hosts 127.0.0.1 127.0.0.1 \
-#     --dp-ports 8100 8101 \
+#   python hybrid/hybrid_proxy_server.py \
+#     --host 0.0.0.0 --port 8000 \
+#     --server-hosts 127.0.0.1 127.0.0.1 \
+#     --server-ports 8100 8101
 #
-# This will start the proxy on port 9000, load balancing between two vLLM DP servers.
+# This starts the proxy on port 8000 and load balances across the two backends.
+#
+# To enable dynamic bucket load balancing (split the pool into short/long groups),
+# add --enable-dynamic-bucket. The server count must be >= 2 so each bucket has at
+# least one instance:
+#
+#   python hybrid/hybrid_proxy_server.py \
+#     --host 0.0.0.0 --port 8000 \
+#     --server-hosts 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 \
+#     --server-ports 8100 8101 8102 8103 \
+#     --enable-dynamic-bucket \
+#     --server-group-threshold 32768
 #
 # Step 3: Send a Request to the Proxy
 # -----------------------------------
-# You can now send OpenAI-compatible requests to the proxy. For example:
+# Send OpenAI-compatible requests to the proxy. For example:
 #
-#   curl -X POST http://localhost:9000/v1/completions \
+#   curl -X POST http://localhost:8000/v1/completions \
 #     -H "Content-Type: application/json" \
 #     -d '{
 #           "model": "your-model",
@@ -56,7 +61,7 @@
 #
 # Or for chat completions:
 #
-#   curl -X POST http://localhost:9000/v1/chat/completions \
+#   curl -X POST http://localhost:8000/v1/chat/completions \
 #     -H "Content-Type: application/json" \
 #     -d '{
 #           "model": "your-model",
@@ -66,21 +71,12 @@
 #
 # Step 4: Health Check
 # --------------------
-# To check if the proxy is running and see how many backend instances are
-# connected, use:
+# Check that the proxy is running and how many backends it fronts:
 #
-#   curl http://localhost:9000/healthcheck
+#   curl http://localhost:8000/healthcheck
 #
-# This will return a JSON object with the status and the number of vLLM DP servers.
-#
-# Notes:
-# - You can scale the number of vLLM data parallel size as needed.
-# - The proxy will consider the length of requests to balance load.
-# - For production, ensure your backend servers are robust and secure.
-#
-# For more details, see the code and comments in this file.
-
-# TODO 文档描述待优化
+# Returns a JSON object, e.g.:
+#   {"status": "ok", "server_instances": 2}
 
 import argparse
 import asyncio
@@ -510,7 +506,7 @@ async def handle_chat_completions(request: Request):
 async def healthcheck():
     return {
         "status": "ok",
-        "dp_instances": len(proxy_state.infer_servers),
+        "server_instances": len(proxy_state.infer_servers),
     }
 
 

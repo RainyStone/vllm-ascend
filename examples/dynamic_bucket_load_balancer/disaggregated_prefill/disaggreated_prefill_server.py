@@ -2,54 +2,68 @@
 
 # SPDX-License-Identifier: Apache-2.0
 #
-# Tutorial: Using the Load Balance Proxy Server Example
+# Tutorial: Dynamic Bucketing-Based Disaggregated Prefill Proxy Server
 #
-# This proxy server is designed to distribute requests between multiple
-# "prefiller" and "decoder" backend servers for large language model inference.
-# It is useful for scaling out inference workloads and balancing load across
-# multiple backend instances.
-#
-# Features:
-# - Load balances requests to multiple prefiller and decoder servers.
-# - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
-# - Streams responses from backend servers to clients.
+# This proxy server implements disaggregated prefill (PD disaggregation): each
+# request is prefilled on a "prefiller" backend (KV producer), its KV cache is
+# transferred to a "decoder" backend (KV consumer), and the response is decoded
+# and streamed from the decoder. It load balances across multiple prefiller and
+# decoder instances, and can optionally split the prefiller pool into a
+# short-request group and a long-request group (dynamic bucket load balancing).
 #
 # Prerequisites:
 # - Python 3.10+
 # - Install dependencies:
-#     pip install fastapi<0.124.0 httpx uvicorn vllm
+#     pip install "fastapi<0.124.0" httpx uvicorn vllm
 #
 # Step 1: Start Your Backend Servers
 # ----------------------------------
-# You need to have at least one prefiller and one decoder backend running.
-# These can be mock servers or actual vLLM servers.
+# Start prefiller (KV producer) and decoder (KV consumer) vLLM servers, each on
+# its own port, configured as a disaggregated-prefill pair via --kv-transfer-config
+# (e.g. MooncakeConnectorV1 with kv_role "kv_producer"/"kv_consumer"). See
+# examples/disaggregated_prefill_v1/mooncake_connector_deployment_guide.md for the
+# full config. You need at least one prefiller and one decoder.
 #
-# For testing, you can use the provided mock server:
-#
-#   vllm serve --host 0.0.0.0 --port 8100 ... # Prefiller 1
-#   vllm serve --host 0.0.0.0 --port 8101 ... # Prefiller 2
-#   vllm serve --host 0.0.0.0 --port 8200 ... # Decoder 1
-#   vllm serve --host 0.0.0.0 --port 8201 ... # Decoder 2
+#   # Prefiller (kv_role: kv_producer)
+#   vllm serve <model> --host 0.0.0.0 --port 8100 \
+#     --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer",...}'
+#   # Decoder (kv_role: kv_consumer)
+#   vllm serve <model> --host 0.0.0.0 --port 8200 \
+#     --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer",...}'
 #
 # Step 2: Start the Proxy Server
 # ------------------------------
-# Run the proxy server, specifying the host/port for each prefiller and decoder:
+# From examples/dynamic_bucket_load_balancer/, point the proxy at each prefiller
+# and decoder with --prefiller-hosts/--prefiller-ports and
+# --decoder-hosts/--decoder-ports:
 #
-#   python load_balance_proxy_server_example.py \
-#     --host 0.0.0.0 --port 9000 \
+#   python disaggregated_prefill/disaggreated_prefill_server.py \
+#     --host 0.0.0.0 --port 8000 \
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 \
 #     --decoder-hosts 127.0.0.1 127.0.0.1 \
 #     --decoder-ports 8200 8201
 #
-# This will start the proxy on port 9000, load balancing between two prefiller
-# and two decoder servers.
+# This starts the proxy on port 8000 across two prefillers and two decoders.
+#
+# To enable dynamic bucket load balancing (split the prefiller pool into
+# short/long groups), add --enable-dynamic-bucket. The prefiller count must be
+# >= 2 so each bucket has at least one instance:
+#
+#   python disaggregated_prefill/disaggreated_prefill_server.py \
+#     --host 0.0.0.0 --port 8000 \
+#     --prefiller-hosts 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 \
+#     --prefiller-ports 8100 8101 8102 8103 \
+#     --decoder-hosts 127.0.0.1 127.0.0.1 \
+#     --decoder-ports 8200 8201 \
+#     --enable-dynamic-bucket \
+#     --prefill-group-threshold 32768
 #
 # Step 3: Send a Request to the Proxy
 # -----------------------------------
-# You can now send OpenAI-compatible requests to the proxy. For example:
+# Send OpenAI-compatible requests to the proxy. For example:
 #
-#   curl -X POST http://localhost:9000/v1/completions \
+#   curl -X POST http://localhost:8000/v1/completions \
 #     -H "Content-Type: application/json" \
 #     -d '{
 #           "model": "your-model",
@@ -59,7 +73,7 @@
 #
 # Or for chat completions:
 #
-#   curl -X POST http://localhost:9000/v1/chat/completions \
+#   curl -X POST http://localhost:8000/v1/chat/completions \
 #     -H "Content-Type: application/json" \
 #     -d '{
 #           "model": "your-model",
@@ -69,50 +83,34 @@
 #
 # Step 4: Health Check
 # --------------------
-# To check if the proxy is running and see how many backend instances are
-# connected, use:
+# Check that the proxy is running and how many prefiller/decoder instances it
+# fronts:
 #
-#   curl http://localhost:9000/healthcheck
+#   curl http://localhost:8000/healthcheck
 #
-# This will return a JSON object with the status and the number of prefiller
-# and decoder instances.
+# Returns a JSON object, e.g.:
+#   {"status": "ok", "prefill_instances": 2, "decode_instances": 2}
 #
 # Step 5: Add or Remove Prefiller or Decoder Instances (Optional)
 # ---------------------------------------------------------------
 # You can add or remove prefiller or decoder instances after the proxy is started.
 # For example, add 2 prefiller instances:
 #
-#   curl -X POST http://localhost:9000/instances/add \
+#   curl -X POST http://localhost:8000/instances/add \
 #     -H "Content-Type: application/json" \
 #     -d '{
 #           "type": "prefill",
 #           "instances": ["127.0.0.1:8102", "127.0.0.1:8103"]
 #         }'
 #
-# or remove 1 decoder instance:
+# or remove 1 decoder instance ("instances" may be a string or a list):
 #
-#   curl -X POST http://localhost:9000/instances/remove \
+#   curl -X POST http://localhost:8000/instances/remove \
 #     -H "Content-Type: application/json" \
 #     -d '{
 #           "type": "decode",
 #           "instances": "127.0.0.1:8201"
 #         }'
-#
-# This will return a JSON object with the adding or removing info
-# and the current prefiller and decoder instances.
-#
-# When adding instances, if the instances are not started,
-# the proxy will wait and try until the instances to be started
-# or exceeding the number of attempts
-#
-# Notes:
-# - You can scale the number of prefiller and decoder servers as needed.
-# - The proxy will round-robin requests to balance load.
-# - For production, ensure your backend servers are robust and secure.
-#
-# For more details, see the code and comments in this file.
-
-# TODO 文档描述待优化
 
 import argparse
 import asyncio
@@ -234,11 +232,9 @@ class ProxyState:
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
         prefiller_heap_items = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.prefillers)]
-        # TODO self.prefiller_heaps、self.server_idx_to_group_idx、self.prefill_group_load 等分桶变量在动态扩缩容时需要适配
         # 对Server进行分组
         self.prefiller_heaps: List[List[ServerHeapItem]] = self._group_servers(prefiller_heap_items, self.num_prefill_buckets)
         self.server_idx_to_group_idx = {}
-        # TODO self.prefill_group_load 可以删掉？
         self.prefill_group_load = {}
         # 堆化每一分组
         for idx, cur_heap in enumerate(self.prefiller_heaps):
@@ -553,7 +549,6 @@ class ProxyState:
                 self.server_idx_to_group_idx[server_item.server_idx] = group_idx
             heapq.heapify(heap)
 
-        # TODO 需随之更新，self.prefill_group_load = {}，分数计算是否正确？
         for group_idx, heap in enumerate(self.prefiller_heaps):
             self.prefill_group_load[group_idx] = 0
             for server_item in heap:
@@ -848,7 +843,6 @@ async def stream_service_response_with_retry(
 
 async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_score = 0
-    # TODO asw 计算 prefiller_score 的逻辑在 num_prefill_buckets 取不同值时不太一致
     if proxy_state.num_prefill_buckets > 1:
         prefiller_score = proxy_state.calculate_prefill_tokens(request_length)
     else:
@@ -859,7 +853,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     request_tokens = proxy_state.calculate_prefill_tokens(request_length)
     group_idx, task = proxy_state.select_prefill_group(request_id, request_tokens, prefiller_score)
 
-    logger.warning(f'Test =====selected group_idx: {group_idx}')
+    logger.debug(f'Selected group_idx: {group_idx}')
 
     prefiller_idx = proxy_state.select_prefiller(prefiller_score, group_idx)
 
