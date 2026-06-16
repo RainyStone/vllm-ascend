@@ -213,6 +213,9 @@ class ProxyState:
         self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
+        # Background tasks closing httpx clients of removed instances; kept so they
+        # are not garbage-collected before completion.
+        self._pending_closes: set = set()
         # Removed selection locks - no longer needed for synchronous methods
 
         # 动态分桶负载均衡器
@@ -335,6 +338,35 @@ class ProxyState:
         self.decoder_heap.append(ServerHeapItem(priority, server_idx, server))
         heapq.heapify(self.decoder_heap)
 
+    def _restore_prefiller_priorities(self, servers) -> None:
+        """Recompute and re-apply heap priority for the given prefillers.
+
+        Used to un-taint servers that a removal attempt could not evict, so they
+        become selectable again instead of being stranded at TAINT_PRIORITY
+        (fix: orphaned taint). Harmless for servers that were never tainted.
+        """
+        for idx, server in enumerate(self.prefillers):
+            if server in servers:
+                self._update_prefiller_priority(idx)
+
+    def _restore_decoder_priorities(self, servers) -> None:
+        """Recompute and re-apply heap priority for the given decoders (un-taint)."""
+        for idx, server in enumerate(self.decoders):
+            if server in servers:
+                self._update_decoder_priority(idx)
+
+    def _schedule_close(self, server: "ServerState") -> None:
+        """Close a removed instance's httpx client without blocking selection.
+
+        Fire-and-forget on the main loop (remove_* always runs there). The task
+        reference is retained so it is not GC'd before aclose() finishes (fix:
+        connection leak on instance removal). Only reached when request_num == 0,
+        so the client has no in-flight request.
+        """
+        task = asyncio.create_task(server.client.aclose())
+        self._pending_closes.add(task)
+        task.add_done_callback(self._pending_closes.discard)
+
     def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
         Mark a request as aborted. This will helps to release kv cache in
@@ -365,6 +397,11 @@ class ProxyState:
         # No lock needed - entire function is atomic
         if not self.prefillers:
             raise RuntimeError("No prefiller servers available")
+        # Defensive: removal is refused if it would empty a bucket, but guard
+        # against a cryptic IndexError if that invariant ever breaks.
+        if not self.prefiller_heaps[group_idx]:
+            raise RuntimeError(
+                f"No prefiller servers available in bucket group {group_idx}")
 
         server_heap_item:ServerHeapItem = heapq.heappop(self.prefiller_heaps[group_idx])
         chosen_server_idx = server_heap_item.server_idx
@@ -514,9 +551,20 @@ class ProxyState:
 
         instances_to_remove = set(instances)
 
-        if len(self.prefillers) - len(instances_to_remove) < self.num_prefill_buckets:
-            logger.warning("Number of prefillers must greater than or equal to number of prefill buckets")
-            return False
+        # [A2] Each prefiller must stay in its assigned bucket: a bucket reflects
+        # the request-length class its servers are meant to serve, so we must not
+        # rebalance servers across buckets on removal. Instead, refuse any removal
+        # that would empty a bucket (a request routed to an empty bucket would
+        # otherwise IndexError in select_prefiller).
+        for group_idx, heap in enumerate(self.prefiller_heaps):
+            if all(item.server in instances_to_remove for item in heap):
+                logger.warning(
+                    f"Refusing removal: prefill bucket group {group_idx} would be "
+                    f"left empty")
+                # [A1] un-taint so the servers stay usable and are not stranded at
+                # TAINT_PRIORITY after the caller clears the list.
+                self._restore_prefiller_priorities(instances_to_remove)
+                return False
 
         new_prefillers = []
         old_idx_to_new_idx = {}
@@ -527,10 +575,15 @@ class ProxyState:
             else:
                 if server.active_tokens!=0 or server.active_kv_cache!=0 or server.active_requests!=0:
                     logger.warning("Prefill server is not empty, please wait for all requests to be completed")
+                    # [A1] same as above: un-taint before refusing.
+                    self._restore_prefiller_priorities(instances_to_remove)
                     return False
 
+        removed_servers = [s for s in self.prefillers if s in instances_to_remove]
         self.prefillers = new_prefillers
 
+        # Rebuild heaps preserving each surviving server's bucket membership and
+        # remapping its index into the new (compacted) prefiller list.
         new_prefiller_heaps: List[List[ServerHeapItem]] = []
         for group_idx, heap in enumerate(self.prefiller_heaps):
             new_heap = []
@@ -554,6 +607,10 @@ class ProxyState:
             for server_item in heap:
                 self.prefill_group_load[group_idx] += server_item.server.active_tokens
 
+        # [D2] Close httpx clients of the removed instances to avoid leaks.
+        for server in removed_servers:
+            self._schedule_close(server)
+
         self.print_status(f"Remove prefiller instances: {instances}.")
         return False
 
@@ -567,13 +624,25 @@ class ProxyState:
             return True
 
         instances_to_remove = set(instances)
+
+        # [D3] Keep at least one decoder: select_decoder raises if the pool is empty.
+        if all(server in instances_to_remove for server in self.decoders):
+            logger.warning("Refusing removal: no decoder would be left after removal")
+            # [A1] un-taint so the decoders stay selectable instead of being stranded.
+            self._restore_decoder_priorities(instances_to_remove)
+            return False
+
         # [fix #2] refuse to remove a decoder that still has in-flight requests, mirroring
         # remove_prefillers; otherwise the rebuild + reindex below invalidates in-flight
         # decoder_idx held by active streams (release_decoder would hit the wrong decoder).
         for server in self.decoders:
             if server in instances_to_remove and server.active_tokens != 0:
                 logger.warning("Decode server is not empty, please wait for all requests to be completed")
+                # [A1] un-taint so the decoder stays selectable instead of being
+                # stranded at TAINT_PRIORITY after the caller clears the list.
+                self._restore_decoder_priorities(instances_to_remove)
                 return False
+        removed_servers = [server for server in self.decoders if server in instances_to_remove]
         self.decoders = [server for server in self.decoders if server not in instances_to_remove]
         decoder_heap_copy:List[ServerHeapItem] = self.decoder_heap.copy()
         decoder_heap_copy.sort(key=lambda x: x.server_idx)  # sorted by key: decoder_idx
@@ -586,8 +655,30 @@ class ProxyState:
 
         self.decoder_heap = decoder_heap
         heapq.heapify(self.decoder_heap)
+        # [D2] Close httpx clients of the removed instances to avoid leaks.
+        for server in removed_servers:
+            self._schedule_close(server)
+
         self.print_status(f"Remove decoder instances: {instances}.")
         return False
+
+    def _drain_tainted_instances(self) -> None:
+        """Try to evict tainted instances once no requests are in flight.
+
+        Runs on the main event loop (scheduled by NodeListener), so the
+        request_num check is atomic w.r.t. request selection (fix: cross-thread
+        TOCTOU on the drain guard). remove_* un-taints whatever it cannot evict,
+        so clearing the tainted lists afterwards never strands a server.
+        """
+        if self.tainted_prefillers and not self.request_num:
+            need_waiting = self.remove_prefillers(self.tainted_prefillers)
+            if not need_waiting:
+                self.tainted_prefillers.clear()
+
+        if self.tainted_decoders and not self.request_num:
+            need_waiting = self.remove_decoders(self.tainted_decoders)
+            if not need_waiting:
+                self.tainted_decoders.clear()
 
     def _taint_prefillers(self, instances: list[ServerState]) -> None:
         instances_to_taint = set(instances)
@@ -632,37 +723,47 @@ class NodeListener:
     def __init__(self, proxy):
         self.proxy_state = proxy
         self.waiting_nodes: dict[str, tuple[str, Any, int]] = {}
+        # Capture the main event loop. The background thread never touches the
+        # shared prefiller/decoder structures directly; it marshals the whole poll
+        # cycle onto this loop instead. This keeps every mutation of shared state
+        # (heaps, lists, request_num, waiting_nodes) single-threaded, so the
+        # synchronous add/remove/select/release methods stay race-free without
+        # locking, the request_num drain-guard becomes atomic w.r.t. selection,
+        # and the readiness probe reuses each server's httpx client on the loop
+        # that owns it (no cross-loop client usage).
+        self.loop = asyncio.get_running_loop()
         self.listening_thread = threading.Thread(target=self._node_listener, daemon=True)
         self.listening_thread.start()
 
     def _node_listener(self) -> None:
         while True:
-            for node, (instance_type, server, check_times) in list(self.waiting_nodes.items()):
-                is_valid = asyncio.run(self.check_instance_status(server.client))
-                print(f"Checking instance {node}...")
-                check_times += 1
-                if is_valid:
-                    if instance_type == InstanceType.PREFILL:
-                        self.proxy_state.add_prefillers([server])
-                    else:
-                        self.proxy_state.add_decoders([server])
-                    self.waiting_nodes.pop(node)
-                elif check_times == global_args.max_waiting_retries:
-                    print(f"Instance {node} was not added to the proxy.")
-                    self.waiting_nodes.pop(node)
-                else:
-                    self.waiting_nodes[node] = (instance_type, server, check_times)
-
-            if self.proxy_state.tainted_prefillers and not self.proxy_state.request_num:
-                need_waiting = self.proxy_state.remove_prefillers(self.proxy_state.tainted_prefillers)
-                if not need_waiting:
-                    self.proxy_state.tainted_prefillers.clear()
-
-            if self.proxy_state.tainted_decoders and not self.proxy_state.request_num:
-                need_waiting = self.proxy_state.remove_decoders(self.proxy_state.tainted_decoders)
-                if not need_waiting:
-                    self.proxy_state.tainted_decoders.clear()
+            try:
+                # Run the entire cycle on the main loop and block until it finishes.
+                future = asyncio.run_coroutine_threadsafe(self._cycle(), self.loop)
+                future.result()
+            except Exception as e:
+                logger.error(f"Node listener cycle failed: {e}")
             time.sleep(global_args.waiting_retry_interval)
+
+    async def _cycle(self) -> None:
+        """One poll cycle; executed on the main event loop."""
+        for node, (instance_type, server, check_times) in list(self.waiting_nodes.items()):
+            print(f"Checking instance {node}...")
+            check_times += 1
+            is_valid = await self.check_instance_status(server.client)
+            if is_valid:
+                if instance_type == InstanceType.PREFILL:
+                    self.proxy_state.add_prefillers([server])
+                else:
+                    self.proxy_state.add_decoders([server])
+                self.waiting_nodes.pop(node)
+            elif check_times == global_args.max_waiting_retries:
+                print(f"Instance {node} was not added to the proxy.")
+                self.waiting_nodes.pop(node)
+            else:
+                self.waiting_nodes[node] = (instance_type, server, check_times)
+
+        self.proxy_state._drain_tainted_instances()
 
     @staticmethod
     async def check_instance_status(client: httpx.AsyncClient) -> bool:
@@ -1082,11 +1183,24 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
         elif adjust_mode == "remove":
             if instance_type == InstanceType.PREFILL:
                 need_waiting = proxy_state.remove_prefillers(instances)
+                current_pool = proxy_state.prefillers
             else:
                 need_waiting = proxy_state.remove_decoders(instances)
+                current_pool = proxy_state.decoders
 
             if need_waiting:
                 all_msg = f"Instances {instances} are isolated and waiting to be removed."
+            else:
+                # [A3] Distinguish actually-removed from refused (empty-bucket / busy
+                # guards): refused instances are still in the pool after the call.
+                refused = [s for s in instances if s in current_pool]
+                if refused:
+                    all_msg = (
+                        f"Refused to remove {instance_type} instances "
+                        f"{[str(s) for s in refused]}: still busy or their removal "
+                        f"would empty a bucket/pool.")
+                else:
+                    all_msg = f"Removed {instance_type} instances: {[str(s) for s in instances]}."
         return {
             "message": all_msg,
             "current_prefill_instances": [str(prefiller) for prefiller in proxy_state.prefillers],
