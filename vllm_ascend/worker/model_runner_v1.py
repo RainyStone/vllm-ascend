@@ -36,7 +36,7 @@ from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_f
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group, get_dycp_group
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -130,7 +130,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.pcp_utils import PCPManager, build_batch_req_id_to_cp_size
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -309,21 +309,44 @@ class NPUModelRunner(GPUModelRunner):
             self.dcp_rank = get_dcp_group().rank_in_group
             self.pcp_size = get_pcp_group().world_size
             self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+            self.dycp_size = self.parallel_config.dp_per_domain
+            self.dycp_rank = 0 if self.dycp_size <= 1 else get_dycp_group().rank_in_group
+            self.cp_world_size = self.dycp_size
+            self.cp_rank = self.dycp_rank
+            kv_role = getattr(vllm_config.kv_transfer_config, "kv_role", None)
+            if self.dycp_size > 1 and kv_role == 'kv_producer':
+                self.prefill_dycp_size = self.dycp_size
+                self.prefill_dycp_rank = self.dycp_rank
+            else:
+                self.prefill_dycp_size = 1
+                self.prefill_dycp_rank = 0
         except Exception:
             self.dcp_size = 1
             self.dcp_rank = 0
             self.pcp_size = 1
             self.pcp_rank = 0
-        if self.pcp_size > 1:
-            self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
+            self.dycp_size = 1
+            self.dycp_rank = 0
+            self.cp_world_size = 1
+            self.cp_rank = 0
+            self.prefill_dycp_size = 1
+            self.prefill_dycp_rank = 0
+
+        self.common_pcp_size = self.prefill_dycp_size if self.prefill_dycp_size > 1 else self.pcp_size
+        self.common_pcp_rank = self.prefill_dycp_rank if self.prefill_dycp_size > 1 else self.pcp_rank
+
+        if self.use_prefill_cp:
+            self.model_config.max_model_len += 2 * self.common_pcp_size * self.max_num_reqs
         max_buffer_num_tokens = self.max_num_tokens
-        if self.pcp_size * self.dcp_size > 1:
-            max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
+        if self.common_pcp_size * self.dcp_size * self.dycp_size > 1:
+            max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.common_pcp_size
             self.pcp_manager = PCPManager(
-                self.pcp_size,
-                self.pcp_rank,
+                self.common_pcp_size,
+                self.common_pcp_rank,
                 self.dcp_size,
                 self.dcp_rank,
+                self.dycp_size,
+                self.dycp_rank,
                 max_buffer_num_tokens,
                 self.max_num_reqs,
                 self.device,
@@ -422,6 +445,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self.req_id_to_cp_size = {}
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -436,7 +460,67 @@ class NPUModelRunner(GPUModelRunner):
 
     @property
     def use_cp(self) -> bool:
-        return self.pcp_size * self.dcp_size > 1
+        return self.common_pcp_size * self.dcp_size * self.dycp_size > 1
+
+    @property
+    def use_prefill_cp(self) -> bool:
+        return self.pcp_size > 1 or self.prefill_dycp_size > 1
+
+    def _get_fallback_cp_size(self) -> int:
+        parallel_config = self.vllm_config.parallel_config
+        dp_per_domain = max(1, parallel_config.dp_per_domain)
+        return max(1, parallel_config.data_parallel_size // dp_per_domain)
+
+    def _get_req_cp_size(self, req_id: str) -> int:
+        return self.req_id_to_cp_size.get(
+            req_id,
+            self.input_batch.req_id_to_cp_size.get(req_id, 1),
+        )
+
+    def _sync_dycp_sampled_token_ids(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor,
+    ) -> None:
+        if self.dycp_size <= 1 or sampled_token_ids is None:
+            return
+
+        num_cp_request = int(getattr(scheduler_output, "num_cp_request", 0) or 0)
+        if num_cp_request <= 0 or sampled_token_ids.numel() == 0:
+            return
+
+        # DyCP decodes one logical request on multiple DP ranks. Keep the
+        # sampled token authoritative on rank 0 before bookkeeping writes it.
+        num_rows = min(num_cp_request, sampled_token_ids.shape[0])
+        if num_rows <= 0:
+            return
+
+        dycp_group = get_dycp_group()
+        if getattr(dycp_group, "world_size", 1) <= 1:
+            return
+
+        sync_token_ids = sampled_token_ids[:num_rows].contiguous()
+        dycp_group.broadcast(sync_token_ids, src=0)
+        sampled_token_ids[:num_rows].copy_(sync_token_ids)
+
+    def _update_batch_req_cp_sizes(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_cp_request: int,
+    ) -> None:
+        scheduler_req_cp_size = getattr(scheduler_output, "req_id_to_cp_size", {}) or {}
+        if scheduler_req_cp_size:
+            self.req_id_to_cp_size.update(scheduler_req_cp_size)
+
+        req_id_to_cp_size = build_batch_req_id_to_cp_size(
+            self.input_batch.req_ids,
+            scheduler_req_cp_size,
+            self.req_id_to_cp_size,
+            num_cp_request,
+            self._get_fallback_cp_size(),
+        )
+        self.req_id_to_cp_size.update(req_id_to_cp_size)
+        self.input_batch.req_id_to_cp_size = req_id_to_cp_size
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -610,13 +694,24 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
 
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        num_cp_request = 0
+        if self.dycp_size > 1:
+            num_cp_request = scheduler_output.num_cp_request
+        elif self.pcp_size > 1:
+            num_cp_request = num_reqs
+
+        if self.dycp_size > 1:
+            self.input_batch.block_table.compute_domain_slot_mapping(req_indices, positions_np, num_cp_request)
+        else:
+            self.input_batch.block_table.compute_slot_mapping(
+                req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
+                num_cp_request,
             )
 
         # for pcp, prefill mtp should use origin scheduleroutput ,
@@ -635,23 +730,30 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_spec_tokens,
             )
 
-        if self.pcp_size > 1:
-            num_scheduled_tokens[:num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
-                num_scheduled_tokens[:num_reqs], self.arange_np
+        total_num_pcp_scheduled_tokens = 0
+        if self.use_prefill_cp:
+            num_scheduled_tokens[:num_cp_request], position_pcp, position_mask = self.pcp_manager.update_tokens_for_pcp(
+                num_scheduled_tokens, self.arange_np
             )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+            total_num_pcp_scheduled_tokens = sum(num_scheduled_tokens[:num_cp_request])
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens[:num_reqs])
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
-            positions_np = self.positions.np[:total_num_scheduled_tokens]
+            tmp_positions_np = self.positions.np[:total_num_scheduled_tokens]
             np.add(
-                self.input_batch.num_computed_tokens_cpu[req_indices],
-                position_pcp[:total_num_scheduled_tokens],
-                out=positions_np,
+                self.input_batch.num_computed_tokens_cpu[req_indices[: total_num_pcp_scheduled_tokens]],
+                position_pcp[:total_num_pcp_scheduled_tokens],
+                out=tmp_positions_np[: total_num_pcp_scheduled_tokens],
             )
-        if self.pcp_size > 1 and self.pcp_manager.pcp_use_hybrid_attn:
-            assert self.pcp_manager.num_scheduled_tokens_padded is not None
-            self.query_lens = torch.from_numpy(self.pcp_manager.num_scheduled_tokens_padded)
+            total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
+            tmp_positions_np[total_num_pcp_scheduled_tokens: total_num_scheduled_tokens] = positions_np[
+                total_num_pcp_scheduled_tokens * self.common_pcp_size - total_num_pcp_pads:]
+            positions_np = tmp_positions_np
+
+        if self.use_prefill_cp and self.pcp_manager.pcp_use_hybrid_attn:
+            assert self.pcp_manager.num_scheduled_pcp_tokens_padded is not None
+            self.query_lens = torch.from_numpy(self.pcp_manager.num_scheduled_pcp_tokens_padded)
         else:
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
@@ -671,6 +773,10 @@ class NPUModelRunner(GPUModelRunner):
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+
+        if self.use_prefill_cp and num_cp_request > 0:
+            self.input_ids.cpu[: total_num_pcp_scheduled_tokens][~position_mask[:total_num_pcp_scheduled_tokens]] = 0
+
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -696,22 +802,33 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
-                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
-
-                # Skip if trying to read beyond available embeddings
-                if start_pos >= req_embeds.shape[0]:
-                    output_idx += num_sched
-                    continue
-
-                # Copy available embeddings
-                end_pos = start_pos + num_sched
-                actual_end = min(end_pos, req_embeds.shape[0])
-                actual_num_sched = actual_end - start_pos
-
-                if actual_num_sched > 0:
-                    self.inputs_embeds.cpu[output_idx : output_idx + actual_num_sched].copy_(
-                        req_embeds[start_pos:actual_end]
+                if self.common_pcp_size > 1:
+                    # PCP can split one request into non-contiguous token positions.
+                    # We must gather prompt embeds by actual scheduled positions.
+                    req_positions_np = positions_np[output_idx : output_idx + num_sched]
+                    dst_slice = self.inputs_embeds.cpu[output_idx : output_idx + num_sched]
+                    self.pcp_manager.fill_prompt_embeds_for_pcp(
+                        req_embeds=req_embeds,
+                        req_positions_np=req_positions_np,
+                        dst_slice=dst_slice,
                     )
+                else:
+                    start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+
+                    # Skip if trying to read beyond available embeddings
+                    if start_pos >= req_embeds.shape[0]:
+                        output_idx += num_sched
+                        continue
+
+                    # Copy available embeddings
+                    end_pos = start_pos + num_sched
+                    actual_end = min(end_pos, req_embeds.shape[0])
+                    actual_num_sched = actual_end - start_pos
+
+                    if actual_num_sched > 0:
+                        self.inputs_embeds.cpu[output_idx : output_idx + actual_num_sched].copy_(
+                            req_embeds[start_pos:actual_end]
+                        )
 
                 output_idx += num_sched
 
@@ -730,7 +847,11 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
-        self.seq_lens.cpu[num_reqs:].fill_(0)
+        # Keep CPU seq_lens tail clean because metadata builders consume
+        # seq_lens_cpu[:num_reqs_padded] in full-graph mode.
+        # If tail is stale, padded requests may inherit old lengths and
+        # produce incorrect attention inputs during graph replay.
+        self.seq_lens.np[num_reqs:] = 0
         self.seq_lens.copy_to_gpu()
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
@@ -765,7 +886,7 @@ class NPUModelRunner(GPUModelRunner):
         base_num_reqs = self.input_batch.num_reqs
         num_reqs = base_num_reqs
         tokens_original = None
-        if self.pcp_size > 1:
+        if self.use_prefill_cp:
             # while pcp > 1, we need the original num_scheduled_tokens before split
             # to calculate discard_requests_mask
             tokens_original = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
@@ -791,7 +912,30 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
             if self.use_cp:
-                logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens, num_reqs, tokens_original)
+                base_logits_indices = torch.from_numpy(cu_num_tokens[:num_reqs].copy()) - 1
+                if self.use_prefill_cp:
+                    logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens, num_reqs, tokens_original)
+                    logger.debug(
+                        f"logits_indices prefill_cp num_reqs={num_reqs}, "
+                        f"num_cp_request={num_cp_request}, cu_num_tokens={cu_num_tokens[:num_reqs].tolist()}, "
+                        f"logits_indices={logits_indices.tolist()}"
+                    )
+                elif self.dycp_size > 1 and num_cp_request > 0:
+                    num_dycp_reqs = num_cp_request
+                    logits_indices = base_logits_indices
+                    logger.debug(
+                        f"logits_indices dycp num_reqs={num_reqs}, "
+                        f"num_dycp_reqs={num_dycp_reqs}, "
+                        f"cu_num_tokens={cu_num_tokens[:num_reqs].tolist()}, logits_indices={logits_indices.tolist()}"
+                    )
+                else:
+                    logits_indices = base_logits_indices
+                    logger.debug(
+                        f"logits_indices cp_base num_reqs={num_reqs}, "
+                        f"num_cp_request={num_cp_request}, dycp_size={self.dycp_size}, "
+                        f"dcp_size={self.dcp_size}, cu_num_tokens={cu_num_tokens[:num_reqs].tolist()}, "
+                        f"logits_indices={logits_indices.tolist()}"
+                    )
                 logits_indices = logits_indices.pin_memory().to(self.device, non_blocking=True)
             else:
                 logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
@@ -820,7 +964,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens,
                 cu_num_tokens,
-                num_pcp_pads=self.pcp_manager.num_pcp_pads_cpu[:num_reqs] if self.pcp_size > 1 else None,
+                num_pcp_pads=self.pcp_manager.num_pcp_pads_cpu[:num_reqs] if self.use_prefill_cp else None,
             )
             logits_indices = spec_decode_metadata.logits_indices
             num_sampled_tokens = num_draft_tokens + 1
@@ -840,11 +984,127 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
+        self._update_batch_req_cp_sizes(scheduler_output, num_cp_request)
+        # Cache local scheduled token layout for PCP-aware multimodal preprocess.
+        if (
+            self.common_pcp_size > 1
+            and self.supports_mm_inputs
+            and get_pp_group().is_first_rank
+            and not self.model_config.is_encoder_decoder
+        ):
+            self.pcp_manager.cache_local_schedule_layout(
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_reqs=base_num_reqs,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+            )
+
         return (
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
+            total_num_pcp_scheduled_tokens,
         )
+
+    def _preprocess(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+        IntermediateTensors | None,
+        dict[str, Any],
+        ECConnectorOutput | None,
+    ]:
+        restore_state = None
+
+        # For PCP, local worker token count can differ from scheduler global count.
+        # Multimodal preprocessing must use local scheduled token count.
+        if (
+            self.common_pcp_size > 1
+            and self.supports_mm_inputs
+            and get_pp_group().is_first_rank
+            and not self.model_config.is_encoder_decoder
+        ):
+            positions_np = (
+                self.positions.np
+                if hasattr(self.positions, "np")
+                else self._positions_np_buf
+            )
+            local_num_sched, local_total = self.pcp_manager.get_local_schedule_layout()
+            restore_state = self.pcp_manager.maybe_localize_scheduler_output_for_mm_preprocess(
+                scheduler_output=scheduler_output,
+                req_ids=self.input_batch.req_ids,
+                requests=self.requests,
+                positions_np=positions_np,
+                local_num_scheduled_tokens=local_num_sched,
+                local_total_num_scheduled_tokens=local_total,
+                encoder_cache=self.encoder_cache,
+            )
+
+        try:
+            return super()._preprocess(
+                scheduler_output, num_input_tokens, intermediate_tensors
+            )
+        finally:
+            if (
+                self.common_pcp_size > 1
+                and self.supports_mm_inputs
+                and get_pp_group().is_first_rank
+                and not self.model_config.is_encoder_decoder
+            ):
+                self.pcp_manager.restore_scheduler_output_after_mm_preprocess(
+                    scheduler_output, restore_state
+                )
+
+    def _gather_mm_embeddings(
+        self,
+        scheduler_output: "SchedulerOutput",
+        shift_computed_tokens: int = 0,
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        if self.common_pcp_size <= 1:
+            return super()._gather_mm_embeddings(scheduler_output, shift_computed_tokens)
+
+        local_num_scheduled_tokens, _ = self.pcp_manager.get_local_schedule_layout()
+        if local_num_scheduled_tokens is None:
+            return super()._gather_mm_embeddings(scheduler_output, shift_computed_tokens)
+
+        total_num_scheduled_tokens = int(np.sum(local_num_scheduled_tokens))
+        positions_np = self.positions.np if hasattr(self.positions, "np") else self._positions_np_buf
+        mm_embeds = list[torch.Tensor]()
+        is_mm_embed = torch.zeros(
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+        )
+
+        (
+            mm_embeds,
+            should_sync_mrope_positions,
+            should_sync_xdrope_positions,
+        ) = self.pcp_manager.gather_mm_embeddings_for_pcp(
+            req_ids=self.input_batch.req_ids,
+            requests=self.requests,
+            positions_np=positions_np,
+            local_num_scheduled_tokens=local_num_scheduled_tokens,
+            shift_computed_tokens=shift_computed_tokens,
+            encoder_cache=self.encoder_cache,
+            is_mm_embed=is_mm_embed,
+            model=self.model,
+            is_multimodal_pruning_enabled=self.is_multimodal_pruning_enabled,
+            uses_mrope=self.uses_mrope,
+            warning_once=logger.warning_once,
+        )
+
+        if should_sync_mrope_positions:
+            self._calc_mrope_positions(scheduler_output)
+            self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        if should_sync_xdrope_positions:
+            self._calc_xdrope_positions(scheduler_output)
+            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        return mm_embeds, is_mm_embed
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
@@ -910,8 +1170,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
-        if self.pcp_size > 1:
-            cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
+        if self.use_prefill_cp:
+            cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.common_pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += arange
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
@@ -943,7 +1203,7 @@ class NPUModelRunner(GPUModelRunner):
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
         draft_token_ids = self.input_ids.gpu[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
-        if self.pcp_size > 1:
+        if self.use_prefill_cp:
             logits_indices = logits_indices_pcp
         return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
@@ -1030,7 +1290,7 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 # update pcp related params
-                if self.pcp_size > 1:
+                if self.use_prefill_cp:
                     token_indices_to_sample = query_start_loc_pcp_full[1 : num_reqs + 1] - 1
                     target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
                     target_positions = self._get_positions(num_scheduled_tokens)
@@ -1047,7 +1307,7 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                if self.pcp_size > 1:
+                if self.use_prefill_cp:
                     assert common_attn_metadata is not None
                     common_attn_metadata.query_start_loc_cpu[: num_reqs + 1] = query_start_loc_pcp_full_cpu[
                         : num_reqs + 1
@@ -1068,7 +1328,7 @@ class NPUModelRunner(GPUModelRunner):
                             common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
                         )
                     )
-                if self.pcp_size > 1:
+                if self.use_prefill_cp:
                     target_token_ids = input_ids_pcp_full[token_indices]
                     target_positions = positions
                     target_hidden_states = hidden_states
@@ -1125,15 +1385,27 @@ class NPUModelRunner(GPUModelRunner):
         # scheduler_output in engine core process.
         # TODO(Ronald1995): deepcopy is expensive when there is a large
         # number of requests, optimize it later.
-        if (
+        if ((
             self.use_async_scheduling and self.num_spec_tokens and self._draft_token_ids is None  # type: ignore[has-type]
-        ):
+        ) or (
+            # NOTE: This branch specifically triggers a deepcopy during the prefill phase 
+            # only for PCP (Parallel Context Processing) + Multi-Modal (MM) scenarios. 
+            # It does not affect other use cases. This is a temporary workaround and 
+            # will be removed once upstream vLLM provides native support for PCP + MM.
+            self.common_pcp_size > 1 and self.supports_mm_inputs and get_pp_group().is_first_rank
+            and not self.model_config.is_encoder_decoder
+        )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
+                if self.dycp_size > 1:
+                    self.req_id_to_cp_size.update(
+                        getattr(scheduler_output, "req_id_to_cp_size", {}) or {}
+                    )
+
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1158,7 +1430,19 @@ class NPUModelRunner(GPUModelRunner):
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    modelrunneroutput = self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
+                    if modelrunneroutput.kv_connector_output is not None and self.dycp_size > 1:
+                        for req_id in modelrunneroutput.kv_connector_output.finished_sending:
+                            modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
+                                req_id
+                            )
+                        for req_id in modelrunneroutput.kv_connector_output.finished_recving:
+                            modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
+                                req_id
+                            )
+
+                    return modelrunneroutput
                 if self.cache_config.kv_sharing_fast_prefill:
                     assert not self.num_prompt_logprobs, (
                         "--kv-sharing-fast-prefill produces incorrect "
@@ -1176,13 +1460,14 @@ class NPUModelRunner(GPUModelRunner):
                     logits_indices,
                     spec_decode_metadata,
                     total_num_scheduled_tokens,
+                    total_num_pcp_scheduled_tokens,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
                 )
 
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-                if self.pcp_size > 1:
+                if self.use_prefill_cp:
                     num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
@@ -1208,6 +1493,7 @@ class NPUModelRunner(GPUModelRunner):
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                     force_eager=self.model_config.enforce_eager,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                    num_dycp_reqs=scheduler_output.num_cp_request,
                 )
 
                 logger.debug(
@@ -1254,7 +1540,7 @@ class NPUModelRunner(GPUModelRunner):
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
                     or (enable_sp() and not self.model_config.use_mla)
-                    and self.pcp_size * self.dcp_size == 1
+                    and self.pcp_size * self.dcp_size * self.dycp_size == 1  # TODO(lxs): fix this
                 ):
                     # Currently, Graph Mode and SP will both pad num_tokens,
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
@@ -1268,6 +1554,11 @@ class NPUModelRunner(GPUModelRunner):
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
 
+                num_cp_request = 0
+                if self.dycp_size > 1:
+                    num_cp_request = scheduler_output.num_cp_request
+                elif self.pcp_size > 1:
+                    num_cp_request = self.input_batch.num_reqs
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
                     if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
@@ -1282,6 +1573,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    total_num_pcp_scheduled_tokens=total_num_pcp_scheduled_tokens,
+                    num_dycp_reqs=num_cp_request,
                 )
 
             (
@@ -1346,8 +1639,9 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor=batch_desc,
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
-                max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
+                max_tokens_across_pcp=0 if not self.use_prefill_cp else self.pcp_manager.max_num_tokens_across_pcp,
                 skip_compiled=has_encoder_input,
+                num_cp_reqs=scheduler_output.num_cp_request,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -1360,10 +1654,17 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
+            if kv_connector_output.finished_sending and self.dycp_size > 1:
+                for req_id in kv_connector_output.finished_sending:
+                    kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
+
+            if kv_connector_output.finished_recving and self.dycp_size > 1:
+                for req_id in kv_connector_output.finished_recving:
+                    kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
-            if self.pcp_size > 1:
+            if self.use_prefill_cp:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
@@ -1490,6 +1791,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+        self._sync_dycp_sampled_token_ids(
+            scheduler_output,
+            sampler_output.sampled_token_ids,
+        )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -1563,6 +1868,7 @@ class NPUModelRunner(GPUModelRunner):
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
+            req_id_to_cp_size=self.input_batch.req_id_to_cp_size,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
@@ -1664,6 +1970,7 @@ class NPUModelRunner(GPUModelRunner):
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
+        logprobs_lists: LogprobsLists | None = None
         cu_num_tokens: list[int] | None = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
@@ -1793,6 +2100,11 @@ class NPUModelRunner(GPUModelRunner):
                 torch.npu.current_stream().synchronize()
 
             assert positions is not None
+            # Use runtime forward context as the source of truth.
+            # batch_descriptor may be reused by dispatcher and can diverge from
+            # current step cp-request count in some decode paths. Keep the
+            # explicit runtime value (including 0) to avoid graph-key mismatch.
+            num_cp_reqs = getattr(forward_context, "num_cp_reqs", getattr(forward_context, "num_dycp_reqs", 0))
             update_full_graph_params(
                 self.attn_backend,
                 self.update_stream,
@@ -1801,6 +2113,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.speculative_config,
                 positions.shape[0],
+                num_cp_reqs=num_cp_reqs,
             )
 
     def _model_forward(
@@ -1926,6 +2239,7 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        num_dycp_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
@@ -1949,7 +2263,7 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+        def dispatch_cudagraph(num_tokens, num_dycp_reqs, disable_full=False, valid_modes=None):
             if force_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
@@ -1960,9 +2274,10 @@ class NPUModelRunner(GPUModelRunner):
                 valid_modes=valid_modes,
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
                 num_active_loras=num_active_loras,
+                num_dycp_reqs=num_dycp_reqs,
             )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, num_dycp_reqs, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -1985,6 +2300,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Re-dispatch with DP padding
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
+                    num_dycp_reqs,
                     valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
                 # Assert to make sure the agreed upon token count is correct otherwise
@@ -2021,6 +2337,8 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        total_num_pcp_scheduled_tokens: int | None = None,
+        num_dycp_reqs: int = 0,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -2053,7 +2371,7 @@ class NPUModelRunner(GPUModelRunner):
             if not self.use_cp:
                 return None, block_table_tensor
             return self.pcp_manager.generate_pcp_metadata(
-                num_tokens,
+                total_num_pcp_scheduled_tokens,
                 self.query_lens,
                 self.input_batch,
                 num_scheduled_tokens_np,
@@ -2065,14 +2383,12 @@ class NPUModelRunner(GPUModelRunner):
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            if self.pcp_size > 1:
+            if self.use_prefill_cp:
                 total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
-                if self.pcp_manager.pcp_use_hybrid_attn:
-                    num_scheduled_tokens_padded = self.pcp_manager.num_scheduled_tokens_padded
-                    assert num_scheduled_tokens_padded is not None
-                    maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
-                else:
-                    maybe_pcp_full_tokens = num_tokens * self.pcp_size - total_num_pcp_pads
+                num_scheduled_tokens_padded = self.pcp_manager.num_scheduled_pcp_tokens_padded
+                assert num_scheduled_tokens_padded is not None
+                maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.common_pcp_size - total_num_pcp_pads + \
+                    self.pcp_manager.num_dycp_dp_tokens
             else:
                 maybe_pcp_full_tokens = num_tokens_padded
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
@@ -2094,12 +2410,11 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-                if self.pcp_size == 1:
+                if not self.use_prefill_cp:
                     slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                     blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
-            if self.pcp_size > 1:
+            if self.use_prefill_cp:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
-                    num_tokens,
                     num_tokens_padded,
                     slot_mapping,
                 )
@@ -2109,7 +2424,6 @@ class NPUModelRunner(GPUModelRunner):
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
-
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2131,6 +2445,8 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
+            # num_dycp_reqs=num_dycp_reqs if num_dycp_reqs else self.pcp_manager.num_dycp_reqs,
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -2277,6 +2593,7 @@ class NPUModelRunner(GPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        num_dycp_reqs: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -2340,10 +2657,12 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            num_dycp_reqs=num_dycp_reqs,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
+                num_reqs,
                 num_reqs,
             )
             if self.speculative_config:
@@ -2414,6 +2733,8 @@ class NPUModelRunner(GPUModelRunner):
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
                 num_scheduled_tokens_np=num_scheduled_tokens,
+                total_num_pcp_scheduled_tokens=num_tokens_unpadded,
+                num_dycp_reqs=num_dycp_reqs,
             )
 
         with self.maybe_dummy_run_with_lora(
@@ -2491,6 +2812,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
+                num_cp_reqs=num_dycp_reqs,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -2546,10 +2868,16 @@ class NPUModelRunner(GPUModelRunner):
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
+        logger.debug(f"Origin_max_num_tokens:{origin_max_num_tokens}")
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
-        if self.pcp_size > 1:
-            self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
+        # Docode Node don't support CP prefill， so the CP chunk buffer is unnecessary
+        kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
+        if self.use_prefill_cp:
+            if self.is_kv_producer:
+                self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2) / (self.dycp_size * 2)) * 2
+            else:
+                self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
         super().profile_run()
         self.max_num_tokens = origin_max_num_tokens
 
