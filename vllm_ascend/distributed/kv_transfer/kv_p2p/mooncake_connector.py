@@ -932,7 +932,7 @@ class MooncakeConnectorScheduler:
             * self.pcp_size
             * vllm_config.parallel_config.pipeline_parallel_size
         )
-        self.dp_per_domain = vllm_config.parallel_config.dp_per_domain
+        self.dycp_size = vllm_config.parallel_config.dycp_size
 
         # Handshake base port for dp
         # self.port_base = vllm_config.kv_transfer_config.kv_port
@@ -943,13 +943,18 @@ class MooncakeConnectorScheduler:
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
         )
-        # Handshake base port for domain
-        self.domain_port_base = (
+        # Handshake base port shared by all ranks in a dycp group (flat
+        # scheme): the dycp-group index replaces the old domain index. A
+        # dycp group spans `dycp_size` consecutive DP ranks (see
+        # parallel_state's _DYCP construction), so the group index is
+        # `data_parallel_rank // dycp_size`.
+        self.dycp_port_base = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.domain_parallel_rank
+            + (vllm_config.parallel_config.data_parallel_rank
+               // self.dycp_size)
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
-            * self.dp_per_domain
+            * self.dycp_size
         )
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -1033,7 +1038,7 @@ class MooncakeConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids, num_external_tokens) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            if self.dp_per_domain > 1 and req_id not in scheduler_output.cp_rank_to_req_id:
+            if self.dycp_size > 1 and req_id not in scheduler_output.cp_rank_to_req_id:
                 continue
             # For the case where there are no remote blocks to pull
             # (block_ids is empty), we don't need to schedule
@@ -1047,7 +1052,7 @@ class MooncakeConnectorScheduler:
             )
 
         # Clear the list once workers start the transfers
-        if self.dp_per_domain > 1:
+        if self.dycp_size > 1:
             cp_rank = getattr(scheduler_output, 'cp_rank', None)
             for req_id in self._reqs_need_send:
                 req_cp_ranks = self._reqs_need_send_cp_ranks.get(req_id)
@@ -1062,7 +1067,7 @@ class MooncakeConnectorScheduler:
             meta.requests_to_send = self._reqs_need_send
             meta.reqs_in_batch = self._reqs_in_batch
 
-        if self.dp_per_domain == 1:
+        if self.dycp_size == 1:
             self._reqs_need_recv.clear()
             self._reqs_need_send = {}
             self._reqs_in_batch = set()
@@ -1107,7 +1112,7 @@ class MooncakeConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
-            remote_port=self.domain_port_base if self.dp_per_domain > 1 else self.side_channel_port,
+            remote_port=self.dycp_port_base if self.dycp_size > 1 else self.side_channel_port,
             remote_pcp_size=self.pcp_size,
             remote_dcp_size=self.dcp_size,
             remote_ptp_size=self.tp_size,
@@ -1169,7 +1174,7 @@ class MooncakeConnectorWorker:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
-        self.dp_per_domain = self.vllm_config.parallel_config.dp_per_domain
+        self.dycp_size = get_dycp_group().world_size
 
         # Handshake base port for dp
         # self.port_base = vllm_config.kv_transfer_config.kv_port
@@ -1180,13 +1185,18 @@ class MooncakeConnectorWorker:
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
         )
-        # Handshake base port for domain
-        self.domain_port_base = (
+        # Handshake base port shared by all ranks in a dycp group (flat
+        # scheme): the dycp-group index replaces the old domain index. A
+        # dycp group spans `dycp_size` consecutive DP ranks (see
+        # parallel_state's _DYCP construction), so the group index is
+        # `data_parallel_rank // dycp_size`.
+        self.dycp_port_base = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.domain_parallel_rank
+            + (vllm_config.parallel_config.data_parallel_rank
+               // self.dycp_size)
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
-            * self.dp_per_domain
+            * self.dycp_size
         )
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
@@ -1316,7 +1326,7 @@ class MooncakeConnectorWorker:
                 self.engine,
                 self.engine_id,
                 self.handshake_port,
-                self.side_channel_port if self.dp_per_domain == 1 else self.domain_port_base,
+                self.side_channel_port if self.dycp_size == 1 else self.dycp_port_base,
                 kv_caches_base_addr,
                 self.block_len,
                 ready_event,
@@ -1448,11 +1458,11 @@ class MooncakeConnectorWorker:
             p_node_cp_group_meta = get_cp_group_meta(
                 prefill_tp_size, remote_pcp_size, meta.remote_dcp_size, meta.remote_port, remote_dycp_ranks
             )
-            port_base = self.domain_port_base if decode_dycp_enable else self.side_channel_port
+            port_base = self.dycp_port_base if decode_dycp_enable else self.side_channel_port
 
             # if decode_dycp_enable:
-            #     domain_start_rank = (self.dp_rank_global // self.dp_per_domain) * self.dp_per_domain
-            #     port_base = self.port_base + domain_start_rank * self.tp_size * self.pp_size
+            #     dycp_group_start_rank = (data_parallel_rank // self.dycp_size) * self.dycp_size
+            #     port_base = self.port_base + dycp_group_start_rank * self.tp_size * self.pp_size
             # else:
             #     port_base = self.side_channel_port
 
@@ -1668,7 +1678,7 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
 
-            if len(meta.remote_dycp_ranks) > 0 or meta.remote_pcp_size * meta.remote_dcp_size > 1 or self.dp_per_domain > 1:
+            if len(meta.remote_dycp_ranks) > 0 or meta.remote_pcp_size * meta.remote_dcp_size > 1 or self.dycp_size > 1:
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
                     req_id, meta
                 )
@@ -1730,14 +1740,14 @@ class MooncakeConnectorWorker:
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
                     )
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1 and self.dp_per_domain == 1:
+        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1 and self.dycp_size == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 if self.tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
 
-        if self.kv_send_thread is not None and (self.pcp_size * self.dcp_size > 1 or self.dp_per_domain > 1):
+        if self.kv_send_thread is not None and (self.pcp_size * self.dcp_size > 1 or self.dycp_size > 1):
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 

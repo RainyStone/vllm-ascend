@@ -309,7 +309,7 @@ class NPUModelRunner(GPUModelRunner):
             self.dcp_rank = get_dcp_group().rank_in_group
             self.pcp_size = get_pcp_group().world_size
             self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-            self.dycp_size = self.parallel_config.dp_per_domain
+            self.dycp_size = self.parallel_config.dycp_size
             self.dycp_rank = 0 if self.dycp_size <= 1 else get_dycp_group().rank_in_group
             self.cp_world_size = self.dycp_size
             self.cp_rank = self.dycp_rank
@@ -468,8 +468,8 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_fallback_cp_size(self) -> int:
         parallel_config = self.vllm_config.parallel_config
-        dp_per_domain = max(1, parallel_config.dp_per_domain)
-        return max(1, parallel_config.data_parallel_size // dp_per_domain)
+        dycp_size = max(1, parallel_config.dycp_size)
+        return max(1, parallel_config.data_parallel_size // dycp_size)
 
     def _get_req_cp_size(self, req_id: str) -> int:
         return self.req_id_to_cp_size.get(
