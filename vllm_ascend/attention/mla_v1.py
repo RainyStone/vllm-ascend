@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, Any
 
 import numpy as np
 import torch
@@ -114,6 +114,8 @@ class ChunkedContextMetadata:
     workspace: torch.Tensor
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
+    chunk_actual_seq_lengths_kv_list: list[list[int]]
+    cu_seq_lens_lst: list[list[int]] | None = None
 
 
 @dataclass
@@ -196,14 +198,11 @@ class AscendMLAMetadata:
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
 
-    def __post_init__(self):
-        pass
-        # supported_head_sizes = AscendMLABackend.get_supported_head_sizes()
-        # if self.head_dim is not None and self.head_dim \
-        #         not in supported_head_sizes:
-        #     raise ValueError(
-        #         f"Only {supported_head_sizes} are supported for head_dim,",
-        #         f"received {self.head_dim}.")
+    # num dycp reqs
+    num_dycp_reqs: int = 0
+    dycp_mask: torch.Tensor = None
+    dp_metadata: Any | None = None
+    dycp_metadata: Any | None = None
 
 
 M = TypeVar("M", bound=AscendMLAMetadata)
@@ -405,6 +404,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
 
+    def get_num_actual_tokens_pcp_padded(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ):
+        return common_attn_metadata.num_actual_tokens
+
     def build(
         self,
         common_prefix_len: int,
@@ -441,7 +446,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(common_prefix_len, common_attn_metadata)
         return self.metadata_cls(  # type: ignore
-            num_actual_tokens_pcp_padded=self.num_actual_tokens,
+            num_actual_tokens_pcp_padded=self.get_num_actual_tokens_pcp_padded(common_attn_metadata),
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=self.num_actual_tokens,
             query_lens=self.query_lens.tolist(),
@@ -497,6 +502,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=self.chunk_seq_lens.max(dim=1).values.tolist(),
             chunk_seq_lens=self.chunk_seq_lens,
             chunk_seq_lens_npu=self.chunk_seq_lens.npu(),
+            cu_seq_lens_lst=self.cu_seq_lens_cpu.tolist(),
             workspace=self.chunked_prefill_workspace,
         )
 
@@ -749,6 +755,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         speculative_config=None,
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
+        num_dycp_reqs: int = 0,
     ):
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
@@ -1034,6 +1041,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         chunked_context: CPChunkedContextMetadata,
         chunk_idx: int,
         toks: int,
+        num_dycp_reqs: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
@@ -1084,6 +1092,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 chunked_context=prefill_metadata.chunked_context,
                 chunk_idx=i,
                 toks=toks,
+                num_dycp_reqs = attn_metadata.num_dycp_reqs
             )
             kv_c_normed = kv_c_normed.squeeze()
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -1620,6 +1629,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if is_hidden_layer(layer):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
 
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert (
