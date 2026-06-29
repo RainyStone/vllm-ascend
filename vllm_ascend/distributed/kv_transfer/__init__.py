@@ -57,3 +57,9 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
         "LMCacheConnectorV1",
     )
+
+    KVConnectorFactory.register_connector(
+        "RecomputeCPUOffloadConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
+        "RecomputeCPUOffloadConnectorV1",
+    )

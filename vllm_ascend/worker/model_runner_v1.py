@@ -1147,6 +1147,14 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                if has_kv_transfer_group():
+                    kv_connector_metadata = scheduler_output.kv_connector_metadata
+                    assert kv_connector_metadata is not None
+                    # Preemption stores must run before _update_states() zeroes
+                    # newly allocated blocks that may reuse the same physical
+                    # KV cache IDs.
+                    get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
