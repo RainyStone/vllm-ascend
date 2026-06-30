@@ -786,8 +786,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             return attn_metadata.num_actual_tokens
 
     def _v_up_proj(self, x):
-        # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-        x = x.view(self.num_heads, -1, self.kv_lora_rank)
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
         x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_y=(1, 0, 2))
         # Convert from (B, N, V) to (B, N * V)

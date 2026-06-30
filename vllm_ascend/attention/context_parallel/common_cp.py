@@ -146,6 +146,7 @@ def _npu_update_dycp_attn(num_dycp_reqs, attn_output: torch.Tensor, softmax_lse:
     out_flat = out_flat.flatten(1, 2)
     lse_flat = lse_flat.flatten(1, -1)
 
+    # Merge flattened tensors via npu_attention_update_v2
     attn_out, _ = torch_npu.npu_attention_update_v2(lse_flat, out_flat, 0)
 
     # Reshape back: [S*H, D] -> [S, H, D]
