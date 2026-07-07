@@ -58,7 +58,8 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
 @lru_cache(maxsize=1)
 def enable_cp():
     prefill_config = get_current_vllm_config().parallel_config
-    return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
+    return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1 \
+        or prefill_config.dycp_size > 1 # TODO [DyCP] 这里domain方案代码是读取prefill_config.dp_per_domain
 
 
 @dataclass
@@ -185,6 +186,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
+
+    num_dycp_reqs: int = 0
 
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None

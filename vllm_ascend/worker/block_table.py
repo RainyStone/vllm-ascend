@@ -1,7 +1,8 @@
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_dycp_group
 from vllm.utils.math_utils import cdiv
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -28,6 +29,14 @@ class BlockTable:
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
+
+        try:
+            self.dycp_world_size = get_dycp_group().world_size
+            self.dycp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            self.dycp_world_size = 1
+            self.dycp_rank = 0
+
         compress_ratio = 1
         if (
             kv_cache_group is not None
@@ -134,6 +143,90 @@ class BlockTable:
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
 
+    def apply_permutation(self, permutation: list[int] | np.ndarray) -> bool:
+        """Reorder the active rows according to ``permutation``.
+
+        ``permutation[new_row] = old_row`` for the active prefix of length
+        ``len(permutation)``.
+        """
+        num_reqs = len(permutation)
+        if num_reqs <= 1:
+            return False
+
+        permutation_np = np.asarray(permutation, dtype=np.int32)
+        if np.array_equal(permutation_np, np.arange(num_reqs, dtype=np.int32)):
+            return False
+
+        self.num_blocks_per_row[:num_reqs] = self.num_blocks_per_row[
+            permutation_np
+        ].copy()
+        self.block_table.np[:num_reqs] = self.block_table.np[permutation_np].copy()
+        return True
+    
+    def compute_slot_mapping_with_dycp(self, req_indices: np.ndarray, positions: np.ndarray, num_dycp_reqs: int = 0) -> None:
+        # TODO [DyCP] v0.21.0中，slot_mapping计算优化成算子了，见下方 compute_slot_mapping 函数，先暂时把 DyCP 功能打通，后续看是否也可以修改成调用算子，
+        # TODO [DyCP] slot_mapping计算优化成算子见PR：https://github.com/vllm-project/vllm-ascend/pull/7640
+
+        # Split requests into dycp (dcp) and dp groups
+        # req_indices < num_dycp_reqs: use dcp calculation
+        # req_indices >= num_dycp_reqs: use dp calculation
+        num_tokens = req_indices.shape[0]
+        dycp_mask = req_indices < num_dycp_reqs
+
+        total_cp_world_size = self.dycp_world_size
+        total_cp_rank = self.dycp_rank
+
+        # Initialize output array
+        slot_mapping_result = np.zeros(num_tokens, dtype=np.int64)
+
+        # Process dycp requests (dcp calculation)
+        if np.any(dycp_mask):
+            dycp_indices = np.where(dycp_mask)[0]
+            dycp_req_indices = req_indices[dycp_mask]
+            dycp_positions = positions[dycp_mask]
+
+            if total_cp_world_size > 1:  # TODO [DyCP] 待理解 dycp 请求在虚拟块中的内存排布
+                # Use DCP calculation for dycp requests
+                virtual_block_size = self.block_size * total_cp_world_size
+                block_table_indices = (
+                    dycp_req_indices * self.max_num_blocks_per_req
+                    + dycp_positions // virtual_block_size
+                )
+
+                block_numbers = self.block_table.np.ravel()[block_table_indices]
+                virtual_block_offsets = dycp_positions % virtual_block_size
+                mask = (
+                    virtual_block_offsets
+                    // self.cp_kv_cache_interleave_size
+                    % total_cp_world_size
+                    == total_cp_rank
+                )
+                block_offsets = (
+                    virtual_block_offsets
+                    // (total_cp_world_size * self.cp_kv_cache_interleave_size)
+                    * self.cp_kv_cache_interleave_size
+                    + virtual_block_offsets % self.cp_kv_cache_interleave_size
+                )
+                slot_mapping = block_numbers * self.block_size + block_offsets
+                slot_mapping_result[dycp_indices] = np.where(mask, slot_mapping, -1)
+
+        # Process dp requests (simple calculation)
+        if np.any(~dycp_mask):
+            dp_indices = np.where(~dycp_mask)[0]
+            dp_req_indices = req_indices[~dycp_mask]
+            dp_positions = positions[~dycp_mask]
+
+            # Use DP calculation (total_cp_world_size == 1 case)
+            block_table_indices = (
+                dp_req_indices * self.max_num_blocks_per_req + dp_positions // self.block_size
+            )
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_offsets = dp_positions % self.block_size
+            slot_mapping_result[dp_indices] = block_numbers * self.block_size + block_offsets
+
+        # Write final slots
+        self.slot_mapping.np[:num_tokens] = slot_mapping_result
+
     def compute_slot_mapping(
         self,
         num_reqs: int,
@@ -230,6 +323,9 @@ class BlockTable:
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
+
+    def commit_slot_mapping(self, num_tokens: int) -> None:
+        self.slot_mapping.copy_to_gpu(num_tokens)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
@@ -365,6 +461,18 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
+    def apply_permutation(self, permutation: list[int] | np.ndarray) -> bool:
+        modified = False
+        for block_table in self.block_tables:
+            modified = block_table.apply_permutation(permutation) or modified
+        return modified
+
+    def compute_slot_mapping_with_dycp(
+        self, req_indices: np.ndarray, positions: np.ndarray, num_dycp_reqs: int = 0
+    ) -> None:
+        for block_table in self.block_tables:
+            block_table.compute_slot_mapping_with_dycp(req_indices, positions, num_dycp_reqs)
+
     def compute_slot_mapping(
         self,
         num_reqs: int,
@@ -395,6 +503,10 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
+
+    def commit_slot_mapping(self, num_tokens: int) -> None:
+        for block_table in self.block_tables:
+            block_table.commit_slot_mapping(num_tokens)
 
     def clear(self) -> None:
         for block_table in self.block_tables:

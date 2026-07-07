@@ -297,6 +297,7 @@ class NPUWorker(WorkerBase):
             and self.parallel_config.distributed_executor_backend not in ["ray", "external_launcher"]
             and self.vllm_config.parallel_config.data_parallel_backend != "ray"
             and self.vllm_config.parallel_config.nnodes_within_dp == 1
+            and self.vllm_config.parallel_config.dycp_size == 1
         ):
             visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
             assert self.parallel_config.local_world_size <= visible_device_count, (
@@ -484,6 +485,11 @@ class NPUWorker(WorkerBase):
             for handle in self._pp_send_work:
                 handle.wait()
             self._pp_send_work = []
+
+        # TODO [DyCP] 这里和 v0.18.0 domain 方案有些不同，v0.18.0 domain 方案的 execute_model 方法会传入 scheduler_output list，这里要确认下下面是否正确
+        if (scheduler_output.total_num_scheduled_tokens == 0
+                and scheduler_output.none_tokens_in_peer_sched):
+            self.model_runner._dummy_run(1, uniform_decode=True)
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
