@@ -1409,7 +1409,7 @@ class MooncakeConnectorScheduler:
         # Handshake base port for dycp communication
         self.dycp_port_base = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.domain_parallel_rank
+            # + vllm_config.parallel_config.domain_parallel_rank # TODO [DyCP] 非domain方案中这个参数是否要加？？先临时去掉，实际要怎样设置
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.dycp_size
@@ -1676,7 +1676,7 @@ class MooncakeConnectorWorker:
         # Handshake base port for dycp
         self.dycp_port_base = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.domain_parallel_rank
+            # + vllm_config.parallel_config.domain_parallel_rank # TODO [DyCP] 非domain方案中这个参数是否要加？？先临时去掉，实际要怎样设置
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.dycp_size
