@@ -3237,7 +3237,13 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                         blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
-            if self.use_prefill_cp:
+            # DyCP: only CP (long) requests go through the PCP slot-mapping padding.
+            # A step that contains only short/DP requests (num_cp_request == 0,
+            # i.e. pcp_manager.num_dycp_reqs == 0) has nothing to pad and must skip
+            # get_padded_slot_mapping -- both to avoid IndexError on an empty batch
+            # and because the CP padding math (num_scheduled_pcp_tokens_padded etc.)
+            # is meaningless for pure-DP steps.
+            if self.use_prefill_cp and self.pcp_manager.num_dycp_reqs > 0:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
                     num_tokens_padded,
                     slot_mapping,
@@ -4681,7 +4687,13 @@ class NPUModelRunner(GPUModelRunner):
         # For other backends (like Mamba), use [0] (no splitting)
         self.kernel_block_sizes = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            if self.pcp_size > 1:
+            # Align with the runtime guard `use_prefill_cp` (= pcp_size > 1 or
+            # prefill_dycp_size > 1). Under DyCP the CP split comes from
+            # dycp_size (prefill_dycp_size) rather than classic PCP, so pcp_size
+            # can be 1 while use_prefill_cp is True. Guarding on pcp_size>1 only
+            # would leave pcp_padded_slot_mapping_list empty and trigger
+            # IndexError in get_padded_slot_mapping at runtime.
+            if self.use_prefill_cp:
                 self.pcp_manager.initialize_slot_mapping()
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
