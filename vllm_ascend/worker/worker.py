@@ -487,8 +487,27 @@ class NPUWorker(WorkerBase):
             self._pp_send_work = []
 
         # TODO [DyCP] 这里和 v0.18.0 domain 方案有些不同，v0.18.0 domain 方案的 execute_model 方法会传入 scheduler_output list，这里要确认下下面是否正确
+        # [DyCP] A 0-token step (e.g. a request finishing with 0 newly
+        # scheduled tokens, FINISHED_LENGTH_CAPPED) must still emit the per-step
+        # full-DP metadata all_reduce to keep every DP rank's collective stream
+        # aligned with the every-N-step sync_dp_state all_reduce on the same
+        # communicator. model_runner.execute_model short-circuits on 0 tokens
+        # (returns EMPTY, no all_reduce), so issue a dummy forward here BEFORE
+        # calling it. This cadence path is DyCP-only (dycp_size > 1), and within
+        # DyCP it must cover EVERY DP rank's 0-token step, not only CP requests:
+        # the original `none_tokens_in_peer_sched` flag is set solely by
+        # cp_aware_scheduler for CP requests, so a short (single-engine)
+        # request's finish skipped this dummy and emitted 0 all_reduces -> its
+        # step_counter led the all_reduce count by 1 -> it entered sync_dp_state
+        # while peers were still in a metadata all_reduce -> collective-type-
+        # mismatch deadlock. Guard out external_launcher, whose 0-token short-
+        # circuit in model_runner_v1.py already runs its own dummy (would
+        # double-count here).
         if (scheduler_output.total_num_scheduled_tokens == 0
-                and scheduler_output.none_tokens_in_peer_sched):
+                and self.parallel_config.data_parallel_size > 1
+                and self.parallel_config.dycp_size > 1
+                and self.parallel_config.distributed_executor_backend
+                    != "external_launcher"):
             self.model_runner._dummy_run(1, uniform_decode=True)
 
         intermediate_tensors = None
