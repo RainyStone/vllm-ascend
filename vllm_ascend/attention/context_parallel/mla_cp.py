@@ -1386,12 +1386,13 @@ def split_attn_metadata(
     dycp_query_lens = attn_metadata.query_lens[:num_dycp_reqs]
     dp_query_lens = attn_metadata.query_lens[num_dycp_reqs:]
 
-    dycp_metadata = AscendMLAMetadata( # TODO [DyCP] 少 seq_lens_cpu 参数？看起来v0.21.0后加的
+    dycp_metadata = AscendMLAMetadata(  # seq_lens_cpu: v0.21.0 后新增的必填字段
         num_actual_tokens_pcp_padded=attn_metadata.num_actual_tokens_pcp_padded,
         num_actual_tokens=dycp_token_num*dycp_cp_size,
         slot_mapping=dycp_slot_mapping,
         query_start_loc=dycp_query_start_loc,
         seq_lens=dycp_seq_lens,
+        seq_lens_cpu=dycp_seq_lens,
         block_tables=dycp_block_tables,
         num_decodes=0,  # prefill
         num_decode_tokens=0,
@@ -1409,12 +1410,13 @@ def split_attn_metadata(
         dycp_metadata, chunked_prefill_workspace_size, block_size, common_attn_metadata, num_dycp_reqs, dcp_size, pcp_size, dycp_size, cp_virtual_block_size, cp_local_block_size)
     dycp_metadata.prefill.chunked_context = dycp_cc
 
-    dp_metadata = AscendMLAMetadata( # TODO [DyCP] 少 seq_lens_cpu 参数？看起来v0.21.0后加的
+    dp_metadata = AscendMLAMetadata(  # seq_lens_cpu: v0.21.0 后新增的必填字段
         num_actual_tokens_pcp_padded=attn_metadata.num_actual_tokens_pcp_padded,
         num_actual_tokens=dp_token_num,
         slot_mapping=dp_slot_mapping,
         query_start_loc=dp_query_start_loc,
         seq_lens=dp_seq_lens,
+        seq_lens_cpu=dp_seq_lens,
         block_tables=dp_block_tables,
         num_decodes=0,
         num_decode_tokens=0,
