@@ -50,6 +50,25 @@ cp -n "$REPO_MEM"/*.md "$MEM"/
 - `memory-sync-to-repo.md` — 记忆与仓库同步规则
 - `vllm-debug-evidence-based.md` — 问题分析基于代码+日志取证、不瞎猜
 
+各记忆作用说明（便于判断是否需要 reload 全部）：
+
+- **dycp-design-principles**：DyCP（Dynamic Context Parallel）方案原理。
+  含长短分流（按 prefill token 数与 `long_request_threshold` 比较决定走纯 DP
+  还是 CP 子组）、CP 子组拓扑/路由（每 `dycp_size` 个相邻 DP 引擎构成子组、
+  owner=cp_rank0）、CPAwareScheduler 子组共识（逐拍 all_reduce MIN 三态共识
+  SCHEDULED/NOT_SCHEDULED/PREEMPTED）、DP 全组 wave 状态机（sync_dp_state、
+  step_counter %32 优化）。理解 DyCP 代码与排查调度/通信问题时必读。
+- **git-commit-conventions**：在 vllm-ascend 仓库提交的规则。① commit message
+  用中文；② 正文记录解决的问题（根因/现象/修复要点）；③ 不加 Co-Author；
+  ④ 沿用 `fix(DyCP): ...`/`docs(...): ...` 风格、分支以运行时为准；⑤ 提交前
+  先与用户确认要提交哪些文件，不自行决定提交范围。
+- **memory-sync-to-repo**：记忆维护规则。更新/新增 agent 记忆时，凡属已纳入
+  `DyCP_Memory/` 范畴的，需同步改仓库副本并提交，保持两边一致；记忆中不写死
+  路径；仅纳入已明确要求的记忆。
+- **vllm-debug-evidence-based**：分析 vLLM 服务问题的工作方式。必须基于代码+
+  日志取证、不瞎猜，区分"已证实"与"推断"；日志不足时不要继续猜，先与用户确认
+  加日志、由用户跑实验提供数据再分析；修复要能从日志验证。
+
 （`RELOAD.md` 是操作指南，不要放进 memory 目录。）
 
 ### 4. 登记索引（关键，否则不会被召回）
