@@ -48,6 +48,7 @@ cp -n "$REPO_MEM"/*.md "$MEM"/
 - `dycp-design-principles.md` — DyCP 方案原理
 - `git-commit-conventions.md` — git 提交规则
 - `memory-sync-to-repo.md` — 记忆与仓库同步规则
+- `vllm-debug-evidence-based.md` — 问题分析基于代码+日志取证、不瞎猜
 
 （`RELOAD.md` 是操作指南，不要放进 memory 目录。）
 
@@ -60,6 +61,7 @@ agent 只会加载 `$MEM/MEMORY.md` 里列了指针的文件。把以下几行�
 - [DyCP 方案原理](dycp-design-principles.md) — 长短分流、CP子组拓扑/路由、CPAwareScheduler子组共识、DP全组wave状态机
 - [Git 提交规则](git-commit-conventions.md) — 中文 message、记录解决的问题、不加 Co-Author、只提交相关文件
 - [记忆与仓库同步](memory-sync-to-repo.md) — 更新 agent 记忆时同步更新仓库 DyCP_Memory/，保持一致
+- [vLLM 问题分析工作方式](vllm-debug-evidence-based.md) — 基于代码+日志取证不瞎猜，日志不足先确认加日志、由用户跑实验提供数据
 ```
 
 检查并去重：
