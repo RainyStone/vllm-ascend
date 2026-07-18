@@ -15,3 +15,11 @@ metadata:
 - 推断根因或落改动前，先读相关代码、抽取日志数据交叉验证；明确区分"已证实"与"推断"。
 - 若现有日志信息不足、无法支撑结论，**不要继续猜**：及时与用户确认是否加辅助分析的日志打印，由用户跑实验提供新日志，再据此分析。
 - 修复改动要能从日志验证（说明复跑后预期看到的具体日志现象）。
+
+## 服务日志末尾的 "died with exit code None" 一般是手动 kill，非根因
+
+分析 vLLM 服务日志时，日志**末尾**若出现 `Process VLLM_DP_Coordinator (PID: xxxx) died with exit code None`（或类似 "Process ... died with exit code None" + 后续 RuntimeError/ERR99999 栈），通常是**用户手动 kill** 进程造成的，不是真正的崩溃原因，分析时可忽略末尾这一段。
+
+**Why:** 在 DyCP/DP 调试中，为停止卡死或测试结束，常手动 kill 协调器/引擎进程，kill 会被监控捕获并打印这类 "died with exit code None" 异常栈，淹没真正的故障点。
+
+**How to apply:** 排查时先定位日志中**末尾**的 "died with exit code None"，确认它是手 kill 产生后忽略；真正的异常/卡死点在它**之前**。不要把这段当作根因。
