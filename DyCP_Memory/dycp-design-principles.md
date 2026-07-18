@@ -1,6 +1,6 @@
 ---
 name: dycp-design-principles
-description: DyCP（Dynamic Context Parallel）方案原理：长短分流、CP子组拓扑/路由、CPAwareScheduler子组共识、DP全组状态机、混合batch重排与计算布局
+description: DyCP（Dynamic Context Parallel）方案原理：长短分流、CP子组拓扑/路由、CPAwareScheduler子组共识、DP全组状态机、混合batch重排与计算布局、CP切分与MLA-CP attention机制
 metadata: 
   node_type: memory
   type: reference
@@ -49,3 +49,17 @@ DyCP = Dynamic Context Parallel：在 **DP（数据并行）** 之上按请求�
   - `build_batch_req_id_to_cp_size` 用 `req_index < num_cp_request` 区分 CP/短。
   - attention / positions / slot_mapping / 子组采样对齐都基于这个"前 CP、后短"的连续布局：CP 区走切分 query + 子组共识/采样对齐；短区走普通 decode。
 - **整体链路**：客户端路由长→CP子组 / 短→单引擎 → 各引擎 `CPAwareScheduler.schedule` 出 batch（可能长短混排）→ `reorder_batch_to_split_cp_and_normal` 把 CP 排到前 → PCPManager 按 num_cp_request 前缀对 CP 区切分/共识、短区普通 decode → 逐拍全 DP metadata all_reduce 强制所有引擎对齐。
+
+## 6. CP 切分与 MLA-CP attention 机制（vllm-ascend）
+
+CP（长）请求的 prefill 在子组（`dycp_size`=cp_world_size 个 rank）间**协作计算**，机制（`pcp_utils.py` PCPManager + `mla_cp.py`）：
+
+- **token 切分**：CP 请求 prefill token 在子组间均分，rank r 分得 `base + (1 if r<remainder else 0)`（`base=total//cp_world_size`，`_get_local_cp_tokens`）。每 rank 只算自己那份 query。
+- **请求布局（与第5节呼应）**：`[0, num_dycp_reqs)`=CP 请求、`[num_dycp_reqs, num_reqs)`=短请求；CP/短分离，CP 索引/mask 构造只遍历 CP 请求（`query_lens[:num_dycp_reqs]`）。
+- **query 切 head/tail（ring/UD attention）**：每个 CP 请求 query 切两半 `chunk_len = seq_len // 2`；`q_head_chunk_id = pcp_world_rank`、`q_tail_chunk_id = 2*world_size - 1 - rank`，子组各 rank 取不相交 head/tail chunk，构成环形/zigzag attention。
+- **KV：子组内 all-gather**（已确认，非各算一份）：`kv_req_offset += seq_len * pcp_world_size`，每 rank 持有全子组 KV。即 **query 切分、KV 汇聚**。
+- **PCP padding**：切分后 token 做 pad，`num_actual_tokens_pcp_padded = total_num_pcp_scheduled_tokens * pcp_world_size`，用于对齐子组各 rank 的 batch 尺寸。
+- **mask**：按 CP 请求分段，`attn_mask_seqlens = cumsum(chunk_seqlens)`，每段 chunk_len 行；query 的 head/tail 部分各对应"无mask(已算) KV段 + 有mask(当前,causal) KV段"。
+- **forward 分段执行**（`mla_cp.py:711-717`）：把 batch query/kv 按 `num_actual_tokens_pcp_padded // common_pcp_size` 切成 **CP 段**（前）和**短段**（后），分别用 `dycp_metadata`/`dp_metadata` 调 `_forward_common` → `_forward_prefill` → MLA-CP attention（head/tail ring/UD）。
+- **采样对齐**：解码采样在子组内 all_gather，cp_rank0(owner) 结果权威、唯一出输出流。
+- ⚠️ **已知嫌疑区**：`pcp_utils.py` 的 PCP metadata 构造函数（建 `num_actual_tokens_pcp_padded`、head/tail 索引、mask）作者自标 TODO"v0.18→v0.21 差异大、大概率有问题"；**混合 batch（CP+短）下 CP 段 mask 与 query 行数会不一致**（曾出现 `atten_mask [6,2048] should be [2048,2048]`），单 CP/单短不触发，混合 batch 触发——待修。
