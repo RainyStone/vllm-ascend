@@ -49,6 +49,7 @@ cp -n "$REPO_MEM"/*.md "$MEM"/
 - `git-commit-conventions.md` — git 提交规则
 - `memory-sync-to-repo.md` — 记忆与仓库同步规则
 - `vllm-debug-evidence-based.md` — 问题分析基于代码+日志取证、不瞎猜
+- `pcp-dcp-kv-sharding.md` — 纯PCP/纯DCP方案原理与KV cache切分链路
 
 各记忆作用说明（便于判断是否需要 reload 全部）：
 
@@ -68,6 +69,14 @@ cp -n "$REPO_MEM"/*.md "$MEM"/
 - **vllm-debug-evidence-based**：分析 vLLM 服务问题的工作方式。必须基于代码+
   日志取证、不瞎猜，区分"已证实"与"推断"；日志不足时不要继续猜，先与用户确认
   加日志、由用户跑实验提供数据再分析；修复要能从日志验证。
+- **pcp-dcp-kv-sharding**：纯 PCP/纯 DCP 方案原理与 KV cache 切分完整链路。含
+  Q/KV 切分（PCP 切 Q head-tail + KV 分片存算时 all-gather 聚齐；DCP 切 KV 省
+  显存、Q 不切仅 head 维 ag + all-to-all 对账）、interleave slot_mapping 底座、
+  scheduler 块膨胀（`single_type_kv_cache_manager.py:59-63`）与 worker virtual
+  block 寻址的精确调用链、CP 世界数两套来源（scheduler 不含 dycp / worker 含
+  dycp）、PCP decode 执行模型（序列并行非权重并行、Q replica/KV 分片、采样对齐
+  无 broadcast 靠 logits 相同 + 确定性采样）。理解 PCP/DCP 代码、排查 KV 切分/
+  块记账问题时必读。
 
 （`RELOAD.md` 是操作指南，不要放进 memory 目录。）
 
@@ -81,6 +90,7 @@ agent 只会加载 `$MEM/MEMORY.md` 里列了指针的文件。把以下几行�
 - [Git 提交规则](git-commit-conventions.md) — 中文 message、记录解决的问题、不加 Co-Author、只提交相关文件
 - [记忆与仓库同步](memory-sync-to-repo.md) — 更新 agent 记忆时同步更新仓库 DyCP_Memory/，保持一致
 - [vLLM 问题分析工作方式](vllm-debug-evidence-based.md) — 基于代码+日志取证不瞎猜，日志不足先确认加日志、由用户跑实验提供数据
+- [纯PCP/纯DCP与KV分片](pcp-dcp-kv-sharding.md) — PCP切Q+KV分片算时聚齐；DCP切KV省显存Q不切仅head维ag+all-to-all；scheduler块膨胀与worker virtual block同因子；含PCP decode执行模型与采样对齐
 ```
 
 检查并去重：
