@@ -50,6 +50,7 @@ cp -n "$REPO_MEM"/*.md "$MEM"/
 - `memory-sync-to-repo.md` — 记忆与仓库同步规则
 - `vllm-debug-evidence-based.md` — 问题分析基于代码+日志取证、不瞎猜
 - `pcp-dcp-kv-sharding.md` — 纯PCP/纯DCP方案原理与KV cache切分链路
+- `mooncake-connector-pd-transfer-principles.md` — mooncake_connector P/D KV传输原理与PCP/DCP两级CP切分
 
 各记忆作用说明（便于判断是否需要 reload 全部）：
 
@@ -77,6 +78,16 @@ cp -n "$REPO_MEM"/*.md "$MEM"/
   dycp）、PCP decode 执行模型（序列并行非权重并行、Q replica/KV 分片、采样对齐
   无 broadcast 靠 logits 相同 + 确定性采样）。理解 PCP/DCP 代码、排查 KV 切分/
   块记账问题时必读。
+- **mooncake-connector-pd-transfer-principles**：mooncake.connector 跨节点 P/D
+  KV cache 拉取机制。双信道（ZMQ 握手传元信息 + mooncake TransferEngine RDMA
+  传 KV）、逐层地址模型（base_addr/block_len/block_size_scale 三表）、scheduler
+  构 ReqMeta 到 worker 的 `start_load_kv` 链路、PCP/DCP 两级 CP 切分
+  （`_get_kv_split_metadata`：CP 组拓扑→D↔P port 配对→block 按 CP rank 切分取子集
+  →TP 冗余拉取）、拉完仅 `is_group_transfer_end` 的 group 做 reformat（transpose
+  还原 [block,split,token,head,dim]→[block,token,split,head,dim]）。扁平
+  `dycp_size` 适配后，`_get_kv_split_metadata` 及其后方法尚未按按 cp_ranks 分组的
+  block_ids 新结构改造，为后期适配主战场。理解 connector 传输/排查 P/D KV 拉取、
+  扁平 dycp 适配时必读。
 
 （`RELOAD.md` 是操作指南，不要放进 memory 目录。）
 
@@ -91,6 +102,7 @@ agent 只会加载 `$MEM/MEMORY.md` 里列了指针的文件。把以下几行�
 - [记忆与仓库同步](memory-sync-to-repo.md) — 更新 agent 记忆时同步更新仓库 DyCP_Memory/，保持一致
 - [vLLM 问题分析工作方式](vllm-debug-evidence-based.md) — 基于代码+日志取证不瞎猜，日志不足先确认加日志、由用户跑实验提供数据
 - [纯PCP/纯DCP与KV分片](pcp-dcp-kv-sharding.md) — PCP切Q+KV分片算时聚齐；DCP切KV省显存Q不切仅head维ag+all-to-all；scheduler块膨胀与worker virtual block同因子；含PCP decode执行模型与采样对齐
+- [mooncake_connector P/D传输原理](mooncake-connector-pd-transfer-principles.md) — 双信道(ZMQ握手+mooncake RDMA)、逐层地址模型、start_load_kv链路、PCP/DCP两级CP切分(split_metadata)与reformat；扁平dycp适配后CP切分未迁为待适配主战场
 ```
 
 检查并去重：
