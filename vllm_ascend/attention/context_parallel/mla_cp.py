@@ -1353,7 +1353,7 @@ def split_attn_metadata(
 
     if num_dycp_reqs == 0:
         return None, attn_metadata
-    if num_dycp_reqs >= num_prefills:
+    if num_dycp_reqs >= num_prefills: # TODO [DyCP] 00, why? attn_metadata从传入的参数来看，是父类传入，为什么可以既作dycp_metadata也可作dp_metadata
         return attn_metadata, None
 
     if isinstance(prefill_meta.query_lens, torch.Tensor):
@@ -1470,8 +1470,28 @@ def split_prefill_metadata(
     dycp_block_table = prefill_meta.block_table[:num_dycp_reqs]
     dp_block_table = prefill_meta.block_table[num_dycp_reqs:]
 
-    dycp_attn_mask = prefill_meta.attn_mask[:dycp_token_num]
-    dp_attn_mask = prefill_meta.attn_mask[dycp_token_num:]
+    # [DyCP] fix: actual_seq_lengths_q 是各请求 query 长度的 cumsum 前缀和
+    # （mla_v1.build_prefill_metadata: torch.cumsum(prefill_query_lens)）。直接对原
+    # cumsum 切片会得到"全局累加"而非"本段自累加"——短段后半段没减去 CP 段总和，
+    # 末元素 = 全 batch 累加值 ≠ 短段 query 实际长度，FIA 校验
+    # "T should be equal to the last element of actual_seq_lengths" 失败崩溃。
+    # 因此按本段自己的 query_lens 重新 cumsum（与 mla_v1 构造规则一致），CP/DP 两段
+    # 各自独立累加。
+    dycp_actual_seq_lengths_q = torch.cumsum(
+        torch.as_tensor(dycp_query_lens, dtype=torch.int32), dim=0
+    ).tolist()
+    dp_actual_seq_lengths_q = torch.cumsum(
+        torch.as_tensor(dp_query_lens, dtype=torch.int32), dim=0
+    ).tolist()
+
+    # [DyCP] fix: attn_mask 是通用因果方阵 [S,S]（如 [2048,2048]），真实 query/kv
+    # 长度由算子按 actual_seq_lengths / actual_seq_lengths_kv 分段处理（每请求取左上
+    # 角 q×k 块，请求间互不注意）。因此 CP/DP 各自直接用完整方阵 mask，不能按
+    # dycp_token_num 切片——切片会把方阵 S1 截成 [dycp_token_num, 2048] 非方阵，
+    # 算子 tiling 校验失败崩溃（曾现 [6,2048] should be [2048,2048]）。单 CP 路径
+    # 本就用完整方阵跑通，混合 batch 的 CP 注意力与单 CP 一致，故同样用完整方阵。
+    dycp_attn_mask = prefill_meta.attn_mask
+    dp_attn_mask = prefill_meta.attn_mask
 
     dycp_sin = prefill_meta.sin[:dycp_token_num] if prefill_meta.sin is not None else None
     dp_sin = prefill_meta.sin[dycp_token_num: dycp_token_num + dp_token_num] if prefill_meta.sin is not None else None
@@ -1506,6 +1526,7 @@ def split_prefill_metadata(
         sin=dycp_sin,
         cos=dycp_cos,
         pcp_metadata=dycp_pcp_metadata,
+        actual_seq_lengths_q=dycp_actual_seq_lengths_q,
     )
 
     # ========== init DP Prefill Metadata ==========
@@ -1523,6 +1544,7 @@ def split_prefill_metadata(
         sin=dp_sin,
         cos=dp_cos,
         pcp_metadata=None,  # DP 不需要
+        actual_seq_lengths_q=dp_actual_seq_lengths_q,
     )
     return dycp_prefill, dp_prefill
 
