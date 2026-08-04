@@ -42,6 +42,7 @@ class RecomputeCPUOffloadWorker:
         self._load_hwm: int = -1
 
         self._connector_metadata: RecomputeCPUOffloadMetadata | None = None
+        self._cp_rank: int = 0
         self._pending_load_event_indices: set[int] = set()
         self._submitted_load_event_indices: set[int] = set()
         self._completed_store_events: dict[int, int] = {}
@@ -123,6 +124,10 @@ class RecomputeCPUOffloadWorker:
 
     def bind_connector_metadata(self, metadata: RecomputeCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
+        # [offload-adapt M3] remember which cp_rank this per-rank metadata
+        # serves; store-completion is reported keyed by (cp_rank, event_idx)
+        # so the scheduler-side manager can ack per rank.
+        self._cp_rank = getattr(metadata, "cp_rank", 0)
         self._load_stream_waited = False
         if metadata.preempt_load_event >= 0:
             self._pending_load_event_indices.add(metadata.preempt_load_event)
@@ -215,7 +220,7 @@ class RecomputeCPUOffloadWorker:
 
         if not src_block_ids:
             if is_store:
-                self._completed_store_events[event_idx] = 1
+                self._completed_store_events[(self._cp_rank, event_idx)] = 1
             else:
                 self._load_hwm = max(self._load_hwm, event_idx)
             return
@@ -275,7 +280,7 @@ class RecomputeCPUOffloadWorker:
         if sync:
             event.synchronize()
             if is_store:
-                self._completed_store_events[event_idx] = 1
+                self._completed_store_events[(self._cp_rank, event_idx)] = 1
             else:
                 self._load_hwm = max(self._load_hwm, event_idx)
             return
@@ -293,13 +298,28 @@ class RecomputeCPUOffloadWorker:
             return None, None
 
         finished_recving: set[str] = set()
+        _map_keys = list(metadata.preempt_load_event_to_reqs.keys())[:8]
+        _pending = len(self._pending_load_event_indices)
+        _hwm = None
+        _completed = None
         if self._pending_load_event_indices:
             load_hwm = self._poll_load_events()
+            _hwm = load_hwm
             completed_loads = [event_idx for event_idx in self._pending_load_event_indices if event_idx <= load_hwm]
+            _completed = completed_loads
             for event_idx in completed_loads:
                 self._pending_load_event_indices.discard(event_idx)
                 self._submitted_load_event_indices.discard(event_idx)
-                finished_recving.update(metadata.preempt_load_event_to_reqs.get(event_idx, []))
+                _hit = metadata.preempt_load_event_to_reqs.get(event_idx, [])
+                finished_recving.update(_hit)
+                if not _hit:
+                    logger.info(
+                        "[diag-offload-getfin] event_idx=%s NOT in map (map_keys=%s) -> finished_recving empty",
+                        event_idx, _map_keys)
+        if _pending or finished_recving:
+            logger.info(
+                "[diag-offload-getfin] pending=%d hwm=%s completed=%s fin_recv=%s map_keys=%s",
+                _pending, _hwm, _completed, finished_recving, _map_keys)
 
         return None, finished_recving or None
 

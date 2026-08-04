@@ -57,7 +57,19 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(enable_offload_prefix_caching, bool):
             raise ValueError(f"enable_offload_prefix_caching must be a boolean, got {enable_offload_prefix_caching!r}")
         world_size = vllm_config.parallel_config.world_size
-        cpu_capacity_per_rank = cpu_capacity_bytes // world_size
+        # [offload-adapt capacity-owner] Single owner of the cp_world_size division
+        # is the MANAGER (M1), which knows dp_per_domain. The connector used to
+        # pre-divide by world_size; under DYCP combo this risks double-division
+        # if M1 also divides by cp_world_size. Policy: connector passes the FULL
+        # budget under DYCP (or the explicit per-rank override); M1 partitions by
+        # cp_world_size. Non-DYCP keeps the original // world_size behavior.
+        dp_per_domain = vllm_config.parallel_config.dp_per_domain or 1
+        if "cpu_bytes_to_use_per_rank" in extra_config:
+            cpu_capacity_per_rank = int(extra_config["cpu_bytes_to_use_per_rank"])
+        elif dp_per_domain > 1:
+            cpu_capacity_per_rank = cpu_capacity_bytes
+        else:
+            cpu_capacity_per_rank = cpu_capacity_bytes // world_size
         if "cpu_bytes_to_use_per_rank" in extra_config:
             explicit = int(extra_config["cpu_bytes_to_use_per_rank"])
             if explicit != cpu_capacity_per_rank:
@@ -161,6 +173,11 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
 
+    # [offload-adapt M4/M1] CrossDP binds the per-rank GPU pools list.
+    def bind_gpu_block_pools(self, gpu_block_pools: list) -> None:
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.bind_gpu_block_pools(gpu_block_pools)
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -173,7 +190,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def update_state_after_alloc(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
+        blocks,  # "KVCacheBlocks | list[KVCacheBlocks]" per-rank aware
         num_external_tokens: int,
     ) -> None:
         if self.scheduler_manager is not None:
@@ -184,21 +201,36 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
         num_computed_tokens: int,
+        cp_rank: int | None = None,
     ) -> bool:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.update_state_before_preempt(
                 request,
                 block_ids,
                 num_computed_tokens,
+                cp_rank=cp_rank,
             )
         return False
+
+    # [offload-adapt M5] Discard a committed per-rank CPU state on the
+    # scheduler all-or-nothing fail path (see manager.discard_preempt_state).
+    def discard_preempt_state(
+        self,
+        request: "Request",
+        cp_rank: int | None = None,
+    ) -> None:
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.discard_preempt_state(request, cp_rank=cp_rank)
 
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         if self.scheduler_manager is not None:
-            return self.scheduler_manager.build_connector_meta(scheduler_output)
+            # [offload-adapt M3] CrossDP sets cp_rank on each per-rank output;
+            # filter manager to THIS rank. CP==1 outputs have cp_rank=None/0.
+            cp_rank = getattr(scheduler_output, "cp_rank", None)
+            return self.scheduler_manager.build_connector_meta(scheduler_output, cp_rank=cp_rank)
         return RecomputeCPUOffloadMetadata()
 
     def update_connector_output(

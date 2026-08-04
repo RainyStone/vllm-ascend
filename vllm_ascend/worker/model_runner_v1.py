@@ -1421,6 +1421,15 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        # [diag-hang] fence ENTER: progress heartbeat. If the last fence in the
+        # log for some rank is ENTER with no later phase, this step never
+        # advanced past input prep.
+        self._diag_step = getattr(self, '_diag_step', -1) + 1
+        logger.info(
+            "[diag-hang] ENTER cp_rank=%s dp_rank=%s step=%s num_sched=%s num_cp_req=%s",
+            getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+            self._diag_step, num_scheduled_tokens,
+            getattr(scheduler_output, 'num_cp_request', None))
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 if has_kv_transfer_group():
@@ -1465,14 +1474,20 @@ class NPUModelRunner(GPUModelRunner):
                     modelrunneroutput = self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
                     if modelrunneroutput.kv_connector_output is not None and self.dycp_size > 1:
-                        for req_id in modelrunneroutput.kv_connector_output.finished_sending:
-                            modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
-                                req_id
-                            )
-                        for req_id in modelrunneroutput.kv_connector_output.finished_recving:
-                            modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
-                                req_id
-                            )
+                        # finished_sending / finished_recving are `set or None`
+                        # (see MultiKVConnectorWorkerMetadata.get_finished):
+                        # empty -> None, so guard each before iterating, matching
+                        # the post-forward path below.
+                        if modelrunneroutput.kv_connector_output.finished_sending:
+                            for req_id in modelrunneroutput.kv_connector_output.finished_sending:
+                                modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
+                                    req_id
+                                )
+                        if modelrunneroutput.kv_connector_output.finished_recving:
+                            for req_id in modelrunneroutput.kv_connector_output.finished_recving:
+                                modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
+                                    req_id
+                                )
 
                     return modelrunneroutput
                 if self.cache_config.kv_sharing_fast_prefill:
@@ -1686,10 +1701,25 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            # [diag-hang] fence FORWARD_ENTER/EXIT: model forward (per-layer
+            # wait_for_layer_load / CP all-gather / LSE merge). ENTER without
+            # EXIT => stuck inside a layer forward; EXIT present => forward OK.
+            logger.info("[diag-hang] FORWARD_ENTER cp_rank=%s dp_rank=%s step=%s num_tok_pad=%s",
+                        getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                        getattr(self, '_diag_step', -1), num_tokens_padded)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            logger.info("[diag-hang] FORWARD_EXIT  cp_rank=%s dp_rank=%s step=%s",
+                        getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                        getattr(self, '_diag_step', -1))
         with record_function_or_nullcontext("post process"):
+            # [diag-hang] fence POSTPROC: forward done; now connector
+            # get_finished / sampling. FORWARD_EXIT without POSTPROC => stuck in
+            # the kv_connector_output context exit (wait_for_layer_load / poll).
+            logger.info("[diag-hang] POSTPROC      cp_rank=%s dp_rank=%s step=%s",
+                        getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                        getattr(self, '_diag_step', -1))
             if kv_connector_output.finished_sending and self.dycp_size > 1:
                 for req_id in kv_connector_output.finished_sending:
                     kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
@@ -1732,6 +1762,10 @@ class NPUModelRunner(GPUModelRunner):
                         self.debugger.step()
                     return output
 
+                # [diag-hang] fence LOGITS_ENTER: compute_logits (POSTPROC -> logits).
+                logger.info("[diag-hang] LOGITS_ENTER cp_rank=%s dp_rank=%s step=%s",
+                            getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                            getattr(self, '_diag_step', -1))
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
@@ -1755,6 +1789,10 @@ class NPUModelRunner(GPUModelRunner):
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+# [diag-hang] fence EXEC_RETURN: execute_model about to return None (logits done).
+            logger.info("[diag-hang] EXEC_RETURN  cp_rank=%s dp_rank=%s step=%s",
+                        getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                        getattr(self, '_diag_step', -1))
             # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
@@ -1777,6 +1815,10 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        # [diag-hang] fence SAMPLE_ENTER: sample_tokens entry (called after execute_model returned None).
+        logger.info("[diag-hang] SAMPLE_ENTER cp_rank=%s dp_rank=%s step=%s",
+                    getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                    getattr(self, '_diag_step', -1))
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
@@ -1858,6 +1900,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
+# [diag-hang] fence BOOKSYNC_ENTER: _bookkeeping_sync (cross-rank bookkeeping).
+        logger.info("[diag-hang] BOOKSYNC_ENTER cp_rank=%s dp_rank=%s step=%s",
+                    getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                    getattr(self, '_diag_step', -1))
         (
             logprobs_lists,
             valid_sampled_token_ids,
@@ -1873,6 +1919,10 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
         )
+        # [diag-hang] fence BOOKSYNC_EXIT: _bookkeeping_sync done.
+        logger.info("[diag-hang] BOOKSYNC_EXIT  cp_rank=%s dp_rank=%s step=%s",
+                    getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                    getattr(self, '_diag_step', -1))
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
@@ -2322,11 +2372,21 @@ class NPUModelRunner(GPUModelRunner):
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
+            # [diag-hang] fence SYNC_DP_ENTER/EXIT: cross-rank batch-sync barrier.
+            # All DP ranks must reach _sync_batch_across_dp together; if a rank's
+            # last fence is SYNC_DP_ENTER it is blocked waiting for the absent
+            # ranks (classic collective deadlock).
+            logger.info("[diag-hang] SYNC_DP_ENTER cp_rank=%s dp_rank=%s step=%s num_tok_pad=%s",
+                        getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                        getattr(self, '_diag_step', -1), num_tokens_padded)
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_batch_across_dp(
                 num_tokens_padded=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode.value,
                 allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
             )
+            logger.info("[diag-hang] SYNC_DP_EXIT  cp_rank=%s dp_rank=%s step=%s",
+                        getattr(self, 'cp_rank', '?'), getattr(self, 'dp_rank', '?'),
+                        getattr(self, '_diag_step', -1))
 
             # Extract DP padding if there is any
             if num_tokens_across_dp is not None:

@@ -16,6 +16,10 @@ INVALID_JOB_ID = -1
 class RecomputeCPUOffloadMetadata(KVConnectorMetadata):
     """Recompute offload transfers passed from scheduler to worker."""
 
+    # [offload-adapt M3] Which CP rank this metadata serves (CrossDP builds one
+    # metadata per per-rank SchedulerOutput). CP==1 path uses rank 0.
+    cp_rank: int = 0
+
     # Whether any requests were preempted this step and need flush pending transfers.
     need_flush: bool = False
 

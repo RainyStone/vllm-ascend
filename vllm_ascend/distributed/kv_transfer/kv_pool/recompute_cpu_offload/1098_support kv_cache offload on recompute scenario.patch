@@ -1,0 +1,2549 @@
+From 7e4344995346cdd258521b2ff7512a52462654a7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=BB=8E=E4=BA=91?= <dingshihao.dsh@antgroup.com>
+Date: Wed, 24 Jun 2026 13:54:58 +0800
+Subject: [PATCH 1/3] fetch recompute KVCache offloading
+
+---
+ tests/ut/core/test_recompute_scheduler.py     |  43 ++
+ .../kv_offload/test_recompute_cpu_offload.py  | 640 ++++++++++++++++++
+ vllm_ascend/core/recompute_scheduler.py       | 125 +++-
+ .../distributed/kv_transfer/__init__.py       |   6 +
+ .../kv_transfer/ascend_multi_connector.py     |  51 +-
+ .../kv_pool/recompute_cpu_offload/__init__.py |   1 +
+ .../kv_pool/recompute_cpu_offload/manager.py  | 627 +++++++++++++++++
+ .../kv_pool/recompute_cpu_offload/metadata.py |  52 ++
+ .../recompute_cpu_offload_connector.py        | 246 +++++++
+ .../kv_pool/recompute_cpu_offload/worker.py   | 319 +++++++++
+ vllm_ascend/worker/model_runner_v1.py         |   8 +
+ 11 files changed, 2088 insertions(+), 30 deletions(-)
+ create mode 100644 tests/ut/core/test_recompute_scheduler.py
+ create mode 100644 tests/ut/kv_offload/test_recompute_cpu_offload.py
+ create mode 100644 vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/__init__.py
+ create mode 100644 vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py
+ create mode 100644 vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/metadata.py
+ create mode 100644 vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+ create mode 100644 vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/worker.py
+
+diff --git a/tests/ut/core/test_recompute_scheduler.py b/tests/ut/core/test_recompute_scheduler.py
+new file mode 100644
+index 000000000..bfb20fc7d
+--- /dev/null
++++ b/tests/ut/core/test_recompute_scheduler.py
+@@ -0,0 +1,43 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++from types import MethodType
++
++from vllm.sampling_params import SamplingParams
++from vllm.v1.request import Request
++from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
++
++from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
++
++
++def test_pd_consumer_first_step_injects_placeholder_spec_tokens():
++    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
++    scheduler.requests = {}
++    scheduler.is_kv_producer = False
++    scheduler.is_hybrid_model = False
++    scheduler.is_mtp_kv_consumer = True
++    scheduler.num_spec_tokens = 1
++    scheduler.max_model_len = 1024
++    scheduler.log_stats = False
++    scheduler.connector = None
++
++    enqueued_requests = []
++
++    def enqueue_waiting_request(self, request):
++        enqueued_requests.append(request)
++
++    scheduler._enqueue_waiting_request = MethodType(enqueue_waiting_request, scheduler)
++
++    request = Request(
++        request_id="pd-consumer-first-step",
++        prompt_token_ids=[1, 2, 3, 4],
++        sampling_params=SamplingParams(max_tokens=8),
++        pooling_params=None,
++    )
++
++    scheduler.add_request(request)
++
++    assert enqueued_requests == [request]
++    assert scheduler.requests[request.request_id] is request
++    assert request.spec_token_ids == [PLACEHOLDER_TOKEN_ID]
++    assert request.num_tokens_with_spec == request.num_tokens + 1
+diff --git a/tests/ut/kv_offload/test_recompute_cpu_offload.py b/tests/ut/kv_offload/test_recompute_cpu_offload.py
+new file mode 100644
+index 000000000..fa9369393
+--- /dev/null
++++ b/tests/ut/kv_offload/test_recompute_cpu_offload.py
+@@ -0,0 +1,640 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++import sys
++import types
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++from vllm.v1.outputs import KVConnectorOutput
++from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
++
++# Clean up stale mock modules installed by other kv offload tests that replace
++# real kv_transfer packages with fake modules, breaking imports of this package.
++_kv_xfer = "vllm_ascend.distributed.kv_transfer"
++_vllm_kv_xfer = "vllm.distributed.kv_transfer"
++_saved_modules: dict[str, types.ModuleType] = {}
++_to_remove = []
++for _module_name in list(sys.modules):
++    if _module_name.startswith(_kv_xfer) or _module_name.startswith(_vllm_kv_xfer):
++        _to_remove.append(_module_name)
++for _module_name in _to_remove:
++    _saved_modules[_module_name] = sys.modules.pop(_module_name)
++
++from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (  # noqa: E402
++    PreemptedRequestState,
++    RecomputeCPUOffloadScheduler,
++    TransferMeta,
++)
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (  # noqa: E402
++    INVALID_JOB_ID,
++    RecomputeCPUOffloadMetadata,
++    RecomputeCPUOffloadWorkerMetadata,
++)
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector import (  # noqa: E402
++    RecomputeCPUOffloadConnectorV1,
++)
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker import (  # noqa: E402
++    RecomputeCPUOffloadWorker,
++)
++
++for _module_name, _module in _saved_modules.items():
++    sys.modules[_module_name] = _module
++
++
++def test_recompute_cpu_offload_worker_metadata_aggregate():
++    metadata = RecomputeCPUOffloadWorkerMetadata(completed_store_events={1: 1, 2: 2})
++    other = RecomputeCPUOffloadWorkerMetadata(completed_store_events={2: 3, 4: 1})
++
++    merged = metadata.aggregate(other)
++
++    assert isinstance(merged, RecomputeCPUOffloadWorkerMetadata)
++    assert merged.completed_store_events == {1: 1, 2: 5, 4: 1}
++
++
++def test_recompute_cpu_offload_metadata_defaults_are_empty():
++    metadata = RecomputeCPUOffloadMetadata()
++
++    assert metadata.need_flush is False
++    assert metadata.preempt_store_event == INVALID_JOB_ID
++    assert metadata.preempt_store_gpu_blocks == []
++    assert metadata.preempt_store_cpu_blocks == []
++    assert metadata.preempt_load_event == INVALID_JOB_ID
++    assert metadata.preempt_load_gpu_blocks == []
++    assert metadata.preempt_load_cpu_blocks == []
++    assert metadata.preempt_load_event_to_reqs == {}
++
++
++def test_recompute_cpu_offload_connector_scheduler_methods_forward():
++    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
++    scheduler_manager = MagicMock()
++    scheduler_manager.get_num_new_matched_tokens.return_value = (8, True)
++    scheduler_manager.update_state_before_preempt.return_value = True
++    scheduler_manager.has_pending_transfers.return_value = True
++    scheduler_manager.has_preempted_request.return_value = True
++    connector.scheduler_manager = scheduler_manager
++
++    request = SimpleNamespace(request_id="req-1")
++    blocks = MagicMock()
++    block_ids = ([1, 2],)
++
++    assert connector.get_num_new_matched_tokens(request, 4) == (8, True)
++    connector.update_state_after_alloc(request, blocks, 8)
++    assert connector.update_state_before_preempt(request, block_ids, 16) is True
++    assert connector.has_pending_transfers() is True
++    assert connector.has_preempted_request("req-1") is True
++
++    scheduler_manager.get_num_new_matched_tokens.assert_called_once_with(request, 4)
++    scheduler_manager.update_state_after_alloc.assert_called_once_with(request, blocks, 8)
++    scheduler_manager.update_state_before_preempt.assert_called_once_with(request, block_ids, 16)
++
++
++def test_recompute_cpu_offload_connector_worker_methods_forward():
++    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
++    worker_handler = MagicMock()
++    worker_handler.get_finished.return_value = (None, {"req-1"})
++    worker_handler.build_connector_worker_meta.return_value = RecomputeCPUOffloadWorkerMetadata(
++        completed_store_events={3: 1}
++    )
++    connector.worker_handler = worker_handler
++
++    metadata = RecomputeCPUOffloadMetadata(preempt_load_event=3)
++    connector.bind_connector_metadata(metadata)
++    connector.handle_preemptions(metadata)
++    connector.start_load_kv(MagicMock())
++    connector.wait_for_layer_load("layer.0")
++
++    assert connector.get_finished(set()) == (None, {"req-1"})
++    assert connector.build_connector_worker_meta().completed_store_events == {3: 1}
++
++    worker_handler.bind_connector_metadata.assert_called_once_with(metadata)
++    worker_handler.handle_preemptions.assert_called_once_with(metadata)
++    worker_handler.start_load_kv.assert_called_once_with()
++    worker_handler.wait_for_layer_load.assert_called_once_with()
++
++
++def test_recompute_cpu_offload_connector_defaults_without_scheduler_manager():
++    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
++    connector.scheduler_manager = None
++
++    assert connector.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
++    assert connector.update_state_before_preempt(MagicMock(), ([],), 1) is False
++    assert isinstance(
++        connector.build_connector_meta(MagicMock()),
++        RecomputeCPUOffloadMetadata,
++    )
++    assert connector.request_finished(MagicMock(), []) == (False, None)
++    assert connector.request_finished_all_groups(MagicMock(), ([],)) == (
++        False,
++        None,
++    )
++    assert connector.has_pending_transfers() is False
++    assert connector.has_preempted_request("req-1") is False
++    assert connector.take_events() == []
++    assert connector.reset_cache() is None
++
++
++def test_recompute_cpu_offload_scheduler_get_num_new_matched_tokens_states():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._preempted_req_states = {}
++    scheduler._cleanup_preempt_cache_request = MagicMock()
++    request = SimpleNamespace(request_id="req-1", num_tokens=10)
++
++    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
++
++    scheduler._preempted_req_states["req-1"] = PreemptedRequestState(
++        req_id="req-1",
++        cpu_block_ids=([1],),
++        num_computed_tokens=8,
++        store_transfer_meta=TransferMeta([11], [1]),
++        ready=False,
++    )
++    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
++
++    scheduler._preempted_req_states["req-1"].ready = True
++    assert scheduler.get_num_new_matched_tokens(request, 3) == (5, True)
++    assert scheduler._preempted_req_states["req-1"].load_start_tokens == 3
++
++    assert scheduler.get_num_new_matched_tokens(request, 8) == (0, False)
++    scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
++
++
++def test_recompute_cpu_offload_scheduler_update_state_after_alloc_errors():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._prepare_preempt_load_after_alloc = MagicMock(return_value=False)
++    request = SimpleNamespace(request_id="req-1")
++    blocks = MagicMock()
++    blocks.get_block_ids.return_value = ([1, 2],)
++
++    scheduler.update_state_after_alloc(request, blocks, 0)
++    scheduler._prepare_preempt_load_after_alloc.assert_not_called()
++
++    try:
++        scheduler.update_state_after_alloc(request, blocks, 2)
++    except RuntimeError as exc:
++        assert "Failed to prepare recompute H2D load" in str(exc)
++    else:
++        raise AssertionError("Expected RuntimeError when load mapping fails")
++
++    scheduler._prepare_preempt_load_after_alloc.assert_called_once_with(request, ([1, 2],), 2)
++
++
++def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._group_is_sliding_window = [True, False]
++
++    assert scheduler._align_group_block_ids(0, [7, 8], 4) == [0, 0, 7, 8]
++    assert scheduler._align_group_block_ids(0, [5, 6, 7, 8, 9], 4) == [
++        5,
++        6,
++        7,
++        8,
++    ]
++    assert scheduler._align_group_block_ids(1, [7, 8], 4) == [7, 8]
++    assert scheduler._align_group_block_ids(0, [7, 8], 0) == []
++
++
++def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._group_is_sliding_window = [True]
++    scheduler.cpu_kv_cache_config = SimpleNamespace(
++        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
++    )
++    scheduler.enable_offload_prefix_caching = False
++    scheduler._pending_hash_blocks = {}
++    scheduler._gpu_block_pool = SimpleNamespace(
++        blocks={
++            20: SimpleNamespace(block_id=20, block_hash=None),
++            21: SimpleNamespace(block_id=21, block_hash=None),
++        },
++        _maybe_evict_cached_block=MagicMock(),
++    )
++    cpu_blocks = [
++        SimpleNamespace(block_id=101, _block_hash=None),
++        SimpleNamespace(block_id=102, _block_hash=None),
++    ]
++    scheduler.cpu_block_pool = SimpleNamespace(
++        get_num_free_blocks=MagicMock(return_value=8),
++        get_new_blocks=MagicMock(return_value=cpu_blocks),
++        cached_block_hash_to_block=SimpleNamespace(get_one_block=MagicMock(return_value=None)),
++    )
++    scheduler._preempted_req_states = {}
++
++    assert scheduler._create_preempt_state("req-1", ([20, 21],), 64) is True
++
++    state = scheduler._preempted_req_states["req-1"]
++    assert state.cpu_block_ids == ([0, 0, 101, 102],)
++    assert state.store_transfer_meta == TransferMeta([20, 21], [101, 102])
++    assert state.ready is False
++
++
++def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._group_is_sliding_window = [True]
++    scheduler.cpu_kv_cache_config = SimpleNamespace(
++        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
++    )
++    scheduler._gpu_block_pool = SimpleNamespace(blocks={30: "gpu30", 31: "gpu31"}, touch=MagicMock())
++    scheduler._preempted_req_states = {
++        "req-1": PreemptedRequestState(
++            req_id="req-1",
++            cpu_block_ids=([0, 0, 4, 5],),
++            num_computed_tokens=64,
++            store_transfer_meta=TransferMeta([20, 21], [4, 5]),
++            load_start_tokens=0,
++            ready=True,
++        )
++    }
++
++    prepared = scheduler._prepare_preempt_load_after_alloc(
++        SimpleNamespace(request_id="req-1"),
++        ([30, 31],),
++        num_external_tokens=64,
++    )
++
++    assert prepared is True
++    state = scheduler._preempted_req_states["req-1"]
++    assert state.load_transfer_meta == TransferMeta([30, 31], [4, 5])
++    touched = list(scheduler._gpu_block_pool.touch.call_args.args[0])
++    assert touched == ["gpu30", "gpu31"]
++
++
++def test_recompute_cpu_offload_scheduler_h2d_clips_mtp_tail_blocks():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._group_is_sliding_window = [False]
++    scheduler.cpu_kv_cache_config = SimpleNamespace(
++        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
++    )
++    scheduler._gpu_block_pool = SimpleNamespace(
++        blocks={10: "gpu10", 11: "gpu11", 12: "gpu12"},
++        touch=MagicMock(),
++    )
++    scheduler._preempted_req_states = {
++        "req-1": PreemptedRequestState(
++            req_id="req-1",
++            cpu_block_ids=([1, 2, 3, 4],),
++            num_computed_tokens=64,
++            store_transfer_meta=TransferMeta([20, 21, 22, 23], [1, 2, 3, 4]),
++            load_start_tokens=0,
++            ready=True,
++        )
++    }
++
++    prepared = scheduler._prepare_preempt_load_after_alloc(
++        SimpleNamespace(request_id="req-1"),
++        ([10, 11, 12],),
++        num_external_tokens=64,
++    )
++
++    assert prepared is True
++    state = scheduler._preempted_req_states["req-1"]
++    assert state.load_transfer_meta == TransferMeta([10, 11, 12], [1, 2, 3])
++
++
++def test_recompute_cpu_offload_scheduler_build_connector_meta_assigns_events():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._store_event_counter = 4
++    scheduler._load_event_counter = 7
++    scheduler._preempt_store_event_to_blocks = {}
++    scheduler._preempt_store_event_to_reqs = {}
++    scheduler._preempt_load_event_to_reqs = {}
++    scheduler._pending_hash_blocks = {"hash": MagicMock()}
++    scheduler._preempted_req_states = {
++        "store-req": PreemptedRequestState(
++            req_id="store-req",
++            cpu_block_ids=([2],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([10], [2]),
++            ready=False,
++        ),
++        "load-req": PreemptedRequestState(
++            req_id="load-req",
++            cpu_block_ids=([3],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([], []),
++            load_transfer_meta=TransferMeta([11], [3]),
++            ready=True,
++        ),
++    }
++    scheduler_output = SimpleNamespace(preempted_req_ids={"store-req"})
++
++    metadata = scheduler.build_connector_meta(scheduler_output)
++
++    assert metadata.need_flush is True
++    assert metadata.preempt_store_event == 4
++    assert metadata.preempt_store_gpu_blocks == [10]
++    assert metadata.preempt_store_cpu_blocks == [2]
++    assert metadata.preempt_load_event == 7
++    assert metadata.preempt_load_gpu_blocks == [11]
++    assert metadata.preempt_load_cpu_blocks == [3]
++    assert metadata.preempt_load_event_to_reqs == {7: ["load-req"]}
++    assert scheduler._preempted_req_states["store-req"].store_event == 4
++    assert scheduler._preempted_req_states["load-req"].load_event == 7
++    assert scheduler._pending_hash_blocks == {}
++
++
++def test_recompute_cpu_offload_scheduler_update_connector_output_marks_store_ready():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._expected_worker_count = 2
++    scheduler._store_event_pending_counts = {}
++    scheduler._preempted_req_states = {}
++    scheduler._process_preempt_store_event = MagicMock()
++    output = KVConnectorOutput(
++        finished_recving=set(),
++        kv_connector_worker_meta=RecomputeCPUOffloadWorkerMetadata(completed_store_events={5: 1}),
++    )
++
++    scheduler.update_connector_output(output)
++
++    assert scheduler._store_event_pending_counts == {5: 1}
++    scheduler._process_preempt_store_event.assert_not_called()
++
++    scheduler.update_connector_output(output)
++
++    assert scheduler._store_event_pending_counts == {}
++    scheduler._process_preempt_store_event.assert_called_once_with(5)
++
++
++def test_recompute_cpu_offload_scheduler_request_finished_ready_and_pending():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._preempted_req_states = {
++        "ready": PreemptedRequestState(
++            req_id="ready",
++            cpu_block_ids=([1],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([11], [1]),
++            ready=True,
++        ),
++        "pending": PreemptedRequestState(
++            req_id="pending",
++            cpu_block_ids=([2],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([12], [2]),
++            ready=False,
++        ),
++        "loading": PreemptedRequestState(
++            req_id="loading",
++            cpu_block_ids=([3],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([13], [3]),
++            load_event=5,
++            ready=True,
++        ),
++    }
++    scheduler._cleanup_preempt_cache_request = MagicMock()
++
++    assert scheduler.request_finished(SimpleNamespace(request_id="ready"), []) == (
++        False,
++        None,
++    )
++    assert scheduler.request_finished(SimpleNamespace(request_id="pending"), []) == (False, None)
++    assert scheduler.request_finished(SimpleNamespace(request_id="loading"), []) == (False, None)
++
++    scheduler._cleanup_preempt_cache_request.assert_called_once_with("ready")
++    assert scheduler._preempted_req_states["pending"].finished is True
++    assert scheduler._preempted_req_states["loading"].finished is False
++
++
++def test_recompute_cpu_offload_scheduler_process_store_event_finishes_pending_req():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    cpu_block = MagicMock()
++    cpu_block.block_hash = None
++    scheduler.cpu_block_pool = SimpleNamespace(blocks={4: cpu_block})
++    scheduler._preempt_store_event_to_blocks = {7: TransferMeta([1], [4])}
++    scheduler._preempt_store_event_to_reqs = {7: ["req-1"]}
++    scheduler._preempted_req_states = {
++        "req-1": PreemptedRequestState(
++            req_id="req-1",
++            cpu_block_ids=([4],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([1], [4]),
++            ready=False,
++            finished=True,
++        )
++    }
++    scheduler._cleanup_preempt_cache_request = MagicMock()
++
++    scheduler._process_preempt_store_event(7)
++
++    assert scheduler._preempted_req_states["req-1"].ready is True
++    scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
++    assert scheduler._preempt_store_event_to_blocks == {}
++    assert scheduler._preempt_store_event_to_reqs == {}
++
++
++def test_recompute_cpu_offload_scheduler_pending_and_reset_cache_paths():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._store_event_pending_counts = {}
++    scheduler._preempt_store_event_to_blocks = {}
++    scheduler._preempted_req_states = {}
++
++    assert scheduler.has_pending_transfers() is False
++
++    scheduler._preempted_req_states["not-ready"] = PreemptedRequestState(
++        req_id="not-ready",
++        cpu_block_ids=([1],),
++        num_computed_tokens=8,
++        store_transfer_meta=TransferMeta([11], [1]),
++        ready=False,
++    )
++    assert scheduler.has_pending_transfers() is True
++
++    scheduler._preempted_req_states.clear()
++    scheduler._preempt_store_event_to_reqs = {"unused": []}
++    scheduler._preempt_load_event_to_reqs = {1: ["req-1"]}
++    scheduler._pending_hash_blocks = {"hash": MagicMock()}
++    scheduler.cpu_block_pool = MagicMock()
++    scheduler.cpu_block_pool.reset_prefix_cache.return_value = True
++    scheduler._cleanup_preempt_cache_request = MagicMock()
++
++    assert scheduler.reset_cache() is True
++    scheduler.cpu_block_pool.reset_prefix_cache.assert_called_once_with()
++    assert scheduler._preempt_store_event_to_reqs == {}
++    assert scheduler._preempt_load_event_to_reqs == {}
++    assert scheduler._pending_hash_blocks == {}
++
++
++def test_recompute_cpu_offload_scheduler_cleanup_preempt_load_request():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._preempt_load_event_to_reqs = {2: ["req-1"]}
++    scheduler._preempted_req_states = {
++        "req-1": PreemptedRequestState(
++            req_id="req-1",
++            cpu_block_ids=([4],),
++            num_computed_tokens=8,
++            store_transfer_meta=TransferMeta([1], [4]),
++            load_event=2,
++            load_transfer_meta=TransferMeta([10, 11], [4, 5]),
++            ready=True,
++        )
++    }
++    scheduler._gpu_block_pool = SimpleNamespace(
++        blocks={10: "gpu10", 11: "gpu11"},
++        free_blocks=MagicMock(),
++    )
++    scheduler._cleanup_preempt_cache_request = MagicMock()
++
++    scheduler._cleanup_preempt_load_request("req-1")
++
++    assert scheduler._preempt_load_event_to_reqs == {}
++    freed = list(scheduler._gpu_block_pool.free_blocks.call_args.args[0])
++    assert freed == ["gpu10", "gpu11"]
++    scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
++
++
++def test_recompute_cpu_offload_scheduler_cleanup_skips_null_cpu_blocks():
++    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
++    scheduler._preempted_req_states = {
++        "req-1": PreemptedRequestState(
++            req_id="req-1",
++            cpu_block_ids=([0, 4], [0]),
++            num_computed_tokens=32,
++            store_transfer_meta=TransferMeta([10], [4]),
++            ready=True,
++        )
++    }
++    scheduler.cpu_block_pool = SimpleNamespace(blocks={4: "cpu4"}, free_blocks=MagicMock())
++
++    scheduler._cleanup_preempt_cache_request("req-1")
++
++    freed = list(scheduler.cpu_block_pool.free_blocks.call_args.args[0])
++    assert freed == ["cpu4"]
++
++
++def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
++    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
++    worker._connector_metadata = None
++    worker._pending_load_event_indices = set()
++    worker._submitted_load_event_indices = set()
++    worker._completed_store_events = {}
++    worker._load_events = []
++    worker._load_hwm = -1
++    worker.load_stream = None
++    worker._load_stream_waited = False
++
++    metadata = RecomputeCPUOffloadMetadata(
++        preempt_store_event=1,
++        preempt_load_event=2,
++        preempt_load_event_to_reqs={2: ["req-1"]},
++    )
++    worker.bind_connector_metadata(metadata)
++    assert worker._connector_metadata is metadata
++    assert worker._pending_load_event_indices == {2}
++
++    worker._submit_transfer([], [], 1, is_store=True)
++    assert worker.build_connector_worker_meta().completed_store_events == {1: 1}
++    assert worker.build_connector_worker_meta() is None
++
++    worker._submit_transfer([], [], 2, is_store=False)
++    assert worker.get_finished(set()) == (None, {"req-1"})
++    assert worker.get_finished(set()) == (None, None)
++
++    worker.clear_connector_metadata()
++    assert worker._connector_metadata is None
++
++
++def test_recompute_cpu_offload_worker_preempt_and_load_entrypoints():
++    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
++    worker._submit_transfer = MagicMock()
++    worker._flush_and_sync_all = MagicMock()
++    worker._connector_metadata = None
++    metadata = RecomputeCPUOffloadMetadata(
++        need_flush=True,
++        preempt_store_event=3,
++        preempt_store_gpu_blocks=[1],
++        preempt_store_cpu_blocks=[2],
++        preempt_load_event=4,
++        preempt_load_gpu_blocks=[5],
++        preempt_load_cpu_blocks=[6],
++    )
++
++    worker.handle_preemptions(metadata)
++
++    worker._flush_and_sync_all.assert_called_once_with()
++    worker._submit_transfer.assert_called_once_with(
++        [1],
++        [2],
++        3,
++        is_store=True,
++        sync=True,
++    )
++
++    worker._submit_transfer.reset_mock()
++    worker.start_load_kv()
++    worker._submit_transfer.assert_not_called()
++
++    worker._connector_metadata = metadata
++    worker.start_load_kv()
++    worker._submit_transfer.assert_called_once_with(
++        [6],
++        [5],
++        4,
++        is_store=False,
++        sync=True,
++    )
++
++
++def test_recompute_cpu_offload_worker_wait_for_layer_load_once():
++    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
++    stream = MagicMock()
++    current_stream = MagicMock()
++    worker.load_stream = stream
++    worker._connector_metadata = RecomputeCPUOffloadMetadata(preempt_load_event=1)
++    worker._load_stream_waited = False
++
++    with patch(
++        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker.torch.npu.current_stream",
++        return_value=current_stream,
++    ):
++        worker.wait_for_layer_load()
++        worker.wait_for_layer_load()
++
++    current_stream.wait_stream.assert_called_once_with(stream)
++    assert worker._load_stream_waited is True
++
++
++def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
++    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
++    scheduler.connector = MagicMock()
++    scheduler.failed_recving_kv_req_ids = set()
++    scheduler.finished_recving_kv_req_ids = {"req-1"}
++    scheduler.kv_cache_manager = MagicMock()
++    scheduler.is_mtp_kv_consumer = True
++    scheduler.num_spec_tokens = 2
++    scheduler.max_model_len = 32
++
++    request = SimpleNamespace(
++        request_id="req-1",
++        num_computed_tokens=9,
++        num_tokens=9,
++        num_preemptions=1,
++        spec_token_ids=[],
++    )
++
++    scheduler._update_waiting_for_remote_kv(request)
++
++    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 8)
++    assert request.num_computed_tokens == 8
++    assert request.spec_token_ids == [PLACEHOLDER_TOKEN_ID] * 2
++    assert scheduler.finished_recving_kv_req_ids == set()
++
++
++def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
++    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
++    scheduler.connector = MagicMock()
++    scheduler.failed_recving_kv_req_ids = {"req-1"}
++    scheduler.finished_recving_kv_req_ids = {"req-1"}
++    scheduler.kv_cache_manager = MagicMock()
++
++    request = SimpleNamespace(
++        request_id="req-1",
++        num_computed_tokens=0,
++    )
++
++    scheduler._update_waiting_for_remote_kv(request)
++
++    scheduler.kv_cache_manager.free.assert_called_once_with(request)
++    scheduler.kv_cache_manager.cache_blocks.assert_not_called()
++    assert scheduler.failed_recving_kv_req_ids == set()
++    assert scheduler.finished_recving_kv_req_ids == set()
+diff --git a/vllm_ascend/core/recompute_scheduler.py b/vllm_ascend/core/recompute_scheduler.py
+index b6fe93f83..941fe72cd 100644
+--- a/vllm_ascend/core/recompute_scheduler.py
++++ b/vllm_ascend/core/recompute_scheduler.py
+@@ -25,7 +25,10 @@ from dataclasses import dataclass, fields
+ from vllm.config import SchedulerConfig, VllmConfig
+ from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+ from vllm.distributed.kv_events import KVEventBatch
+-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
++from vllm.distributed.kv_transfer.kv_connector.v1.base import (
++    KVConnectorBase_V1,
++    KVConnectorMetadata,
++)
+ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+ from vllm.logger import logger
+ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+@@ -92,6 +95,13 @@ class RecomputeSchedulerConfig(SchedulerConfig):
+         return cls(**scheduler_config)
+ 
+ 
++@dataclass
++class PreemptedRequestData:
++    req_id: str
++    block_ids: tuple[list[int], ...]
++    num_computed_tokens: int
++
++
+ @dataclass
+ class RecomputeReqInfo:
+     request_id: str
+@@ -101,6 +111,7 @@ class RecomputeReqInfo:
+ 
+ @dataclass
+ class RecomputeSchedulerOutput(SchedulerOutput):
++    preempted_reqs: list[PreemptedRequestData] | None = None
+     recomputed_reqs: list[RecomputeReqInfo] | None = None
+ 
+ 
+@@ -152,6 +163,8 @@ class RecomputeScheduler(Scheduler):
+                 request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
+             self._enqueue_waiting_request(request)
+             self.requests[request.request_id] = request
++            if self.connector is not None:
++                self.connector.on_new_request(request)
+             if self.log_stats:
+                 request.record_event(EngineCoreEventType.QUEUED)
+ 
+@@ -208,9 +221,17 @@ class RecomputeScheduler(Scheduler):
+             request.num_computed_tokens = num_computed_tokens
+ 
+             # Count the number of prefix cached tokens.
+-            if request.num_cached_tokens < 0:
++            if getattr(request, "num_cached_tokens", 0) < 0:
+                 request.num_cached_tokens = request.num_computed_tokens
+ 
++            if (
++                self.is_mtp_kv_consumer
++                and request.num_preemptions > 0
++                and not request.spec_token_ids
++                and self.max_model_len >= request.num_tokens + self.num_spec_tokens
++            ):
++                request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
++
+         self.finished_recving_kv_req_ids.remove(request.request_id)
+ 
+     def schedule(self) -> RecomputeSchedulerOutput:
+@@ -229,6 +250,7 @@ class RecomputeScheduler(Scheduler):
+         scheduled_resumed_reqs: list[Request] = []
+         scheduled_running_reqs: list[Request] = []
+         preempted_reqs: list[Request] = []
++        preempted_req_data: list[PreemptedRequestData] = []
+         recomputed_reqs: list[RecomputeReqInfo] = []
+ 
+         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+@@ -340,12 +362,52 @@ class RecomputeScheduler(Scheduler):
+                     transfer_config = self.vllm_config.kv_transfer_config
+                     if transfer_config is not None and not transfer_config.is_kv_producer:
+                         recomputed_req = self.running.pop()
+-                        self.kv_cache_manager.free(recomputed_req)
+-                        recomputed_reqs.append(
+-                            RecomputeReqInfo(
+-                                recomputed_req.request_id, recomputed_req.output_token_ids, recomputed_req.client_index
+-                            )
++                        recomputed_req_id = recomputed_req.request_id
++                        recomputed_block_ids = self.kv_cache_manager.get_block_ids(recomputed_req_id)
++                        recomputed_num_computed_tokens = recomputed_req.num_computed_tokens
++                        preempt_hook = (
++                            getattr(self.connector, "update_state_before_preempt", None)
++                            if self.connector is not None
++                            else None
+                         )
++                        offloaded = False
++                        if preempt_hook is not None:
++                            offloaded = bool(
++                                preempt_hook(
++                                    recomputed_req,
++                                    recomputed_block_ids,
++                                    recomputed_num_computed_tokens,
++                                )
++                            )
++                        if offloaded:
++                            logger.info(
++                                "Recompute preemption offload enabled for request %s, computed_tokens=%d.",
++                                recomputed_req_id,
++                                recomputed_num_computed_tokens,
++                            )
++                            preempted_req_data.append(
++                                PreemptedRequestData(
++                                    req_id=recomputed_req_id,
++                                    block_ids=recomputed_block_ids,
++                                    num_computed_tokens=recomputed_num_computed_tokens,
++                                )
++                            )
++                            self._preempt_request(recomputed_req, scheduled_timestamp)
++                            preempted_reqs.append(recomputed_req)
++                        else:
++                            self.kv_cache_manager.free(recomputed_req)
++                            logger.info(
++                                "Recompute preemption falls back without offload for request %s, computed_tokens=%d.",
++                                recomputed_req_id,
++                                recomputed_num_computed_tokens,
++                            )
++                            recomputed_reqs.append(
++                                RecomputeReqInfo(
++                                    recomputed_req_id,
++                                    recomputed_req.output_token_ids,
++                                    recomputed_req.client_index,
++                                )
++                            )
+                         if recomputed_req == request:
+                             break
+                     else:
+@@ -594,6 +656,7 @@ class RecomputeScheduler(Scheduler):
+                     num_external_computed_tokens=num_external_computed_tokens,
+                     delay_cache_blocks=load_kv_async,
+                     num_encoder_tokens=num_encoder_tokens,
++                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                 )
+ 
+                 if new_blocks is None:
+@@ -773,6 +836,7 @@ class RecomputeScheduler(Scheduler):
+             finished_req_ids=self.finished_req_ids,
+             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+             new_block_ids_to_zero=new_block_ids_to_zero,
++            preempted_reqs=preempted_req_data,
+             recomputed_reqs=recomputed_reqs,
+         )
+ 
+@@ -781,7 +845,7 @@ class RecomputeScheduler(Scheduler):
+         # 2. Wrap up all the KV cache load / save ops into an opaque object
+         # 3. Clear the internal states of the connector
+         if self.connector is not None:
+-            meta: KVConnectorMetadata = self.connector.build_connector_meta(scheduler_output)
++            meta = self._build_kv_connector_meta(self.connector, scheduler_output)
+             scheduler_output.kv_connector_metadata = meta
+ 
+         # Build the connector meta for ECConnector
+@@ -793,6 +857,11 @@ class RecomputeScheduler(Scheduler):
+             self._update_after_schedule(scheduler_output)
+         return scheduler_output
+ 
++    def _build_kv_connector_meta(
++        self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
++    ) -> KVConnectorMetadata:
++        return connector.build_connector_meta(scheduler_output)
++
+     def update_from_output(
+         self,
+         scheduler_output: SchedulerOutput,
+@@ -826,7 +895,10 @@ class RecomputeScheduler(Scheduler):
+             # These blocks contain externally computed tokens that failed to
+             # load. Identify affected requests and adjust their computed token
+             # count to trigger recomputation of the invalid blocks.
+-            failed_kv_load_req_ids = self._handle_invalid_blocks(kv_connector_output.invalid_block_ids)
++            failed_kv_load_req_ids = self._handle_invalid_blocks(
++                kv_connector_output.invalid_block_ids,
++                num_scheduled_tokens,
++            )
+ 
+         # return recomputed requests as EngineCoreOutput
+         if scheduler_output.recomputed_reqs is not None:
+@@ -888,6 +960,10 @@ class RecomputeScheduler(Scheduler):
+                     request_id=req_id,
+                 )
+ 
++            # Free encoder inputs only after the step has actually executed.
++            if request.has_encoder_inputs:
++                self._free_encoder_inputs(request)
++
+             stopped = False
+             new_logprobs = None
+             new_token_ids = generated_token_ids
+@@ -903,6 +979,23 @@ class RecomputeScheduler(Scheduler):
+                 request.status = RequestStatus.FINISHED_STOPPED
+                 stopped = True
+ 
++            if new_token_ids and self.structured_output_manager.should_advance(request):
++                struct_output_request = request.structured_output_request
++                assert struct_output_request is not None
++                assert struct_output_request.grammar is not None
++                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
++                    req_id, new_token_ids
++                ):
++                    logger.error(
++                        "[RecomputeScheduler] Unexpected: grammar rejected tokens %s for request %s."
++                        " Terminating request.",
++                        new_token_ids,
++                        req_id,
++                    )
++                    request.status = RequestStatus.FINISHED_ERROR
++                    request.resumable = False
++                    stopped = True
++
+             routed_experts = None
+             finish_reason = None
+             if stopped:
+@@ -921,21 +1014,9 @@ class RecomputeScheduler(Scheduler):
+                     stopped_preempted_reqs.add(request)
+ 
+             # Extract sample logprobs if needed.
+-            if request.sampling_params is not None and request.sampling_params.logprobs is not None and logprobs:
++            if request.sampling_params is not None and request.sampling_params.num_logprobs is not None and logprobs:
+                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+ 
+-            if new_token_ids and self.structured_output_manager.should_advance(request):
+-                struct_output_request = request.structured_output_request
+-                assert struct_output_request is not None
+-                assert struct_output_request.grammar is not None
+-                ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
+-                if not ok:
+-                    logger.warning(
+-                        "Unexpected: grammar rejected tokens %s for request %s.",
+-                        new_token_ids,
+-                        req_id,
+-                    )
+-
+             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+ 
+diff --git a/vllm_ascend/distributed/kv_transfer/__init__.py b/vllm_ascend/distributed/kv_transfer/__init__.py
+index 45d50414e..38193a198 100644
+--- a/vllm_ascend/distributed/kv_transfer/__init__.py
++++ b/vllm_ascend/distributed/kv_transfer/__init__.py
+@@ -57,3 +57,9 @@ def register_connector():
+         "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
+         "LMCacheConnectorV1",
+     )
++
++    KVConnectorFactory.register_connector(
++        "RecomputeCPUOffloadConnector",
++        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
++        "RecomputeCPUOffloadConnectorV1",
++    )
+diff --git a/vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py b/vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py
+index bd5be6c5c..42212c8d9 100644
+--- a/vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py
++++ b/vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py
+@@ -9,14 +9,49 @@ if TYPE_CHECKING:
+     from vllm.v1.request import Request
+ 
+ 
+-class AscendMultiConnector(MultiConnector):
+-    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
+-        chosen_connector = self._requests_to_connector.get(request.request_id, -1)
+-        empty_blocks = blocks.new_empty()
+-        for i, c in enumerate(self._connectors):
++class AscendMultiConnector(MultiConnector):
++    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
++        chosen_connector = self._requests_to_connector.get(request.request_id, -1)
++        empty_blocks = blocks.new_empty()
++        for i, c in enumerate(self._connectors):
+             if i == chosen_connector or isinstance(c, MooncakeLayerwiseConnector):
+                 # Forward call to the chosen connector (if any).
+                 c.update_state_after_alloc(request, blocks, num_external_tokens)
+-            else:
+-                # Call with empty blocks for other connectors.
+-                c.update_state_after_alloc(request, empty_blocks, 0)
++            else:
++                # Call with empty blocks for other connectors.
++                c.update_state_after_alloc(request, empty_blocks, 0)
++
++    def get_num_new_matched_tokens(
++        self,
++        request: "Request",
++        num_computed_tokens: int,
++    ) -> tuple[int | None, bool]:
++        # Recompute offload may contain an unhashed partial block that other
++        # prefix-cache connectors cannot restore. Give its request state
++        # priority regardless of connector ordering.
++        for i, connector in enumerate(self._connectors):
++            has_preempted_request = getattr(connector, "has_preempted_request", None)
++            if has_preempted_request is None or not has_preempted_request(request.request_id):
++                continue
++            tokens, load_async = connector.get_num_new_matched_tokens(request, num_computed_tokens)
++            if tokens is None:
++                return None, False
++            if tokens > 0:
++                self._requests_to_connector[request.request_id] = i
++                return tokens, load_async
++            break
++
++        return super().get_num_new_matched_tokens(request, num_computed_tokens)
++
++    def update_state_before_preempt(
++        self,
++        request: "Request",
++        block_ids: tuple[list[int], ...],
++        num_computed_tokens: int,
++    ) -> bool:
++        offloaded = False
++        for connector in self._connectors:
++            hook = getattr(connector, "update_state_before_preempt", None)
++            if hook is not None:
++                offloaded = bool(hook(request, block_ids, num_computed_tokens)) or offloaded
++        return offloaded
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/__init__.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/__init__.py
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py
+new file mode 100644
+index 000000000..0abb9e1c6
+--- /dev/null
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py
+@@ -0,0 +1,627 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Scheduler-side manager for recompute CPU offloading."""
++
++import contextlib
++from collections.abc import Iterable
++from dataclasses import dataclass
++from typing import TYPE_CHECKING, Any
++
++from vllm.config import VllmConfig
++from vllm.distributed.kv_events import KVCacheEvent
++from vllm.logger import logger
++from vllm.utils.math_utils import cdiv
++from vllm.v1.core.block_pool import BlockPool
++from vllm.v1.core.kv_cache_coordinator import (
++    KVCacheCoordinator,
++    get_kv_cache_coordinator,
++)
++from vllm.v1.core.sched.output import SchedulerOutput
++from vllm.v1.kv_cache_interface import SlidingWindowSpec, UniformTypeKVCacheSpecs
++from vllm.v1.outputs import KVConnectorOutput
++
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
++    RecomputeCPUOffloadMetadata,
++    RecomputeCPUOffloadWorkerMetadata,
++)
++
++if TYPE_CHECKING:
++    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
++    from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
++    from vllm.v1.kv_cache_interface import KVCacheConfig
++    from vllm.v1.request import Request
++
++
++@dataclass
++class TransferMeta:
++    gpu_block_ids: list[int]
++    cpu_block_ids: list[int]
++
++
++@dataclass
++class PreemptedRequestState:
++    req_id: str
++    cpu_block_ids: tuple[list[int], ...]
++    num_computed_tokens: int
++    store_transfer_meta: TransferMeta
++    store_event: int | None = None
++    load_event: int | None = None
++    load_transfer_meta: TransferMeta | None = None
++    load_start_tokens: int = 0
++    ready: bool = False
++    finished: bool = False
++
++
++class RecomputeCPUOffloadScheduler:
++    """Preserve preempted requests' KV blocks in CPU memory.
++
++    When offload prefix caching is enabled, full hashed blocks share CPU
++    blocks. Otherwise every offloaded block is private to its request.
++    """
++
++    def __init__(
++        self,
++        vllm_config: VllmConfig,
++        kv_cache_config: "KVCacheConfig | None",
++        cpu_capacity_bytes: int,
++        enable_offload_prefix_caching: bool = True,
++    ):
++        assert kv_cache_config is not None
++        self.vllm_config = vllm_config
++        self.enable_offload_prefix_caching = enable_offload_prefix_caching
++        self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
++        self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
++        self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
++        self.enable_kv_cache_events = (
++            vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events
++        )
++
++        logger.info(
++            "RecomputeCPUOffloadScheduler: allocating %d CPU blocks (%.2f GB) for recompute offload, prefix caching=%s",
++            self.num_cpu_blocks,
++            cpu_capacity_bytes / (1024**3),
++            self.enable_offload_prefix_caching,
++        )
++
++        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
++        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
++        assert dcp_world_size == 1 and pcp_world_size == 1
++        self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
++            kv_cache_config=self.cpu_kv_cache_config,
++            max_model_len=vllm_config.model_config.max_model_len,
++            max_num_batched_tokens=(vllm_config.scheduler_config.max_num_batched_tokens),
++            use_eagle=False,
++            enable_caching=self.enable_offload_prefix_caching,
++            enable_kv_cache_events=self.enable_kv_cache_events,
++            dcp_world_size=dcp_world_size,
++            pcp_world_size=pcp_world_size,
++            hash_block_size=vllm_config.cache_config.block_size,
++        )
++        self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
++        self._gpu_block_pool: BlockPool | None = None
++
++        self._preempted_req_states: dict[str, PreemptedRequestState] = {}
++        self._preempt_store_event_to_reqs: dict[int, list[str]] = {}
++        self._preempt_store_event_to_blocks: dict[int, TransferMeta] = {}
++        self._preempt_load_event_to_reqs: dict[int, list[str]] = {}
++
++        # Hash blocks created before build_connector_meta() are shared by all
++        # requests preempted in the same scheduling step.
++        self._pending_hash_blocks: dict[BlockHashWithGroupId, KVCacheBlock] = {}
++
++        self._load_event_counter = 0
++        self._store_event_counter = 0
++        self._expected_worker_count = vllm_config.parallel_config.world_size
++        self._store_event_pending_counts: dict[int, int] = {}
++
++    @staticmethod
++    def _get_group_is_sliding_window(kv_cache_config: "KVCacheConfig") -> list[bool]:
++        group_is_sliding_window: list[bool] = []
++        for group in kv_cache_config.kv_cache_groups:
++            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
++                group_is_sliding_window.append(
++                    any(isinstance(spec, SlidingWindowSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
++                )
++            else:
++                group_is_sliding_window.append(isinstance(group.kv_cache_spec, SlidingWindowSpec))
++        return group_is_sliding_window
++
++    @staticmethod
++    def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
++        from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
++        from vllm.v1.kv_cache_interface import KVCacheTensor
++
++        assert gpu_config.kv_cache_tensors
++        gpu_kv_cache_tensors = []
++        for t in gpu_config.kv_cache_tensors:
++            if t.shared_by:
++                gpu_kv_cache_tensors.append(t)
++        gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
++        num_gpu_blocks = gpu_config.num_blocks
++        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
++        cpu_tensors = [
++            KVCacheTensor(
++                size=t.size // num_gpu_blocks * num_cpu_blocks,
++                shared_by=list(t.shared_by),
++            )
++            for t in gpu_kv_cache_tensors
++        ]
++        return KVCacheConfigCls(
++            num_blocks=num_cpu_blocks,
++            kv_cache_tensors=cpu_tensors,
++            kv_cache_groups=gpu_config.kv_cache_groups,
++        )
++
++    def _align_group_block_ids(
++        self,
++        group_idx: int,
++        group_block_ids: list[int],
++        logical_num_blocks: int,
++    ) -> list[int]:
++        if logical_num_blocks <= 0:
++            return []
++        aligned_group_block_ids = list(group_block_ids)
++        if self._group_is_sliding_window[group_idx] and len(aligned_group_block_ids) < logical_num_blocks:
++            aligned_group_block_ids = [0] * (
++                logical_num_blocks - len(aligned_group_block_ids)
++            ) + aligned_group_block_ids
++        return aligned_group_block_ids[:logical_num_blocks]
++
++    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
++        self._gpu_block_pool = gpu_block_pool
++
++    def has_preempted_request(self, req_id: str) -> bool:
++        return req_id in self._preempted_req_states
++
++    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
++        state = self._preempted_req_states.get(request.request_id)
++        if state is None:
++            return 0, False
++        if not state.ready:
++            return None, False
++
++        restorable_tokens = min(state.num_computed_tokens, request.num_tokens)
++        hit_length = max(0, restorable_tokens - num_computed_tokens)
++        if hit_length <= 0:
++            self._cleanup_preempt_cache_request(request.request_id)
++            return 0, False
++
++        state.load_start_tokens = num_computed_tokens
++        logger.debug(
++            "Recompute offload cache hit for request %s: load_start=%d, load_tokens=%d, stored_tokens=%d.",
++            request.request_id,
++            num_computed_tokens,
++            hit_length,
++            state.num_computed_tokens,
++        )
++        return hit_length, True
++
++    def update_state_after_alloc(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        num_external_tokens: int,
++    ) -> None:
++        if num_external_tokens <= 0:
++            return
++        prepared = self._prepare_preempt_load_after_alloc(
++            request,
++            blocks.get_block_ids(),
++            num_external_tokens,
++        )
++        if not prepared:
++            raise RuntimeError(
++                "Failed to prepare recompute H2D load after KV block "
++                f"allocation: req_id={request.request_id}, "
++                f"num_external_tokens={num_external_tokens}"
++            )
++
++    def update_state_before_preempt(
++        self,
++        request: "Request",
++        block_ids: tuple[list[int], ...],
++        num_computed_tokens: int,
++    ) -> bool:
++        if request.request_id in self._preempted_req_states:
++            return True
++        return self._create_preempt_state(
++            request.request_id,
++            block_ids,
++            num_computed_tokens,
++        )
++
++    def _create_preempt_state(
++        self,
++        req_id: str,
++        block_ids_by_group: tuple[list[int], ...],
++        num_computed_tokens: int,
++    ) -> bool:
++        if num_computed_tokens <= 0 or self._gpu_block_pool is None:
++            return False
++
++        kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
++        group_gpu_blocks: list[list[KVCacheBlock | None]] = []
++        group_gpu_hashes: list[list[BlockHashWithGroupId | None]] = []
++        missing_hashes: set[BlockHashWithGroupId] = set()
++        num_unhashed = 0
++
++        for g, group_gpu_ids in enumerate(block_ids_by_group):
++            group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
++            logical_num_blocks = cdiv(num_computed_tokens, group_block_size)
++            aligned_group_gpu_ids = self._align_group_block_ids(g, group_gpu_ids, logical_num_blocks)
++            eviction_group_gpu_ids = self._align_group_block_ids(
++                g,
++                group_gpu_ids,
++                max(logical_num_blocks, len(group_gpu_ids)),
++            )
++            gpu_blocks: list[KVCacheBlock | None] = []
++            effective_hashes: list[BlockHashWithGroupId | None] = []
++
++            for block_idx, block_id in enumerate(eviction_group_gpu_ids):
++                if block_id <= 0:
++                    continue
++                gpu_block = self._gpu_block_pool.blocks[block_id]
++                block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
++                if not block_is_computed and gpu_block.block_hash is not None:
++                    # allocate_slots() may assign a hash using tokens planned
++                    # for this scheduling step. If the request is then
++                    # preempted before forward, that block does not contain the
++                    # hashed KV and must not remain in the GPU prefix cache.
++                    self._gpu_block_pool._maybe_evict_cached_block(gpu_block)
++
++            for block_idx, block_id in enumerate(aligned_group_gpu_ids):
++                if block_id <= 0:
++                    gpu_blocks.append(None)
++                    effective_hashes.append(None)
++                    continue
++
++                gpu_block = self._gpu_block_pool.blocks[block_id]
++                block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
++                block_hash = gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
++                gpu_blocks.append(gpu_block)
++                effective_hashes.append(block_hash)
++                if block_hash is None:
++                    num_unhashed += 1
++                elif (
++                    self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash) is None
++                    and block_hash not in self._pending_hash_blocks
++                ):
++                    missing_hashes.add(block_hash)
++            group_gpu_blocks.append(gpu_blocks)
++            group_gpu_hashes.append(effective_hashes)
++
++        num_needed = num_unhashed + len(missing_hashes)
++        if not any(any(gpu_block is not None for gpu_block in group) for group in group_gpu_blocks):
++            return False
++        if num_needed > self.cpu_block_pool.get_num_free_blocks():
++            logger.warning(
++                "Skip recompute offload for request %s: CPU cache has %d free blocks, but %d new blocks are required.",
++                req_id,
++                self.cpu_block_pool.get_num_free_blocks(),
++                num_needed,
++            )
++            return False
++
++        cpu_block_iter = iter(self.cpu_block_pool.get_new_blocks(num_needed))
++        cpu_block_ids_by_group: list[list[int]] = []
++        store_gpu_block_ids: list[int] = []
++        store_cpu_block_ids: list[int] = []
++        waiting_for_store = False
++
++        for gpu_blocks, effective_hashes in zip(group_gpu_blocks, group_gpu_hashes):
++            group_cpu_ids: list[int] = []
++            for gpu_block, block_hash in zip(gpu_blocks, effective_hashes):
++                if gpu_block is None:
++                    group_cpu_ids.append(0)
++                    continue
++
++                cpu_block = None
++
++                if block_hash is not None:
++                    cpu_block = self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash)
++                    if cpu_block is not None:
++                        self.cpu_block_pool.touch([cpu_block])
++                    else:
++                        cpu_block = self._pending_hash_blocks.get(block_hash)
++                        if cpu_block is not None:
++                            self.cpu_block_pool.touch([cpu_block])
++                            waiting_for_store = True
++                        else:
++                            cpu_block = next(cpu_block_iter)
++                            cpu_block._block_hash = block_hash
++                            self._pending_hash_blocks[block_hash] = cpu_block
++                            store_gpu_block_ids.append(gpu_block.block_id)
++                            store_cpu_block_ids.append(cpu_block.block_id)
++                            waiting_for_store = True
++                else:
++                    cpu_block = next(cpu_block_iter)
++                    store_gpu_block_ids.append(gpu_block.block_id)
++                    store_cpu_block_ids.append(cpu_block.block_id)
++                    waiting_for_store = True
++
++                group_cpu_ids.append(cpu_block.block_id)
++            cpu_block_ids_by_group.append(group_cpu_ids)
++
++        store_transfer = TransferMeta(store_gpu_block_ids, store_cpu_block_ids)
++        self._preempted_req_states[req_id] = PreemptedRequestState(
++            req_id=req_id,
++            cpu_block_ids=tuple(cpu_block_ids_by_group),
++            num_computed_tokens=num_computed_tokens,
++            store_transfer_meta=store_transfer,
++            ready=not waiting_for_store,
++        )
++        logger.info(
++            "Created recompute offload state for request %s: "
++            "computed_tokens=%d, cpu_blocks=%d, store_blocks=%d, "
++            "ready=%s.",
++            req_id,
++            num_computed_tokens,
++            sum(len(ids) for ids in cpu_block_ids_by_group),
++            len(store_cpu_block_ids),
++            not waiting_for_store,
++        )
++
++        return True
++
++    def _prepare_preempt_store_specs(
++        self,
++    ) -> tuple[list[int], list[int], list[str]]:
++        gpu_block_ids: list[int] = []
++        cpu_block_ids: list[int] = []
++        req_ids: list[str] = []
++
++        for req_id, state in self._preempted_req_states.items():
++            if state.store_event is not None or state.ready:
++                continue
++            gpu_block_ids.extend(state.store_transfer_meta.gpu_block_ids)
++            cpu_block_ids.extend(state.store_transfer_meta.cpu_block_ids)
++            req_ids.append(req_id)
++        return gpu_block_ids, cpu_block_ids, req_ids
++
++    def _prepare_preempt_load_after_alloc(
++        self,
++        request: "Request",
++        block_ids_by_group: tuple[list[int], ...],
++        num_external_tokens: int,
++    ) -> bool:
++        state = self._preempted_req_states.get(request.request_id)
++        if state is None or not state.ready:
++            return False
++
++        load_start_tokens = state.load_start_tokens
++        load_end_tokens = min(
++            load_start_tokens + num_external_tokens,
++            state.num_computed_tokens,
++        )
++        if load_end_tokens <= load_start_tokens:
++            return False
++
++        if len(block_ids_by_group) != len(state.cpu_block_ids):
++            raise RuntimeError(
++                "Recompute H2D KV group count mismatch: "
++                f"req_id={request.request_id}, "
++                f"gpu_groups={len(block_ids_by_group)}, "
++                f"cpu_groups={len(state.cpu_block_ids)}"
++            )
++
++        gpu_block_ids: list[int] = []
++        cpu_block_ids: list[int] = []
++        for g, group_cpu_ids in enumerate(state.cpu_block_ids):
++            group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
++            start_block = load_start_tokens // group_block_size
++            end_block = min(
++                len(group_cpu_ids),
++                len(
++                    self._align_group_block_ids(
++                        g,
++                        block_ids_by_group[g],
++                        max(
++                            cdiv(load_end_tokens, group_block_size),
++                            len(block_ids_by_group[g]),
++                        ),
++                    )
++                ),
++                cdiv(load_end_tokens, group_block_size),
++            )
++            if end_block == start_block:
++                continue
++            if end_block < start_block:
++                raise RuntimeError(
++                    "Recompute H2D produced an empty block range: "
++                    f"req_id={request.request_id}, group={g}, "
++                    f"start_block={start_block}, end_block={end_block}, "
++                    f"gpu_blocks={len(block_ids_by_group[g])}, "
++                    f"cpu_blocks={len(group_cpu_ids)}"
++                )
++
++            aligned_group_gpu_ids = self._align_group_block_ids(
++                g,
++                block_ids_by_group[g],
++                end_block,
++            )
++            for block_idx in range(start_block, end_block):
++                cpu_block_id = group_cpu_ids[block_idx]
++                gpu_block_id = aligned_group_gpu_ids[block_idx]
++                if cpu_block_id <= 0 or gpu_block_id <= 0:
++                    continue
++                cpu_block_ids.append(cpu_block_id)
++                gpu_block_ids.append(gpu_block_id)
++
++        if not cpu_block_ids or len(cpu_block_ids) != len(gpu_block_ids):
++            raise RuntimeError(
++                "Recompute H2D block mapping is incomplete: "
++                f"req_id={request.request_id}, "
++                f"gpu_blocks={len(gpu_block_ids)}, "
++                f"cpu_blocks={len(cpu_block_ids)}"
++            )
++
++        assert self._gpu_block_pool is not None
++        self._gpu_block_pool.touch([self._gpu_block_pool.blocks[block_id] for block_id in gpu_block_ids])
++        state.load_transfer_meta = TransferMeta(gpu_block_ids, cpu_block_ids)
++        logger.info(
++            "Prepared recompute offload H2D load for request %s: tokens=[%d, %d), blocks=%d.",
++            request.request_id,
++            load_start_tokens,
++            load_end_tokens,
++            len(gpu_block_ids),
++        )
++        return True
++
++    def build_connector_meta(
++        self,
++        scheduler_output: SchedulerOutput,
++    ) -> RecomputeCPUOffloadMetadata:
++        store_event = -1
++        store_gpu, store_cpu, store_req_ids = self._prepare_preempt_store_specs()
++        if store_gpu:
++            store_event = self._store_event_counter
++            self._store_event_counter += 1
++            self._preempt_store_event_to_blocks[store_event] = TransferMeta(store_gpu, store_cpu)
++            self._preempt_store_event_to_reqs[store_event] = store_req_ids
++            for req_id in store_req_ids:
++                self._preempted_req_states[req_id].store_event = store_event
++            self._pending_hash_blocks.clear()
++
++        load_event = -1
++        load_gpu: list[int] = []
++        load_cpu: list[int] = []
++        load_req_ids: list[str] = []
++        for req_id, state in self._preempted_req_states.items():
++            if state.load_transfer_meta is None or state.load_event is not None:
++                continue
++            load_gpu.extend(state.load_transfer_meta.gpu_block_ids)
++            load_cpu.extend(state.load_transfer_meta.cpu_block_ids)
++            load_req_ids.append(req_id)
++
++        if load_req_ids:
++            load_event = self._load_event_counter
++            self._load_event_counter += 1
++            for req_id in load_req_ids:
++                self._preempted_req_states[req_id].load_event = load_event
++            self._preempt_load_event_to_reqs[load_event] = load_req_ids
++
++        return RecomputeCPUOffloadMetadata(
++            need_flush=bool(scheduler_output.preempted_req_ids),
++            preempt_store_event=store_event,
++            preempt_store_gpu_blocks=store_gpu,
++            preempt_store_cpu_blocks=store_cpu,
++            preempt_load_event=load_event,
++            preempt_load_gpu_blocks=load_gpu,
++            preempt_load_cpu_blocks=load_cpu,
++            preempt_load_event_to_reqs=self._preempt_load_event_to_reqs,
++        )
++
++    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
++        for req_id in list(connector_output.finished_recving or []):
++            if req_id in self._preempted_req_states:
++                self._cleanup_preempt_load_request(req_id)
++
++        meta = connector_output.kv_connector_worker_meta
++        if not isinstance(meta, RecomputeCPUOffloadWorkerMetadata):
++            return
++        for event_idx, count in meta.completed_store_events.items():
++            total = self._store_event_pending_counts.get(event_idx, 0) + count
++            if total >= self._expected_worker_count:
++                self._store_event_pending_counts.pop(event_idx, None)
++                self._process_preempt_store_event(event_idx)
++            else:
++                self._store_event_pending_counts[event_idx] = total
++
++    def _process_preempt_store_event(self, event_idx: int) -> None:
++        transfer = self._preempt_store_event_to_blocks.pop(event_idx)
++        req_ids = self._preempt_store_event_to_reqs.pop(event_idx, [])
++
++        for cpu_block_id in transfer.cpu_block_ids:
++            cpu_block = self.cpu_block_pool.blocks[cpu_block_id]
++            block_hash = cpu_block.block_hash
++            if block_hash is None:
++                continue
++            cached_block = self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash)
++            if cached_block is None:
++                self.cpu_block_pool.cached_block_hash_to_block.insert(block_hash, cpu_block)
++            elif cached_block.block_id != cpu_block.block_id:
++                cpu_block.reset_hash()
++
++        for req_id in req_ids:
++            state = self._preempted_req_states.get(req_id)
++            if state is not None:
++                state.ready = True
++                if state.finished:
++                    self._cleanup_preempt_cache_request(req_id)
++
++    def has_pending_transfers(self) -> bool:
++        return bool(
++            self._store_event_pending_counts
++            or self._preempt_store_event_to_blocks
++            or any(
++                not state.ready or state.load_transfer_meta is not None for state in self._preempted_req_states.values()
++            )
++        )
++
++    def reset_cache(self) -> bool:
++        if self.has_pending_transfers():
++            logger.warning(
++                "Failed to reset recompute offload cache because transfers or request states are still pending."
++            )
++            return False
++        for req_id in list(self._preempted_req_states):
++            self._cleanup_preempt_cache_request(req_id)
++        self._preempt_store_event_to_reqs.clear()
++        self._preempt_store_event_to_blocks.clear()
++        self._preempt_load_event_to_reqs.clear()
++        self._pending_hash_blocks.clear()
++        return self.cpu_block_pool.reset_prefix_cache()
++
++    def request_finished(
++        self,
++        request: "Request",
++        block_ids: list[int],
++    ) -> tuple[bool, dict[str, Any] | None]:
++        state = self._preempted_req_states.get(request.request_id)
++        if state is not None and state.load_event is None:
++            if state.ready:
++                self._cleanup_preempt_cache_request(request.request_id)
++            else:
++                state.finished = True
++        return False, None
++
++    def request_finished_all_groups(
++        self,
++        request: "Request",
++        block_ids: tuple[list[int], ...],
++    ) -> tuple[bool, dict[str, Any] | None]:
++        return self.request_finished(request, block_ids=[])
++
++    def _cleanup_preempt_load_request(self, req_id: str) -> None:
++        state = self._preempted_req_states.get(req_id)
++        if state is None:
++            return
++
++        if state.load_event is not None:
++            reqs = self._preempt_load_event_to_reqs.get(state.load_event)
++            if reqs is not None:
++                with contextlib.suppress(ValueError):
++                    reqs.remove(req_id)
++                if not reqs:
++                    self._preempt_load_event_to_reqs.pop(state.load_event, None)
++
++        if state.load_transfer_meta is not None:
++            assert self._gpu_block_pool is not None
++            self._gpu_block_pool.free_blocks(
++                self._gpu_block_pool.blocks[block_id] for block_id in state.load_transfer_meta.gpu_block_ids
++            )
++        self._cleanup_preempt_cache_request(req_id)
++
++    def _cleanup_preempt_cache_request(self, req_id: str) -> None:
++        state = self._preempted_req_states.pop(req_id, None)
++        if state is None:
++            return
++        self.cpu_block_pool.free_blocks(
++            self.cpu_block_pool.blocks[block_id]
++            for group_cpu_ids in state.cpu_block_ids
++            for block_id in group_cpu_ids
++            if block_id > 0
++        )
++
++    def take_events(self) -> Iterable[KVCacheEvent]:
++        return self.cpu_block_pool.take_events()
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/metadata.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/metadata.py
+new file mode 100644
+index 000000000..855f4f2fa
+--- /dev/null
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/metadata.py
+@@ -0,0 +1,52 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Metadata for RecomputeCPUOffloadConnector."""
++
++from dataclasses import dataclass, field
++
++from vllm.distributed.kv_transfer.kv_connector.v1.base import (
++    KVConnectorMetadata,
++    KVConnectorWorkerMetadata,
++)
++
++INVALID_JOB_ID = -1
++
++
++@dataclass
++class RecomputeCPUOffloadMetadata(KVConnectorMetadata):
++    """Recompute offload transfers passed from scheduler to worker."""
++
++    # Whether any requests were preempted this step and need flush pending transfers.
++    need_flush: bool = False
++
++    # Store blocks of newly preempted requests before their GPU blocks can
++    # be reused. The list may include a final partial block without a hash.
++    preempt_store_event: int = INVALID_JOB_ID
++    preempt_store_gpu_blocks: list[int] = field(default_factory=list)
++    preempt_store_cpu_blocks: list[int] = field(default_factory=list)
++
++    # Preemption load event. Used when a previously preempted request resumes.
++    preempt_load_event: int = INVALID_JOB_ID
++    preempt_load_gpu_blocks: list[int] = field(default_factory=list)
++    preempt_load_cpu_blocks: list[int] = field(default_factory=list)
++    preempt_load_event_to_reqs: dict[int, list[str]] = field(default_factory=dict)
++
++
++@dataclass
++class RecomputeCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
++    """Worker -> Scheduler metadata for completed store events.
++
++    Each worker reports {event_idx: 1} for newly completed stores.
++    ``aggregate()`` sums counts across workers within a step.
++    The scheduler-side manager accumulates across steps and processes
++    a store completion only when count reaches ``world_size``.
++    """
++
++    completed_store_events: dict[int, int]
++
++    def aggregate(self, other: "KVConnectorWorkerMetadata") -> "KVConnectorWorkerMetadata":
++        assert isinstance(other, RecomputeCPUOffloadWorkerMetadata)
++        merged = dict(self.completed_store_events)
++        for k, v in other.completed_store_events.items():
++            merged[k] = merged.get(k, 0) + v
++        return RecomputeCPUOffloadWorkerMetadata(completed_store_events=merged)
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+new file mode 100644
+index 000000000..17daaa4b9
+--- /dev/null
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+@@ -0,0 +1,246 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""RecomputeCPUOffloadConnector: minimal CPU KV cache offloading."""
++
++from collections.abc import Iterable
++from typing import TYPE_CHECKING, Any
++
++import torch
++from vllm.config import VllmConfig
++from vllm.distributed.kv_events import KVCacheEvent
++from vllm.distributed.kv_transfer.kv_connector.v1.base import (
++    KVConnectorBase_V1,
++    KVConnectorMetadata,
++    KVConnectorRole,
++    SupportsHMA,
++)
++from vllm.logger import logger
++from vllm.v1.core.sched.output import SchedulerOutput
++from vllm.v1.outputs import KVConnectorOutput
++
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (
++    RecomputeCPUOffloadScheduler,
++)
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
++    RecomputeCPUOffloadMetadata,
++)
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker import (
++    RecomputeCPUOffloadWorker,
++)
++
++if TYPE_CHECKING:
++    from vllm.forward_context import ForwardContext
++    from vllm.v1.attention.backend import AttentionMetadata
++    from vllm.v1.core.block_pool import BlockPool
++    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
++    from vllm.v1.kv_cache_interface import KVCacheConfig
++    from vllm.v1.request import Request
++
++# Default CPU capacity: 8 GB
++DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
++
++
++class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
++    """CPU KV cache preservation for recompute-preempted requests."""
++
++    def __init__(
++        self,
++        vllm_config: VllmConfig,
++        role: KVConnectorRole,
++        kv_cache_config: "KVCacheConfig | None" = None,
++    ):
++        super().__init__(vllm_config, role, kv_cache_config)
++
++        extra_config = self._kv_transfer_config.kv_connector_extra_config or {}
++        cpu_capacity_bytes = int(extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES))
++        enable_offload_prefix_caching = extra_config.get("enable_offload_prefix_caching", False)
++        if not isinstance(enable_offload_prefix_caching, bool):
++            raise ValueError(f"enable_offload_prefix_caching must be a boolean, got {enable_offload_prefix_caching!r}")
++        world_size = vllm_config.parallel_config.world_size
++        cpu_capacity_per_rank = cpu_capacity_bytes // world_size
++        if "cpu_bytes_to_use_per_rank" in extra_config:
++            explicit = int(extra_config["cpu_bytes_to_use_per_rank"])
++            if explicit != cpu_capacity_per_rank:
++                logger.warning(
++                    "cpu_bytes_to_use_per_rank (%.2f GB) != "
++                    "cpu_bytes_to_use/world_size (%.2f GB). Using per-rank value.",
++                    explicit / (1024**3),
++                    cpu_capacity_per_rank / (1024**3),
++                )
++            cpu_capacity_per_rank = explicit
++
++        self.scheduler_manager: RecomputeCPUOffloadScheduler | None = None
++        self.worker_handler: RecomputeCPUOffloadWorker | None = None
++
++        logger.info(
++            "RecomputeCPUOffloadConnector: role=%s, per_rank=%.2f GB, world_size=%d, offload_prefix_caching=%s",
++            role.name,
++            cpu_capacity_per_rank / (1024**3),
++            world_size,
++            enable_offload_prefix_caching,
++        )
++
++        if role == KVConnectorRole.SCHEDULER:
++            self.scheduler_manager = RecomputeCPUOffloadScheduler(
++                vllm_config,
++                kv_cache_config,
++                cpu_capacity_per_rank,
++                enable_offload_prefix_caching,
++            )
++        elif role == KVConnectorRole.WORKER:
++            self.worker_handler = RecomputeCPUOffloadWorker(
++                vllm_config,
++                kv_cache_config,
++                cpu_capacity_per_rank,
++            )
++
++    # --- Worker-side methods ---
++
++    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
++        if self.worker_handler is not None:
++            self.worker_handler.register_kv_caches(kv_caches)
++
++    def bind_connector_metadata(
++        self,
++        connector_metadata: KVConnectorMetadata,
++    ) -> None:
++        super().bind_connector_metadata(connector_metadata)
++        if self.worker_handler is not None:
++            assert isinstance(connector_metadata, RecomputeCPUOffloadMetadata)
++            self.worker_handler.bind_connector_metadata(connector_metadata)
++
++    def clear_connector_metadata(self) -> None:
++        super().clear_connector_metadata()
++        if self.worker_handler is not None:
++            self.worker_handler.clear_connector_metadata()
++
++    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
++        if self.worker_handler is not None:
++            assert isinstance(kv_connector_metadata, RecomputeCPUOffloadMetadata)
++            self.worker_handler.handle_preemptions(kv_connector_metadata)
++
++    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
++        if self.worker_handler is not None:
++            self.worker_handler.start_load_kv()
++
++    def wait_for_layer_load(self, layer_name: str) -> None:
++        if self.worker_handler is not None:
++            self.worker_handler.wait_for_layer_load()
++
++    def save_kv_layer(
++        self,
++        layer_name: str,
++        kv_layer: torch.Tensor,
++        attn_metadata: "AttentionMetadata",
++        **kwargs: Any,
++    ) -> None:
++        pass
++
++    def wait_for_save(self) -> None:
++        pass
++
++    def get_finished(
++        self,
++        finished_req_ids: set[str],
++    ) -> tuple[set[str] | None, set[str] | None]:
++        if self.worker_handler is not None:
++            return self.worker_handler.get_finished(finished_req_ids)
++        return None, None
++
++    def build_connector_worker_meta(self):
++        if self.worker_handler is not None:
++            return self.worker_handler.build_connector_worker_meta()
++        return None
++
++    # --- Scheduler-side methods ---
++
++    # NOTE: New API only for RecomputeCPUOffloadConnector.
++    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
++        if self.scheduler_manager is not None:
++            self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
++
++    def get_num_new_matched_tokens(
++        self,
++        request: "Request",
++        num_computed_tokens: int,
++    ) -> tuple[int | None, bool]:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.get_num_new_matched_tokens(request, num_computed_tokens)
++        return 0, False
++
++    def update_state_after_alloc(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        num_external_tokens: int,
++    ) -> None:
++        if self.scheduler_manager is not None:
++            self.scheduler_manager.update_state_after_alloc(request, blocks, num_external_tokens)
++
++    def update_state_before_preempt(
++        self,
++        request: "Request",
++        block_ids: tuple[list[int], ...],
++        num_computed_tokens: int,
++    ) -> bool:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.update_state_before_preempt(
++                request,
++                block_ids,
++                num_computed_tokens,
++            )
++        return False
++
++    def build_connector_meta(
++        self,
++        scheduler_output: SchedulerOutput,
++    ) -> KVConnectorMetadata:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.build_connector_meta(scheduler_output)
++        return RecomputeCPUOffloadMetadata()
++
++    def update_connector_output(
++        self,
++        connector_output: KVConnectorOutput,
++    ) -> None:
++        if self.scheduler_manager is not None:
++            self.scheduler_manager.update_connector_output(connector_output)
++
++    def request_finished(
++        self,
++        request: "Request",
++        block_ids: list[int],
++    ) -> tuple[bool, dict[str, Any] | None]:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.request_finished(request, block_ids)
++        return False, None
++
++    def request_finished_all_groups(
++        self,
++        request: "Request",
++        block_ids: tuple[list[int], ...],
++    ) -> tuple[bool, dict[str, Any] | None]:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.request_finished_all_groups(request, block_ids)
++        return False, None
++
++    # NOTE: New API only for RecomputeCPUOffloadConnector.
++    def has_pending_transfers(self) -> bool:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.has_pending_transfers()
++        return False
++
++    def has_preempted_request(self, req_id: str) -> bool:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.has_preempted_request(req_id)
++        return False
++
++    def take_events(self) -> Iterable[KVCacheEvent]:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.take_events()
++        return []
++
++    def reset_cache(self) -> bool | None:
++        if self.scheduler_manager is not None:
++            return self.scheduler_manager.reset_cache()
++        return None
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/worker.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/worker.py
+new file mode 100644
+index 000000000..c8e8f7908
+--- /dev/null
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/worker.py
+@@ -0,0 +1,319 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Worker-side handler for Ascend RecomputeCPUOffloadConnector."""
++
++from typing import TYPE_CHECKING
++
++import torch
++from vllm.config import VllmConfig
++from vllm.logger import logger
++
++from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
++    RecomputeCPUOffloadMetadata,
++    RecomputeCPUOffloadWorkerMetadata,
++)
++
++if TYPE_CHECKING:
++    from vllm.v1.kv_cache_interface import KVCacheConfig
++
++
++class RecomputeCPUOffloadWorker:
++    """Worker-side handler for recompute CPU/NPU KV cache transfers."""
++
++    def __init__(
++        self,
++        vllm_config: VllmConfig,
++        kv_cache_config: "KVCacheConfig | None",
++        cpu_capacity_bytes: int,
++    ):
++        self.vllm_config = vllm_config
++        self.kv_cache_config = kv_cache_config
++        self.cpu_capacity_bytes = cpu_capacity_bytes
++
++        self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
++        self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
++        self.device: torch.device | None = None
++        self.num_cpu_blocks: int = 0
++
++        self.load_stream: torch.npu.Stream | None = None
++        self.store_stream: torch.npu.Stream | None = None
++
++        self._load_events: list[tuple[int, torch.npu.Event]] = []
++        self._load_hwm: int = -1
++
++        self._connector_metadata: RecomputeCPUOffloadMetadata | None = None
++        self._pending_load_event_indices: set[int] = set()
++        self._submitted_load_event_indices: set[int] = set()
++        self._completed_store_events: dict[int, int] = {}
++        self._load_stream_waited = False
++
++    def register_kv_caches(
++        self,
++        kv_caches: dict[str, torch.Tensor],
++    ) -> None:
++        """Register KV caches and initialize CPU/NPU transfer resources."""
++        if not kv_caches:
++            logger.warning("No KV caches to offload.")
++            return
++
++        any_tensor = next(iter(kv_caches.values()))
++        if isinstance(any_tensor, (tuple, list)):
++            any_tensor = any_tensor[0]
++        self.device = any_tensor.device
++
++        assert self.kv_cache_config is not None
++        self.num_gpu_blocks = self.kv_cache_config.num_blocks
++        self.block_size_scale = {}
++
++        scheduler_gpu_kv_cache_tensors = []
++        for t in self.kv_cache_config.kv_cache_tensors:
++            if t.shared_by:
++                scheduler_gpu_kv_cache_tensors.append(t)
++        scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
++        scheduler_num_cpu_blocks = max(1, self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes)
++
++        unique_gpu_caches: dict[str, torch.Tensor] = {}
++        register_cache_ptrs = []
++        for layer_name, layer_tensor in kv_caches.items():
++            if isinstance(layer_tensor, (tuple, list)):
++                for idx, single_tensor in enumerate(layer_tensor):
++                    if single_tensor.data_ptr() not in register_cache_ptrs:
++                        unique_gpu_caches[f"{layer_name}.{idx}"] = single_tensor.view(single_tensor.shape[0], -1)
++                        register_cache_ptrs.append(single_tensor.data_ptr())
++                        self.block_size_scale[f"{layer_name}.{idx}"] = single_tensor.shape[0] // self.num_gpu_blocks
++            else:
++                if layer_tensor.data_ptr() not in register_cache_ptrs:
++                    unique_gpu_caches[layer_name] = layer_tensor.view(layer_tensor.shape[0], -1)
++                    register_cache_ptrs.append(layer_tensor.data_ptr())
++                    self.block_size_scale[layer_name] = layer_tensor.shape[0] // self.num_gpu_blocks
++
++        per_tensor_bytes_per_block = [tensor.shape[-1] * tensor.element_size() for tensor in unique_gpu_caches.values()]
++        total_bytes_per_block = sum(per_tensor_bytes_per_block)
++        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
++        if self.num_cpu_blocks != scheduler_num_cpu_blocks:
++            self.num_cpu_blocks = scheduler_num_cpu_blocks
++            logger.warning(
++                "RecomputeCPUOffloadScheduler has different num_blocks: %d,"
++                "worker-side num_block is set to %d to align with scheduler.",
++                scheduler_num_cpu_blocks,
++                scheduler_num_cpu_blocks,
++            )
++
++        self.gpu_kv_caches = unique_gpu_caches
++        self.cpu_kv_caches = {}
++        for name, gpu_tensor in unique_gpu_caches.items():
++            tensor_block_size_scale = self.block_size_scale[name]
++            cpu_shape = (self.num_cpu_blocks * tensor_block_size_scale,) + gpu_tensor.shape[1:]
++            self.cpu_kv_caches[name] = torch.zeros(
++                cpu_shape,
++                dtype=gpu_tensor.dtype,
++                pin_memory=True,
++                device="cpu",
++            )
++
++        self.load_stream = torch.npu.Stream()
++        self.store_stream = torch.npu.Stream()
++
++        logger.info(
++            "RecomputeCPUOffloadWorker scaffold registered %d unique KV tensors, allocating %d CPU blocks (%.2f GB).",
++            len(unique_gpu_caches),
++            self.num_cpu_blocks,
++            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
++        )
++
++    def bind_connector_metadata(self, metadata: RecomputeCPUOffloadMetadata) -> None:
++        self._connector_metadata = metadata
++        self._load_stream_waited = False
++        if metadata.preempt_load_event >= 0:
++            self._pending_load_event_indices.add(metadata.preempt_load_event)
++
++    def clear_connector_metadata(self) -> None:
++        """Clear metadata after the model runner finishes the current step."""
++        self._connector_metadata = None
++
++    def handle_preemptions(
++        self,
++        kv_connector_metadata: RecomputeCPUOffloadMetadata,
++    ) -> None:
++        """Save preempted blocks before input preparation can overwrite them."""
++        if kv_connector_metadata.need_flush:
++            self._flush_and_sync_all()
++
++        # The scheduler may immediately reuse preempted block IDs in this same
++        # step. This blocking D2H must therefore run before _update_states()
++        # processes new_block_ids_to_zero and before model forward writes KV.
++        self._submit_transfer(
++            kv_connector_metadata.preempt_store_gpu_blocks,
++            kv_connector_metadata.preempt_store_cpu_blocks,
++            kv_connector_metadata.preempt_store_event,
++            is_store=True,
++            sync=True,
++        )
++
++    def start_load_kv(self) -> None:
++        """Submit pre-forward recompute H2D transfers."""
++        metadata = self._connector_metadata
++        if metadata is None:
++            return
++
++        self._submit_transfer(
++            metadata.preempt_load_cpu_blocks,
++            metadata.preempt_load_gpu_blocks,
++            metadata.preempt_load_event,
++            is_store=False,
++            sync=True,
++        )
++
++    def wait_for_layer_load(self) -> None:
++        """Make the current forward stream wait for the recompute H2D copy."""
++        if self._load_stream_waited or self.load_stream is None:
++            return
++        metadata = self._connector_metadata
++        if metadata is None or metadata.preempt_load_event < 0:
++            return
++        torch.npu.current_stream().wait_stream(self.load_stream)
++        self._load_stream_waited = True
++
++    def _flush_and_sync_all(self) -> None:
++        """Synchronize all in-flight transfer events."""
++        for event_idx, event in self._load_events:
++            event.synchronize()
++            self._load_hwm = event_idx
++        self._load_events.clear()
++        self._submitted_load_event_indices.clear()
++
++    def _poll_load_events(self) -> int:
++        """Return the highest completed H2D event index."""
++        events = self._load_events
++        hwm = self._load_hwm
++
++        while events:
++            event_idx, event = events[0]
++            if not event.query():
++                break
++            hwm = event_idx
++            events.pop(0)
++
++        self._load_hwm = hwm
++        return hwm
++
++    def _submit_transfer(
++        self,
++        src_block_ids: list[int],
++        dst_block_ids: list[int],
++        event_idx: int,
++        is_store: bool,
++        sync: bool = False,
++    ) -> None:
++        """Submit a CPU<->NPU block copy and record a completion event."""
++        if event_idx < 0:
++            return
++        if not is_store and event_idx in self._submitted_load_event_indices:
++            return
++        if not is_store:
++            self._submitted_load_event_indices.add(event_idx)
++
++        if not src_block_ids:
++            if is_store:
++                self._completed_store_events[event_idx] = 1
++            else:
++                self._load_hwm = max(self._load_hwm, event_idx)
++            return
++
++        assert len(src_block_ids) == len(dst_block_ids)
++        assert self.gpu_kv_caches is not None
++        assert self.cpu_kv_caches is not None
++
++        stream = self.store_stream if is_store else self.load_stream
++        assert stream is not None
++        torch.npu.synchronize()
++
++        with torch.npu.stream(stream):
++            for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
++                for name, gpu_tensor in self.gpu_kv_caches.items():
++                    cpu_tensor = self.cpu_kv_caches[name]
++                    tensor_block_size_scale = self.block_size_scale[name]
++                    if is_store:
++                        # TODO: Replace this D2H torch copy with the NPU copy
++                        # backend dedicated kernel.
++                        if tensor_block_size_scale > 1:
++                            cpu_tensor[
++                                dst_block_id * tensor_block_size_scale : (dst_block_id + 1) * tensor_block_size_scale
++                            ].copy_(
++                                gpu_tensor[
++                                    src_block_id * tensor_block_size_scale : (src_block_id + 1)
++                                    * tensor_block_size_scale
++                                ],
++                                non_blocking=True,
++                            )
++                        else:
++                            cpu_tensor[dst_block_id].copy_(
++                                gpu_tensor[src_block_id],
++                                non_blocking=True,
++                            )
++                    else:
++                        # TODO: Replace this H2D torch copy with the NPU copy
++                        # backend dedicated kernel.
++                        if tensor_block_size_scale > 1:
++                            gpu_tensor[
++                                dst_block_id * tensor_block_size_scale : (dst_block_id + 1) * tensor_block_size_scale
++                            ].copy_(
++                                cpu_tensor[
++                                    src_block_id * tensor_block_size_scale : (src_block_id + 1)
++                                    * tensor_block_size_scale
++                                ],
++                                non_blocking=True,
++                            )
++                        else:
++                            gpu_tensor[dst_block_id].copy_(
++                                cpu_tensor[src_block_id],
++                                non_blocking=True,
++                            )
++            event = torch.npu.Event()
++            event.record(stream)
++
++        if sync:
++            event.synchronize()
++            if is_store:
++                self._completed_store_events[event_idx] = 1
++            else:
++                self._load_hwm = max(self._load_hwm, event_idx)
++            return
++
++        assert not is_store
++        self._load_events.append((event_idx, event))
++
++    def get_finished(
++        self,
++        finished_req_ids: set[str],
++    ) -> tuple[set[str] | None, set[str] | None]:
++        """Poll recompute transfers and report completed request restores."""
++        metadata = self._connector_metadata
++        if metadata is None:
++            return None, None
++
++        finished_recving: set[str] = set()
++        if self._pending_load_event_indices:
++            load_hwm = self._poll_load_events()
++            completed_loads = [event_idx for event_idx in self._pending_load_event_indices if event_idx <= load_hwm]
++            for event_idx in completed_loads:
++                self._pending_load_event_indices.discard(event_idx)
++                self._submitted_load_event_indices.discard(event_idx)
++                finished_recving.update(metadata.preempt_load_event_to_reqs.get(event_idx, []))
++
++        return None, finished_recving or None
++
++    def build_connector_worker_meta(self) -> RecomputeCPUOffloadWorkerMetadata | None:
++        """Return completed store events since the previous call.
++
++        The scheduler aggregates this metadata across workers/ranks. A store
++        event becomes available to recompute requests only after all expected
++        workers have reported completion.
++        """
++        if not self._completed_store_events:
++            return None
++        meta = RecomputeCPUOffloadWorkerMetadata(
++            completed_store_events=self._completed_store_events,
++        )
++        self._completed_store_events = {}
++        return meta
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+index b67407802..729c9c7ba 100644
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -1147,6 +1147,14 @@ class NPUModelRunner(GPUModelRunner):
+         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+         with record_function_or_nullcontext("prepare input"):
+             with self.synchronize_input_prep():
++                if has_kv_transfer_group():
++                    kv_connector_metadata = scheduler_output.kv_connector_metadata
++                    assert kv_connector_metadata is not None
++                    # Preemption stores must run before _update_states() zeroes
++                    # newly allocated blocks that may reuse the same physical
++                    # KV cache IDs.
++                    get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
++
+                 # Update persistent batch states.
+                 self._update_states(scheduler_output)
+ 
+-- 
+2.55.0
+
+
+From c273aa7d689f184707eb33cfe0abc3fcf49aa192 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=BB=8E=E4=BA=91?= <dingshihao.dsh@antgroup.com>
+Date: Thu, 25 Jun 2026 09:34:42 +0800
+Subject: [PATCH 2/3] compatible with v0.18.0
+
+---
+ tests/ut/kv_offload/test_recompute_cpu_offload.py    |  2 +-
+ vllm_ascend/core/recompute_scheduler.py              | 12 +++++-------
+ .../kv_pool/recompute_cpu_offload/manager.py         |  1 -
+ .../recompute_cpu_offload_connector.py               |  9 ++++++---
+ vllm_ascend/worker/model_runner_v1.py                |  5 +++--
+ 5 files changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/tests/ut/kv_offload/test_recompute_cpu_offload.py b/tests/ut/kv_offload/test_recompute_cpu_offload.py
+index fa9369393..abc59062c 100644
+--- a/tests/ut/kv_offload/test_recompute_cpu_offload.py
++++ b/tests/ut/kv_offload/test_recompute_cpu_offload.py
+@@ -101,7 +101,7 @@ def test_recompute_cpu_offload_connector_worker_methods_forward():
+ 
+     metadata = RecomputeCPUOffloadMetadata(preempt_load_event=3)
+     connector.bind_connector_metadata(metadata)
+-    connector.handle_preemptions(metadata)
++    connector.handle_preemptions({"req-1"})
+     connector.start_load_kv(MagicMock())
+     connector.wait_for_layer_load("layer.0")
+ 
+diff --git a/vllm_ascend/core/recompute_scheduler.py b/vllm_ascend/core/recompute_scheduler.py
+index 941fe72cd..1f203e295 100644
+--- a/vllm_ascend/core/recompute_scheduler.py
++++ b/vllm_ascend/core/recompute_scheduler.py
+@@ -164,7 +164,9 @@ class RecomputeScheduler(Scheduler):
+             self._enqueue_waiting_request(request)
+             self.requests[request.request_id] = request
+             if self.connector is not None:
+-                self.connector.on_new_request(request)
++                on_new_request = getattr(self.connector, "on_new_request", None)
++                if on_new_request is not None:
++                    on_new_request(request)
+             if self.log_stats:
+                 request.record_event(EngineCoreEventType.QUEUED)
+ 
+@@ -656,7 +658,6 @@ class RecomputeScheduler(Scheduler):
+                     num_external_computed_tokens=num_external_computed_tokens,
+                     delay_cache_blocks=load_kv_async,
+                     num_encoder_tokens=num_encoder_tokens,
+-                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                 )
+ 
+                 if new_blocks is None:
+@@ -895,10 +896,7 @@ class RecomputeScheduler(Scheduler):
+             # These blocks contain externally computed tokens that failed to
+             # load. Identify affected requests and adjust their computed token
+             # count to trigger recomputation of the invalid blocks.
+-            failed_kv_load_req_ids = self._handle_invalid_blocks(
+-                kv_connector_output.invalid_block_ids,
+-                num_scheduled_tokens,
+-            )
++            failed_kv_load_req_ids = self._handle_invalid_blocks(kv_connector_output.invalid_block_ids)
+ 
+         # return recomputed requests as EngineCoreOutput
+         if scheduler_output.recomputed_reqs is not None:
+@@ -1014,7 +1012,7 @@ class RecomputeScheduler(Scheduler):
+                     stopped_preempted_reqs.add(request)
+ 
+             # Extract sample logprobs if needed.
+-            if request.sampling_params is not None and request.sampling_params.num_logprobs is not None and logprobs:
++            if request.sampling_params is not None and request.sampling_params.logprobs is not None and logprobs:
+                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+ 
+             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py
+index 0abb9e1c6..5c4e04e0e 100644
+--- a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/manager.py
+@@ -89,7 +89,6 @@ class RecomputeCPUOffloadScheduler:
+         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
+             kv_cache_config=self.cpu_kv_cache_config,
+             max_model_len=vllm_config.model_config.max_model_len,
+-            max_num_batched_tokens=(vllm_config.scheduler_config.max_num_batched_tokens),
+             use_eagle=False,
+             enable_caching=self.enable_offload_prefix_caching,
+             enable_kv_cache_events=self.enable_kv_cache_events,
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+index 17daaa4b9..8196e12ea 100644
+--- a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+@@ -114,10 +114,13 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
+         if self.worker_handler is not None:
+             self.worker_handler.clear_connector_metadata()
+ 
+-    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
++    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+         if self.worker_handler is not None:
+-            assert isinstance(kv_connector_metadata, RecomputeCPUOffloadMetadata)
+-            self.worker_handler.handle_preemptions(kv_connector_metadata)
++            if not self.has_connector_metadata():
++                return
++            connector_metadata = self._get_connector_metadata()
++            assert isinstance(connector_metadata, RecomputeCPUOffloadMetadata)
++            self.worker_handler.handle_preemptions(connector_metadata)
+ 
+     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+         if self.worker_handler is not None:
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+index 729c9c7ba..897f6a2bb 100644
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -1147,13 +1147,14 @@ class NPUModelRunner(GPUModelRunner):
+         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+         with record_function_or_nullcontext("prepare input"):
+             with self.synchronize_input_prep():
+-                if has_kv_transfer_group():
++                if scheduler_output.preempted_req_ids and has_kv_transfer_group():
+                     kv_connector_metadata = scheduler_output.kv_connector_metadata
+                     assert kv_connector_metadata is not None
+                     # Preemption stores must run before _update_states() zeroes
+                     # newly allocated blocks that may reuse the same physical
+                     # KV cache IDs.
+-                    get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
++                    get_kv_transfer_group().bind_connector_metadata(kv_connector_metadata)
++                    get_kv_transfer_group().handle_preemptions(scheduler_output.preempted_req_ids)
+ 
+                 # Update persistent batch states.
+                 self._update_states(scheduler_output)
+-- 
+2.55.0
+
+
+From 5657e6cb935b700b53172415d9298e70a401a8c6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=BB=8E=E4=BA=91?= <dingshihao.dsh@antgroup.com>
+Date: Thu, 25 Jun 2026 17:20:04 +0800
+Subject: [PATCH 3/3] handle_preemptions & bind_gpu_block_pool align with vllm
+
+---
+ tests/ut/kv_offload/test_recompute_cpu_offload.py     |  2 +-
+ vllm_ascend/core/recompute_scheduler.py               |  4 ++++
+ .../recompute_cpu_offload_connector.py                | 11 +++++------
+ vllm_ascend/worker/model_runner_v1.py                 |  5 ++---
+ 4 files changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/tests/ut/kv_offload/test_recompute_cpu_offload.py b/tests/ut/kv_offload/test_recompute_cpu_offload.py
+index abc59062c..fa9369393 100644
+--- a/tests/ut/kv_offload/test_recompute_cpu_offload.py
++++ b/tests/ut/kv_offload/test_recompute_cpu_offload.py
+@@ -101,7 +101,7 @@ def test_recompute_cpu_offload_connector_worker_methods_forward():
+ 
+     metadata = RecomputeCPUOffloadMetadata(preempt_load_event=3)
+     connector.bind_connector_metadata(metadata)
+-    connector.handle_preemptions({"req-1"})
++    connector.handle_preemptions(metadata)
+     connector.start_load_kv(MagicMock())
+     connector.wait_for_layer_load("layer.0")
+ 
+diff --git a/vllm_ascend/core/recompute_scheduler.py b/vllm_ascend/core/recompute_scheduler.py
+index 1f203e295..debd03f40 100644
+--- a/vllm_ascend/core/recompute_scheduler.py
++++ b/vllm_ascend/core/recompute_scheduler.py
+@@ -135,6 +135,10 @@ class RecomputeScheduler(Scheduler):
+             "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
+             or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
+         )
++        # Bind GPU block pool to the KV connector. This must happen after
++        # kv_cache_manager is constructed so block_pool is available.
++        if self.connector is not None:
++            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+ 
+     def add_request(self, request: Request) -> None:
+         existing = self.requests.get(request.request_id)
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+index 8196e12ea..addcb738b 100644
+--- a/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py
+@@ -114,13 +114,12 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
+         if self.worker_handler is not None:
+             self.worker_handler.clear_connector_metadata()
+ 
+-    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
++    def handle_preemptions(
++        self, kv_connector_metadata: KVConnectorMetadata
++    ) -> None:
+         if self.worker_handler is not None:
+-            if not self.has_connector_metadata():
+-                return
+-            connector_metadata = self._get_connector_metadata()
+-            assert isinstance(connector_metadata, RecomputeCPUOffloadMetadata)
+-            self.worker_handler.handle_preemptions(connector_metadata)
++            assert isinstance(kv_connector_metadata, RecomputeCPUOffloadMetadata)
++            self.worker_handler.handle_preemptions(kv_connector_metadata)
+ 
+     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+         if self.worker_handler is not None:
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+index 897f6a2bb..729c9c7ba 100644
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -1147,14 +1147,13 @@ class NPUModelRunner(GPUModelRunner):
+         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+         with record_function_or_nullcontext("prepare input"):
+             with self.synchronize_input_prep():
+-                if scheduler_output.preempted_req_ids and has_kv_transfer_group():
++                if has_kv_transfer_group():
+                     kv_connector_metadata = scheduler_output.kv_connector_metadata
+                     assert kv_connector_metadata is not None
+                     # Preemption stores must run before _update_states() zeroes
+                     # newly allocated blocks that may reuse the same physical
+                     # KV cache IDs.
+-                    get_kv_transfer_group().bind_connector_metadata(kv_connector_metadata)
+-                    get_kv_transfer_group().handle_preemptions(scheduler_output.preempted_req_ids)
++                    get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+ 
+                 # Update persistent batch states.
+                 self._update_states(scheduler_output)
+-- 
+2.55.0
+

@@ -253,6 +253,14 @@ class RecomputeScheduler(Scheduler):
         # and the "jump decoding" optimization in the future.
 
         scheduled_new_reqs: list[Request] = []
+        # [repro] manual preemption trigger for the recompute path.
+        # Mirrors the cross_dp_scheduler repro: force new_blocks=None once
+        # per schedule step for the first running request when >=2 running.
+        # DEBUG ONLY — REMOVE BEFORE MERGE.
+
+        flagg = 1
+        logger.info("-------------------------new schedule [recompute]---------------------")
+ 
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
@@ -279,8 +287,10 @@ class RecomputeScheduler(Scheduler):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        request_num = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            request_num += 1
 
             if (
                 request.num_output_placeholders > 0
@@ -351,15 +361,26 @@ class RecomputeScheduler(Scheduler):
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
-                    )
+                    logger.info(
+                        "--------------[recompute] len(self.running): %d, "
+                        "request_num: %d", len(self.running), request_num)
+                    if len(self.running) > 1 and flagg == 1 and request_num == 1:
+                        # [repro] force a preemption once per schedule step.
+                        new_blocks = None
+                        flagg = 0
+                    else:
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens,
+                        )
+                    logger.info("--------------[recompute] new_blocks: %s", new_blocks)
 
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
+
+                    logger.info(">>>>>>>>> [recompute] get in premmpt")
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -371,6 +392,18 @@ class RecomputeScheduler(Scheduler):
                         recomputed_req_id = recomputed_req.request_id
                         recomputed_block_ids = self.kv_cache_manager.get_block_ids(recomputed_req_id)
                         recomputed_num_computed_tokens = recomputed_req.num_computed_tokens
+                        _repro_mm_hashes = [
+                            feat.identifier
+                            for feat in (recomputed_req.mm_features or [])
+                        ]
+                        logger.info(
+                            "---------------[repro][recompute] PREEMPTED req_id=%s "
+                            "preempted_by=%s mm_hashes=%s prev_num_computed=%s "
+                            "has_encoder_inputs=%s",
+                            recomputed_req.request_id, request.request_id,
+                            _repro_mm_hashes, recomputed_num_computed_tokens,
+                            recomputed_req.has_encoder_inputs,
+                        )
                         preempt_hook = (
                             getattr(self.connector, "update_state_before_preempt", None)
                             if self.connector is not None
