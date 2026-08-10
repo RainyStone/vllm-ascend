@@ -2279,11 +2279,32 @@ class MooncakeConnectorWorker:
                     final_block_idx = len(remote_block_nums)
                 remote_block_nums.append(block_num)
 
-        # [DyCP] P 端 dycp 切分时, remote_block_ids 是 per-cp_rank 多段 list[BlockIds]
-        # (外层=cp_rank)。按 local_cp_rank 选段(与 remote_block_nums 同序), 对齐原版
-        # domain 5a3f162b~1:1602-1608。非 dycp 时退化为单段不变。
+        # [DyCP] remote_block_ids 结构随请求长短而异, 须按 cp_rank 数判别后再索引:
+        #   per-cp_rank 多段(长请求, 多 cp_rank 协作, 经 _maybe_gather_dycp_block_shards owner
+        #       合并覆盖产出): 外层=cp_rank, 每个元素是该 cp_rank 的 KV 分片, 段内再按 kv_group
+        #       列出 block_id; 例 [([1],), ([2],)] -> 序列化后 [[[1]],[[2]]], len(外层)==cp_rank 数。
+        #       D 端按 remote_dycp_ranks 多源拉各 cp_rank 段拼全 KV。
+        #       索引: meta_remote_block_ids[cp_rank][group_idx] -> list[int]。
+        #   per-group 扁平(短请求, 单 cp_rank, 未进 gather, 由 _connector_finished 直接产出):
+        #       外层=kv_group, 每个元素直接是某 kv_group 的 block_id 列表, 无 cp_rank 维度;
+        #       例 ([1],) -> 序列化后 [[1]], len(外层)==kv_group 数(=1)。单 cp_rank 持全量 KV。
+        #       索引: remote_block_ids[group_idx] -> list[int]。
+        # 按 local_cp_rank 选段(与 remote_block_nums 同序), 对齐原版 domain 5a3f162b~1:1602-1608。
+        # 注意: prefill_dycp_enable 只表示 P 端开 dycp(remote_dycp_ranks 非空), 不代表本请求是
+        #   多 cp_rank 协作的长请求; 单 cp_rank(短请求)的 remote_block_ids 仍是 per-group 扁平,
+        #   不能直接当 per-cp_rank 索引, 否则 [cp_rank] 取到的是某 group 的 block_id 列表,
+        #   再 [group_idx] 取到 int -> [:n] 报 'int' object is not subscriptable (v48)。
         if prefill_dycp_enable:
-            meta_remote_block_ids = list(meta.remote_block_ids)
+            _is_multi_cp_rank = len(remote_dycp_ranks) > 1
+            if _is_multi_cp_rank:
+                # 长请求(多 cp_rank 协作): remote_block_ids 已是 per-cp_rank 多段(外层=cp_rank),
+                # 直接按段处理
+                meta_remote_block_ids = list(meta.remote_block_ids)
+            else:
+                # 短请求(单 cp_rank, 未走 gather): remote_block_ids 是 per-group 扁平(外层=group),
+                # 包一层 cp_rank 维度 [meta.remote_block_ids] 对齐多段, 使下游
+                # meta_remote_block_ids[cp_rank][group_idx] 取到 list[int] 而非 int
+                meta_remote_block_ids = [meta.remote_block_ids]
             meta_remote_block_ids = [
                 seg for cp_rank, seg in enumerate(meta_remote_block_ids)
                 if cp_rank % local_cp_size == local_cp_rank
