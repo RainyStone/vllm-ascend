@@ -888,8 +888,19 @@ class NPUModelRunner(GPUModelRunner):
             num_cp_request = num_reqs
 
         if self.dycp_size > 1:
-            self.input_batch.block_table.compute_slot_mapping_with_dycp(req_indices, positions_np, num_cp_request)
-            self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens) # TODO [DyCP] v0.21.0中该行已经删掉了，这里先临时加回来，可能是由于v0.21.0中slot_mapping计算优化成算子了，所以不需要再copy_to_gpu
+            # [DyCP] dycp 也走 v0.21.0 的 GPU 算子 compute_slot_mapping(已扩展
+            # 支持 dycp 维度), 与 PCP 路径一致, 避免 CPU+commit 的 buffer 分歧。
+            # 用 pre-PCP positions + query_start_loc(GPU), 阻塞 .to(device) 同步。
+            pre_pcp_positions = torch.from_numpy(
+                positions_np[:total_num_scheduled_tokens]
+            ).to(self.device)
+            pre_pcp_qsl = torch.zeros(
+                num_reqs + 1, dtype=torch.int32, device=self.device)
+            pre_pcp_qsl[1:num_reqs + 1] = torch.from_numpy(
+                cu_num_tokens
+            ).to(dtype=torch.int32, device=self.device)
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs, pre_pcp_qsl, pre_pcp_positions)
         else:
             # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
             # Use blocking .to(device) to ensure data lands on GPU before PCP
@@ -1363,7 +1374,10 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_cache_config.kv_cache_groups)
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
-        if self.pcp_size <= 1:
+        # [DyCP] dycp>1 时 slot 已在 895 dycp 分支用 pre-PCP positions 算好,
+        # 不再用 PCP-split 后的 self.positions 重算(会覆盖正确结果 -> 第5个
+        # 真实token slot丢失 -> KV未写block -> D拉残缺 -> 错答)。
+        if self.pcp_size <= 1 and self.dycp_size <= 1:
             self.input_batch.block_table.compute_slot_mapping(
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],

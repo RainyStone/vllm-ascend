@@ -234,8 +234,15 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        # [DyCP] dycp 与 pcp/dcp 互斥: dycp>1 时用 dycp 维度(对齐 CPU 版
+        # compute_slot_mapping_with_dycp), 否则用 pcp*dcp。让 dycp 走 GPU 算子
+        # 路径(避开 CPU+commit 的 buffer 分歧)。
+        if self.dycp_world_size > 1:
+            total_cp_world_size = self.dycp_world_size
+            total_cp_rank = self.dycp_rank
+        else:
+            total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+            total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,
