@@ -1233,9 +1233,13 @@ class NPUModelRunner(GPUModelRunner):
                 base_num_computed_tokens_np,
             )
 
-        if self.pcp_size > 1 or should_rebuild_async_inputs:
+        if self.pcp_size > 1 or self.dycp_size > 1 or should_rebuild_async_inputs:
             # PCP and async rebuild both compute the correct positions on CPU.
             # Copy positions_np to GPU so input_ids and positions stay aligned.
+            # [DyCP] 修复: 开DyCP时 pcp_size==1 但 dycp_size>1, 必须同样走 positions_np
+            # (= num_computed + position_pcp 切乱后的本rank positions), 否则走 else 用连续
+            # query_pos [0,1,2,3], 丢失 position_pcp 切乱 -> rope(cos/sin)用错position ->
+            # k_pe/q_pe rope错 -> attention错 -> 输出错。
 
             self.positions[:total_num_scheduled_tokens].copy_(
                 torch.from_numpy(
