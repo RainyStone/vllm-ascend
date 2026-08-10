@@ -210,13 +210,6 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.info(
-                    "Force freed expired request: %s. "
-                    "Reason: Request exceeded timeout threshold (%s seconds). "
-                    "Action: Resources have been forcibly released to prevent memory leak.",
-                    request_id,
-                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                )
             else:
                 break
         return expired_requests
@@ -563,7 +556,6 @@ class KVCacheRecvingThread(threading.Thread):
         try:
             if transfer_failed:
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
-                logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
                     logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
@@ -1409,7 +1401,9 @@ class MooncakeConnectorScheduler:
         # Handshake base port for dycp communication
         self.dycp_port_base = (
             vllm_config.kv_transfer_config.kv_port
-            # + vllm_config.parallel_config.domain_parallel_rank # TODO [DyCP] 非domain方案中这个参数是否要加？？先临时去掉，实际要怎样设置
+            # flat dycp 方案：以 dycp 组索引（dp_rank//dycp_size）替代旧 domain 维度，
+            # 一个 dycp 组跨 dycp_size 个连续 DP rank。对齐原版(5dcc3790)算式。
+            + (vllm_config.parallel_config.data_parallel_rank // self.dycp_size)
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.dycp_size
@@ -1476,13 +1470,22 @@ class MooncakeConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
 
-                    # TODO [DyCP] 有差异，v0.18.0 是 blocks.get_unhashed_block_ids()，而 v0.21.0 是 blocks.get_unhashed_block_ids_all_groups()
-                    local_block_ids = []
-                    if isinstance(blocks, list):
-                        for block in blocks:
-                            local_block_ids.append(block.get_unhashed_block_ids() if num_external_tokens > 0 else [])
+                    # local_block_ids 数据结构须为 per-group BlockIds（外层=kv cache group，
+                    # 内层=该组 block id），与下游 _transfer_kv_cache_all_groups 按
+                    # local_block_ids[group_idx] 消费一致。
+                    # D 端不开 dycp（dycp_size==1）：按 per-group 取 unhashed（对齐原版）。
+                    # D 端开 dycp（dycp_size>1）：per-CP-rank 分组（按 cp_ranks），后期适配。
+                    if self.dycp_size > 1:
+                        # [DyCP] D 端开 dycp：按 cp_ranks 逐段取 unhashed（per-group 维度保留）。
+                        # TODO [DyCP] 需按 BlockIds 适配为 per-CP-rank-per-group 结构，当前仅占位
+                        #   以 get_unhashed_block_ids_all_groups 兜底，避免单组 list[int] 错配。
+                        local_block_ids = (
+                            blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
+                        )
                     else:
-                        local_block_ids = blocks.get_unhashed_block_ids() if num_external_tokens > 0 else []
+                        local_block_ids = (
+                            blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
+                        )
 
 
                     # Get unhashed blocks to pull from remote.
@@ -1501,9 +1504,18 @@ class MooncakeConnectorScheduler:
         meta = MooncakeConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
+        # [DyCP] cp_rank_to_req_id 在本 step 无 CP 长请求时为 None（cp_aware_scheduler
+        # 输出 cp_req_ids if cp_req_ids else None），`in` 运算需防 None。
+        _cp_rank_to_req_id = scheduler_output.cp_rank_to_req_id or []
+        # [DyCP] dycp_size>1 时按 cp_rank 过滤发出，发出后必须从跟踪表移除，
+        # 否则同一 req 每 step 都会被重新塞进 requests_to_send / add_new_req，
+        # 导致 worker 侧 add_not_transfer_request/add_delayed_request 反复触发、
+        # finished_sending 重复上报：第一次合法 _free_blocks 会 del self.requests[req]，
+        # 第二次撞 scheduler 的 assert req_id in self.requests（_update_from_kv_xfer_finished）。
+        _emitted_recv: list[str] = []
         for req_id, (req, block_ids, num_external_tokens) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            if self.dycp_size > 1 and req_id not in scheduler_output.cp_rank_to_req_id:
+            if self.dycp_size > 1 and req_id not in _cp_rank_to_req_id:
                 continue
 
             # For the case where there are no remote blocks to pull
@@ -1516,19 +1528,35 @@ class MooncakeConnectorScheduler:
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
             )
+            _emitted_recv.append(req_id)
 
         # Clear the list once workers start the transfers
         if self.dycp_size > 1:
             cp_rank = getattr(scheduler_output, 'cp_rank', None)
+            _emitted_send: list[str] = []
             for req_id in self._reqs_need_send:
                 req_cp_ranks = self._reqs_need_send_cp_ranks.get(req_id)
-                if req_cp_ranks is not None and cp_rank is not None and cp_rank in req_cp_ranks:
+                if (req_cp_ranks is not None and cp_rank is not None
+                        and cp_rank in req_cp_ranks):
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
-                elif req_id in scheduler_output.cp_rank_to_req_id:
+                    _emitted_send.append(req_id)
+                elif req_id in _cp_rank_to_req_id:
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
+                    _emitted_send.append(req_id)
+            # 已发出的 send 项立即清理，避免下个 step 重复发出（见上方注释）。
+            for req_id in _emitted_send:
+                self._reqs_need_send.pop(req_id, None)
+                self._reqs_need_send_cp_ranks.pop(req_id, None)
+            _emitted_batch: list[str] = []
             for req_id in self._reqs_in_batch:
-                if req_id in scheduler_output.cp_rank_to_req_id:
+                if req_id in _cp_rank_to_req_id:
                     meta.reqs_in_batch.add(req_id)
+                    _emitted_batch.append(req_id)
+            for req_id in _emitted_batch:
+                self._reqs_in_batch.discard(req_id)
+            # 与 dycp_size==1 分支一致：已下发给 worker 的 recv 项也清理。
+            for req_id in _emitted_recv:
+                self._reqs_need_recv.pop(req_id, None)
         else:
             meta.requests_to_send = self._reqs_need_send
             meta.reqs_in_batch = self._reqs_in_batch
@@ -1676,7 +1704,9 @@ class MooncakeConnectorWorker:
         # Handshake base port for dycp
         self.dycp_port_base = (
             vllm_config.kv_transfer_config.kv_port
-            # + vllm_config.parallel_config.domain_parallel_rank # TODO [DyCP] 非domain方案中这个参数是否要加？？先临时去掉，实际要怎样设置
+            # flat dycp 方案：以 dycp 组索引（dp_rank//dycp_size）替代旧 domain 维度，
+            # 一个 dycp 组跨 dycp_size 个连续 DP rank。对齐原版(5dcc3790)算式。
+            + (vllm_config.parallel_config.data_parallel_rank // self.dycp_size)
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.dycp_size
@@ -2016,7 +2046,15 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
+        # [DyCP] dycp 维度: P 端开启时(remote_dycp_ranks 非空) prompt 跨 dycp 组内 cp_rank
+        # 切分, D 侧需按 per-cp_rank 多源拉取拼接(对齐原版 domain 5a3f162b~1:1370-1386)。
+        prefill_dycp_enable = bool(getattr(meta, "remote_dycp_ranks", None))
+        decode_dycp_enable = False
+        if prefill_dycp_enable:
+            decode_dycp_enable = bool(getattr(meta, "local_dycp_ranks", None))
+
+        if (meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1
+                and not prefill_dycp_enable and not decode_dycp_enable):
             if self._is_hma_required:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
             else:
@@ -2026,8 +2064,39 @@ class MooncakeConnectorWorker:
             remote_block_ids_list = [meta.remote_block_ids for _ in remote_handshake_port_list]
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
+        # [DyCP] 折叠 dycp 维度进 pcp_size(对齐原版 domain 5a3f162b~1:1376-1385)。
+        # prefill_dycp_enable: P 端长请求跨 dycp 组内 cp_rank 切分, remote_dycp_ranks
+        # 即各 cp_rank 序列; decode_dycp_enable: D 端也开 dycp(本场景 D dycp_size==1 故 False)。
+        # 把 dycp 当 pcp 维度喂给下游两级 CP 拓扑函数: remote_pcp_size 取 dycp rank 数,
+        # local_pcp_size=1(D 不切,单 rank 拉全 cp_rank 段)。
+        remote_dycp_ranks = (
+            list(meta.remote_dycp_ranks) if prefill_dycp_enable
+            else list(range(meta.remote_pcp_size))
+        )
+        local_dycp_ranks = (
+            list(meta.local_dycp_ranks) if decode_dycp_enable else [0]
+        )
+        remote_pcp_size = (
+            len(remote_dycp_ranks) if prefill_dycp_enable else meta.remote_pcp_size
+        )
+        local_pcp_size = (
+            len(local_dycp_ranks) if decode_dycp_enable else self.pcp_size
+        )
+        # D 本 rank 的 dycp rank(对齐原版 local_pcp_rank=self.pcp_rank+dycp.rank_in_group)。
+        # D 端 dycp_size==1 时 dycp rank=0, 不在 local_dycp_ranks 则不参与该 CP 请求拉取。
+        from vllm.distributed import get_dycp_group
+        try:
+            _local_dycp_rank_in_group = get_dycp_group().rank_in_group if decode_dycp_enable else 0
+        except Exception:
+            _local_dycp_rank_in_group = 0
+        local_pcp_rank = self.pcp_rank + _local_dycp_rank_in_group
+        if decode_dycp_enable and local_pcp_rank not in local_dycp_ranks:
+            # 本 D rank 不持有该 CP 请求的任何段, 不参与拉取。
+            return [], [], []
+
         def context_parallel_parameters_check():
-            assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
+            if not (prefill_dycp_enable or decode_dycp_enable):
+                assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
             if not (self.use_mla or self.use_sparse):
                 p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
                 d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
@@ -2054,7 +2123,7 @@ class MooncakeConnectorWorker:
                     kv_head_groups.append(tuple([kv_head_ids_]))
                 return kv_head_groups
 
-        def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
+        def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base, dycp_ranks=None):
             # key is kv_head_group, value is cp_groups and which cp_groups to select
             cp_group_meta: dict = {}
             kv_head_groups = get_kv_head_groups(tp_size)
@@ -2070,8 +2139,11 @@ class MooncakeConnectorWorker:
                     # len(cp_group) == pcp_size * dcp_size
                     cp_group = []
                     dcp_repeat_offset = dcp_size * dcp_repeat_idx
+                    # [DyCP] pcp_size>1(pcp 维度) 时 dycp_rank_select=0(已含 pcp_rank 遍历);
+                    # 否则 pcp_size==1(纯 dycp) 时取首个 dycp rank 作端口偏移基准。
+                    dycp_rank_select = 0 if pcp_size > 1 else (dycp_ranks[0] if dycp_ranks else 0)
                     for pcp_rank in range(pcp_size):
-                        pcp_rank_offset = tp_size * pcp_rank
+                        pcp_rank_offset = tp_size * (pcp_rank + dycp_rank_select)
                         for dcp_rank in range(dcp_size):
                             cp_group.append(
                                 dcp_rank + port_base + pcp_rank_offset + dcp_repeat_offset + kv_head_group_offset
@@ -2083,9 +2155,14 @@ class MooncakeConnectorWorker:
         def get_local_remote_block_port_mappings():
             context_parallel_parameters_check()
             p_node_cp_group_meta = get_cp_group_meta(
-                prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size, meta.remote_port
+                prefill_tp_size, remote_pcp_size, meta.remote_dcp_size, meta.remote_port,
+                dycp_ranks=remote_dycp_ranks,
             )
-            d_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port)
+            d_port_base = self.dycp_port_base if decode_dycp_enable else self.side_channel_port
+            d_node_cp_group_meta = get_cp_group_meta(
+                self.tp_size, local_pcp_size, self.dcp_size, d_port_base,
+                dycp_ranks=local_dycp_ranks,
+            )
             local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
             for d_node_head_key in d_node_cp_group_meta:
                 for p_node_head_key in p_node_cp_group_meta:
@@ -2123,13 +2200,15 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
-            for port in range(prefill_tp_size * meta.remote_pcp_size):
-                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
+            dycp_port_offset = 0 if remote_pcp_size > 1 else (remote_dycp_ranks[0] if remote_dycp_ranks else 0)
+            for port in range(prefill_tp_size * remote_pcp_size):
+                dycp_port = port + dycp_port_offset * prefill_tp_size
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(dycp_port), None)
                 if remote_host_info is None:
                     remote_host = meta.remote_host
                 else:
                     remote_host = remote_host_info["host"]
-                remote_port_send_num[meta.remote_port + port] = {"num": 0, "host": remote_host}
+                remote_port_send_num[meta.remote_port + dycp_port] = {"num": 0, "host": remote_host}
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
@@ -2172,7 +2251,7 @@ class MooncakeConnectorWorker:
             f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
         )
 
-        remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
+        remote_cp_size = remote_pcp_size * meta.remote_dcp_size
         remote_block_nums_all = [meta.num_prompt_blocks // remote_cp_size] * remote_cp_size
         num_remain_blocks = meta.num_prompt_blocks % remote_cp_size
         for i in range(num_remain_blocks):
@@ -2189,18 +2268,36 @@ class MooncakeConnectorWorker:
         # make sure the last block (which may be unfull) of P nodes is put to the last block of D node
         remote_block_nums: list[int] = []
         final_block_idx: int | None = None
-        local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
-        local_cp_size = self.dcp_size * self.pcp_size
+        local_cp_rank = self.dcp_rank + local_pcp_rank * self.dcp_size
+        local_cp_size = local_pcp_size * self.dcp_size
+        # [DyCP] D 端不切(local_pcp_size==1)且是多 DP 时, 本 rank 拉全部 cp_rank 段。
+        if self.dp_size > 1 and local_pcp_size == 1:
+            local_cp_rank = 0
         for cp_rank, block_num in enumerate(remote_block_nums_all):
             if cp_rank % local_cp_size == local_cp_rank:
                 if last_block_location == cp_rank:
                     final_block_idx = len(remote_block_nums)
                 remote_block_nums.append(block_num)
 
+        # [DyCP] P 端 dycp 切分时, remote_block_ids 是 per-cp_rank 多段 list[BlockIds]
+        # (外层=cp_rank)。按 local_cp_rank 选段(与 remote_block_nums 同序), 对齐原版
+        # domain 5a3f162b~1:1602-1608。非 dycp 时退化为单段不变。
+        if prefill_dycp_enable:
+            meta_remote_block_ids = list(meta.remote_block_ids)
+            meta_remote_block_ids = [
+                seg for cp_rank, seg in enumerate(meta_remote_block_ids)
+                if cp_rank % local_cp_size == local_cp_rank
+            ]
+        else:
+            meta_remote_block_ids = meta.remote_block_ids
+
         assert local_remote_block_port_mapping is not None
         if final_block_idx is not None:
             final_block_num = remote_block_nums.pop(final_block_idx)
             remote_block_nums.append(final_block_num)
+            if prefill_dycp_enable:
+                final_shard = meta_remote_block_ids.pop(final_block_idx)
+                meta_remote_block_ids.append(final_shard)
             for mapping in local_remote_block_port_mapping:
                 final_block_port = mapping.pop(final_block_idx)
                 mapping.append(final_block_port)
@@ -2216,20 +2313,23 @@ class MooncakeConnectorWorker:
         # such as: local_block_ids_list[[1],[2],[5],[6]], remote_block_ids_list[[1],[1],[1],[1]],
         # remote_handshake_port_list[[30000],[30001],[30004],[30005]]
         # D rank will get remote block 1 in port 30004 and save it in local block 5
+        # [DyCP] dycp 下 meta_remote_block_ids 是 per-cp_rank list[BlockIds], [remote_kv_id]
+        # 取该 cp_rank 段后 [group_idx] 取该段内 per-group block_ids。
         local_block_offset = 0
         for remote_kv_id in range(len(remote_handshake_port_list)):
             num_blocks_to_pull = remote_block_nums[remote_kv_id]
             group_remote_block_ids: list[list[int]] = []
             group_local_block_ids: list[list[int]] = []
             is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
+            remote_seg = meta_remote_block_ids[remote_kv_id] if prefill_dycp_enable else meta.remote_block_ids
             for group_idx, (group_spec, _) in kv_group_items:
                 if group_spec["kv_cache_spec_type"] == "MambaSpec":
                     # Mamba state is not context-block sharded like attention
                     # KV. Transfer the final state from the final PCP/DCP shard.
-                    group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
+                    group_remote_block_ids.append(list(remote_seg[group_idx]) if is_final_shard else [])
                     group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
                     continue
-                group_remote_block_ids.append(list(meta.remote_block_ids[group_idx][:num_blocks_to_pull]))
+                group_remote_block_ids.append(list(remote_seg[group_idx][:num_blocks_to_pull]))
                 group_local_block_ids.append(
                     list(meta.local_block_ids[group_idx][local_block_offset : local_block_offset + num_blocks_to_pull])
                 )
