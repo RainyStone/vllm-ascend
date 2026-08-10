@@ -503,9 +503,15 @@ class NPUWorker(WorkerBase):
         # mismatch deadlock. Guard out external_launcher, whose 0-token short-
         # circuit in model_runner_v1.py already runs its own dummy (would
         # double-count here).
+        # [DyCP] D 端(consumer) dycp_size==1（DyCP 仅在 P/producer 端开启），原 dycp_size>1
+        # 门控会把 D 端 0-token step（WAITING_FOR_REMOTE_KVS 空转、remote-prefill finish）
+        # 漏掉，导致收请求的 D rank 与空闲 rank 的 execute_dummy_batch all_reduce 计数
+        # 错位 → collective-type-mismatch 死锁。故对 is_kv_consumer 的 D 端一并放开；
+        # 非 PD 的纯 DP（无 kv_connector）仍由 dycp_size>1 守住，行为不变。
         if (scheduler_output.total_num_scheduled_tokens == 0
                 and self.parallel_config.data_parallel_size > 1
-                and self.parallel_config.dycp_size > 1
+                and (self.parallel_config.dycp_size > 1
+                     or self.vllm_config.kv_transfer_config.is_kv_consumer)
                 and self.parallel_config.distributed_executor_backend
                     != "external_launcher"):
             self.model_runner._dummy_run(1, uniform_decode=True)
