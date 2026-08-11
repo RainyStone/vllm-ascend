@@ -2227,15 +2227,22 @@ class MooncakeConnectorWorker:
 
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
-
-        if self.local_remote_block_port_mapping[meta.remote_engine_id] is None:
-            local_remote_block_port_mappings = get_local_remote_block_port_mappings()
-            self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[
-                self.handshake_port
-            ]
-            self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
-                local_remote_block_port_mappings
-            )
+        # [DyCP] port_mapping 不做跨请求缓存复用, 每次请求按当前 remote_cp_size 重建.
+        # 根因(对照 domain 方案 mooncake_connector.py:1525, 它注释掉了缓存复用):
+        #   迁移版此前按 remote_engine_id 缓存 local_remote_block_port_mapping/
+        #   remote_port_send_num, 首次建后跨请求复用; mapping 段数按*首次*请求的
+        #   remote_cp_size 建, 后续不同 cp_size 请求(长=2/短=1)复用同一缓存, 使
+        #   remote_handshake_port_list 长度(来自缓存 mapping)与 remote_block_nums
+        #   长度(来自当前请求 remote_cp_size)不一致 -> 长请求建长2后短请求复用越界
+        #   IndexError(v54). domain 方案每次重建, mapping 段数随当前请求 cp_size 变,
+        #   port_list 与 block_nums 同源对齐, 永不错配. 此处对齐 domain.
+        local_remote_block_port_mappings = get_local_remote_block_port_mappings()
+        self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[
+            self.handshake_port
+        ]
+        self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
+            local_remote_block_port_mappings
+        )
 
         local_remote_block_port_mapping = copy.deepcopy(self.local_remote_block_port_mapping[meta.remote_engine_id])
 
