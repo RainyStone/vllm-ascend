@@ -944,6 +944,12 @@ class NPUModelRunner(GPUModelRunner):
         # TODO [DyCP] !!!!下面段的原domain方案代码与v0.21.0比较大差异，最好确认迁移过来的代码没问题
         total_num_pcp_scheduled_tokens = 0
         if self.use_prefill_cp:
+            # [DyCP] 捕获 PCP 切分"前"(rank 无关)的 CP 请求 token 总数, 作为非 CP(短)
+            # 请求 positions 在原始 positions_np 中的起始偏移基准.
+            # 注意: update_tokens_for_pcp 会就地改写 num_scheduled_tokens[:num_cp_request]
+            # 为"per-cp_rank"的切分后值, 切分后无法还原出切分前的原始 CP token 数,
+            # 故必须在切分前记录 total_num_pcp_tokens_pre_split.
+            total_num_pcp_tokens_pre_split = int(sum(num_scheduled_tokens[:num_cp_request]))
             num_scheduled_tokens[:num_cp_request], position_pcp, position_mask = self.pcp_manager.update_tokens_for_pcp(
                 num_scheduled_tokens, self.arange_np
             )
@@ -958,9 +964,26 @@ class NPUModelRunner(GPUModelRunner):
                 position_pcp[:total_num_pcp_scheduled_tokens],
                 out=tmp_positions_np[: total_num_pcp_scheduled_tokens],
             )
-            total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
+            # [DyCP] 修复: 混合 batch(CP 长请求 + 非 CP 短请求)下, 非 CP 短请求的
+            # positions 偏移计算.
+            # 根因: 原公式 `total_num_pcp_scheduled_tokens * common_pcp_size
+            #   - total_num_pcp_pads` 中, total_num_pcp_scheduled_tokens 是切分后
+            #   的 per-cp_rank 值, num_pcp_pads_cpu 也是 per-cp_rank(本 rank 自己
+            #   的 padding). padding 在 cp_rank 间分配不均(如长请求 9 token 需 pad
+            #   到 12 时, 3 个 pad 可能全落在 cp_rank0, cp_rank1 为 0), 导致
+            #   per-rank 的 scheduled*common_pcp_size 减去本 rank pad 无法还原切分
+            #   前的原始 CP token 数 -> 短请求 positions 起始偏移算错, 读到越界/陈旧
+            #   positions -> 取错 token 与 KV -> 垃圾输出(多个短请求读相同陈丽数据
+            #   时还会逐字相同).
+            # 修复: 直接用切分前记录的 total_num_pcp_tokens_pre_split 作为短请求在
+            #   原始 positions_np 中的起始偏移; 它对所有 cp_rank 一致且与 padding
+            #   分配无关. 单 rank worker 无法知道跨 rank 的总 pad, 故不采用"改 pad
+            #   为总 pad"的思路, 而是直接记录切分前计数.
+            # CP-only / 短-only batch 时本切片为空, 不受影响.
+            num_short_tokens = total_num_scheduled_tokens - total_num_pcp_scheduled_tokens
             tmp_positions_np[total_num_pcp_scheduled_tokens: total_num_scheduled_tokens] = positions_np[
-                total_num_pcp_scheduled_tokens * self.common_pcp_size - total_num_pcp_pads:]
+                total_num_pcp_tokens_pre_split:
+                total_num_pcp_tokens_pre_split + num_short_tokens]
             positions_np = tmp_positions_np
 
         if self.use_prefill_cp and self.pcp_manager.pcp_use_hybrid_attn:
