@@ -899,8 +899,13 @@ class NPUModelRunner(GPUModelRunner):
             pre_pcp_qsl[1:num_reqs + 1] = torch.from_numpy(
                 cu_num_tokens
             ).to(dtype=torch.int32, device=self.device)
+            # [DyCP] v57 根因修复: 传入 num_dycp_reqs=num_cp_request, 让
+            # block_table.compute_slot_mapping 区分 CP(DyCP长)请求与前缀与
+            # DP(短)请求后缀 -> 仅对 CP 请求施加 interleave sharding, 短请求走
+            # simple slot(避免被 interleave 掩成 PAD_ID=-1 导致 KV 不写 block).
             self.input_batch.block_table.compute_slot_mapping(
-                num_reqs, pre_pcp_qsl, pre_pcp_positions)
+                num_reqs, pre_pcp_qsl, pre_pcp_positions,
+                num_dycp_reqs=num_cp_request)
         else:
             # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
             # Use blocking .to(device) to ensure data lands on GPU before PCP
@@ -3259,7 +3264,7 @@ class NPUModelRunner(GPUModelRunner):
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 self.cpu_slot_mapping = blk_table.slot_mapping.cpu[:maybe_pcp_full_tokens]
-                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]          
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 if not self.use_prefill_cp:

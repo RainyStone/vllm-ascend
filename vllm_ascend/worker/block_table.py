@@ -232,32 +232,112 @@ class BlockTable:
         num_reqs: int,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
+        num_dycp_reqs: int = 0,
     ) -> None:
+        """计算 slot_mapping。
+
+        [DyCP] 混合 batch(长CP请求 + 短DP请求)根因修复:
+        num_dycp_reqs 指明本 batch 前 num_dycp_reqs 个 request 行属于 DyCP(CP长)请求,
+        其后的 request 行属于纯 DP(短)请求, 仅 CP 请求可用 interleave 切分语义.
+
+        详见下方两段式算子调用注释.
+        """
         num_tokens = positions.shape[0]
         # [DyCP] dycp 与 pcp/dcp 互斥: dycp>1 时用 dycp 维度(对齐 CPU 版
         # compute_slot_mapping_with_dycp), 否则用 pcp*dcp。让 dycp 走 GPU 算子
         # 路径(避开 CPU+commit 的 buffer 分歧)。
         if self.dycp_world_size > 1:
-            total_cp_world_size = self.dycp_world_size
-            total_cp_rank = self.dycp_rank
+            # [DyCP] !IMPORTANT! 混合 batch 根因修复(v57).
+            #
+            # 问题根因:
+            #   此前 dycp 路径直接复用上游 GPU 算子 _compute_slot_mapping_kernel,
+            #   该算子对 batch 内"所有" token 一律施加 CP interleave 落点掩码:
+            #       is_local = (voff // interleave) % world == rank
+            #   它无法区分 DyCP(CP长)请求与 DP(短)请求. 当短请求落到 suppressor
+            #   (dycp_rank=1)时, 其小 position(如 [0,1,2,3,4])在 interleave 下
+            #   落在 rank0 的分片内 -> is_local=False -> 被置成 PAD_ID(-1) ->
+            #   短请求 KV 完全不写入 block; 但 scheduler 仍按 block_id 通知 D 拉取
+            #   -> D 端拉到空/零 block -> 输出与 prompt 无关的逐字相同乱文
+            #   (如 "vegetables"); owner(rank0)因命中本 rank 分片而恰好正确.
+            #   (probe/dp-write 实证: owner slot=[256..260]✓, suppressor slot=[-1]*5✗)
+            #
+            # 修复原理(两段式 GPU 算子, 全程 GPU buffer, 对齐 CPU 版
+            #   compute_slot_mapping_with_dycp 的 dycp_mask=req_indices<num_dycp_reqs
+            #   切分语义, 但不引入 CPU+commit 的 buffer 分歧):
+            #   步骤1 全量 simple 段(WORLD=1, RANK=0):
+            #     给"所有" request 算非-interleave 的简单 slot:
+            #       block_numbers * block_size + (pos % block_size)
+            #     短(DP)请求在此步得到最终正确 slot; DyCP 请求此处先占位(步骤2覆写).
+            #   步骤2 仅 DyCP 前缀段(WORLD=dycp_world_size, RANK=dycp_rank):
+            #     只对前 num_dycp_reqs 个 request(CP长请求行)用 interleave sharding
+            #     覆写其 slot; 短请求行不被触及, 保持步骤1 的 simple slot.
+            #
+            # 边界与断言:
+            #   步骤1 用 WORLD=1 使 is_local 恒成立的等价前提是
+            #     block_size <= cp_kv_cache_interleave_size(WORLD=1 时 voff=pos%block_size
+            #     < block_size <= interleave -> local_offset==voff == 简单 DP 偏移),
+            #   故此处置断言守卫。纯长/纯短 batch 同样适用:
+            #     纯长(num_dycp_reqs==num_reqs)时步骤2覆盖整段<=>原单次interleave;
+            #     纯短(num_dycp_reqs==0)时仅步骤1, 步骤2 跳过.
+            assert self.block_size <= self.cp_kv_cache_interleave_size, (
+                "DyCP 两段式 slot 修复要求 block_size("
+                f"{self.block_size}) <= cp_kv_cache_interleave_size("
+                f"{self.cp_kv_cache_interleave_size}), 否则 WORLD=1 simple 段不"
+                "等价于简单 DP 偏移, 需改用专用 simple 算子."
+            )
+            # 步骤1: 全量 simple(WORLD=1) — 短(DP)请求得最终 slot; DyCP 请求先占位.
+            _compute_slot_mapping_kernel[(num_reqs + 1,)](
+                num_tokens,
+                self.max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self.block_table.gpu,
+                self.block_table.gpu.stride(0),
+                self.block_size,
+                self.slot_mapping.gpu,
+                TOTAL_CP_WORLD_SIZE=1,
+                TOTAL_CP_RANK=0,
+                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+                PAD_ID=PAD_SLOT_ID,
+                BLOCK_SIZE=1024,
+            )
+            # 步骤2: 仅前 num_dycp_reqs 个 request(CP长请求)用 DyCP interleave 覆写;
+            #   grid=(num_dycp_reqs+1,) 含一个 pad program(只 pad [num_tokens,max) 边外区,
+            #   与步骤1 的 pad program 等价重复, 无副作用).
+            if num_dycp_reqs > 0:
+                _compute_slot_mapping_kernel[(num_dycp_reqs + 1,)](
+                    num_tokens,
+                    self.max_num_batched_tokens,
+                    query_start_loc,
+                    positions,
+                    self.block_table.gpu,
+                    self.block_table.gpu.stride(0),
+                    self.block_size,
+                    self.slot_mapping.gpu,
+                    TOTAL_CP_WORLD_SIZE=self.dycp_world_size,
+                    TOTAL_CP_RANK=self.dycp_rank,
+                    CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+                    PAD_ID=PAD_SLOT_ID,
+                    BLOCK_SIZE=1024,
+                )
         else:
             total_cp_world_size = self.pcp_world_size * self.dcp_world_size
             total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        _compute_slot_mapping_kernel[(num_reqs + 1,)](
-            num_tokens,
-            self.max_num_batched_tokens,
-            query_start_loc,
-            positions,
-            self.block_table.gpu,
-            self.block_table.gpu.stride(0),
-            self.block_size,
-            self.slot_mapping.gpu,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-            PAD_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=1024,
-        )
+            _compute_slot_mapping_kernel[(num_reqs + 1,)](
+                num_tokens,
+                self.max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self.block_table.gpu,
+                self.block_table.gpu.stride(0),
+                self.block_size,
+                self.slot_mapping.gpu,
+                TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+                TOTAL_CP_RANK=total_cp_rank,
+                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+                PAD_ID=PAD_SLOT_ID,
+                BLOCK_SIZE=1024,
+            )
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -487,12 +567,15 @@ class MultiGroupBlockTable:
         positions: torch.Tensor,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
+        num_dycp_reqs: int = 0,
     ) -> None:
+        # [DyCP] num_dycp_reqs 透传给底层 BlockTable.compute_slot_mapping,
+        # 见其内两段式修复注释(v57 混合 batch 短请求 slot 被掩成 PAD 根因).
         for i, block_table in enumerate(self.block_tables):
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
-                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions, num_dycp_reqs=num_dycp_reqs)
 
     def compute_slot_mapping_draft(
         self,
