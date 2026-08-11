@@ -1536,7 +1536,16 @@ class MooncakeConnectorScheduler:
             _emitted_send: list[str] = []
             for req_id in self._reqs_need_send:
                 req_cp_ranks = self._reqs_need_send_cp_ranks.get(req_id)
-                if (req_cp_ranks is not None and cp_rank is not None
+                # [DyCP] 短请求(req_cp_ranks 长度==1)只在本 engine prefill, 本 engine 即
+                # 唯一 KV 持有者, 必须直接 emit send, 不能按 cp_rank 过滤.
+                # 根因: send 过滤 `cp_rank in req_cp_ranks` 是为长请求(多 cp_rank 协作,
+                #   每个 cp_rank engine 只 emit 自己那段)设计; 短请求单 cp_rank 用同样
+                #   过滤会因 scheduler_output.cp_rank 与 request.cp_ranks 不一致而恒 False
+                #   (短请求落到 cp_rank!=0 的 engine 时, request.cp_ranks=[1] 而 build_connector_meta
+                #   取到的 cp_rank=0) -> 永不 emit -> KV 未真正发出 -> D 拉空/错 -> garbage.
+                #   长请求靠下方分支B(req_id in cp_rank_to_req_id)emit, 不依赖 cp_rank, 不受影响.
+                is_short_req = req_cp_ranks is not None and len(req_cp_ranks) == 1
+                if is_short_req or (req_cp_ranks is not None and cp_rank is not None
                         and cp_rank in req_cp_ranks):
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
                     _emitted_send.append(req_id)
