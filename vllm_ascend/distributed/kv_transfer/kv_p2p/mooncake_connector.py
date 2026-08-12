@@ -1510,13 +1510,18 @@ class MooncakeConnectorScheduler:
         meta = MooncakeConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        # [DyCP] cp_req_id(旧名 cp_rank_to_req_id)为本 step 的长 CP 请求 req_id 列表,
-        # 由 CPAwareScheduler 在 _build_kv_connector_meta(修法A)内、于 build_connector_meta
-        # 之前填好, 已根治"赋值晚于消费"的时序 bug(此前因时序倒置恒为 None)。无 CP 长请求
-        # 时为 None, `in` 运算需防 None。下方 recv 过滤(②)/reqs_in_batch 过滤(③)据此限定
-        # 仅处理 CP 长请求: 当前配置(P 开 DyCP、D 不开)下 P 侧 _reqs_need_recv/_reqs_in_batch
-        # 均为空, 故两过滤本步不触发、行为与修法A 前一致; 待"D 也开 DyCP/P 侧 pull"时按
-        # 设计生效。
+        # [DyCP] cp_req_id(旧名 cp_rank_to_req_id)为本 step 的长 CP 请求 req_id 列表。
+        # B2 回退后: cp_aware 不再以覆写 _build_kv_connector_meta 提前填 cp_req_id
+        # (修法A 实测会激活下方 reqs_in_batch 过滤③, 致生产者(P)侧把长 CP 请求塞入
+        # meta.reqs_in_batch 却不进 requests_to_send, 滞留 worker 的 reqs_to_process 不清除,
+        # 锁死 soft-rollback idle 死循环、最终 sample_tokens 超时服务挂, 见 v61)。已回退,
+        # cp_req_id 在 build_connector_meta 时重新恒为 dataclass 默认 None->[], 下方 ②recv
+        # /③reqs_in_batch 两过滤据此保持惰性(不触发), 行为回到 v60 的 8/8 全对。
+        # TODO [DyCP] 待根治: ②③ 的 CP 范围限定语义在当前配置靠时序惰性才正确; 待
+        # "D 也开 DyCP / P 侧 pull"真正需要 ②③ 生效时, 须连 cp_req_id 赋值时序、
+        # 生产者(走 kv_send_thread, 不应 add_req_to_process)/消费者(start_load_kv 拉收)
+        # 角色区分一并重新设计, 届时 ③ 需仅对消费者生效或改由 requests_to_send 驱动。
+        # `in` 运算需防 None: 无 CP 长请求时 cp_req_id 为 None。
         _cp_req_id = scheduler_output.cp_req_id or []
         # [DyCP] dycp_size>1 时按 cp_rank 过滤发出，发出后必须从跟踪表移除，
         # 否则同一 req 每 step 都会被重新塞进 requests_to_send / add_new_req，
