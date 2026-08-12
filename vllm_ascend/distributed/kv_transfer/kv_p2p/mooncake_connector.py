@@ -1510,9 +1510,14 @@ class MooncakeConnectorScheduler:
         meta = MooncakeConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        # [DyCP] cp_rank_to_req_id 在本 step 无 CP 长请求时为 None（cp_aware_scheduler
-        # 输出 cp_req_ids if cp_req_ids else None），`in` 运算需防 None。
-        _cp_rank_to_req_id = scheduler_output.cp_rank_to_req_id or []
+        # [DyCP] cp_req_id(旧名 cp_rank_to_req_id)为本 step 的长 CP 请求 req_id 列表,
+        # 由 CPAwareScheduler 在 _build_kv_connector_meta(修法A)内、于 build_connector_meta
+        # 之前填好, 已根治"赋值晚于消费"的时序 bug(此前因时序倒置恒为 None)。无 CP 长请求
+        # 时为 None, `in` 运算需防 None。下方 recv 过滤(②)/reqs_in_batch 过滤(③)据此限定
+        # 仅处理 CP 长请求: 当前配置(P 开 DyCP、D 不开)下 P 侧 _reqs_need_recv/_reqs_in_batch
+        # 均为空, 故两过滤本步不触发、行为与修法A 前一致; 待"D 也开 DyCP/P 侧 pull"时按
+        # 设计生效。
+        _cp_req_id = scheduler_output.cp_req_id or []
         # [DyCP] dycp_size>1 时按 cp_rank 过滤发出，发出后必须从跟踪表移除，
         # 否则同一 req 每 step 都会被重新塞进 requests_to_send / add_new_req，
         # 导致 worker 侧 add_not_transfer_request/add_delayed_request 反复触发、
@@ -1521,7 +1526,7 @@ class MooncakeConnectorScheduler:
         _emitted_recv: list[str] = []
         for req_id, (req, block_ids, num_external_tokens) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            if self.dycp_size > 1 and req_id not in _cp_rank_to_req_id:
+            if self.dycp_size > 1 and req_id not in _cp_req_id:
                 continue
 
             # For the case where there are no remote blocks to pull
@@ -1557,7 +1562,7 @@ class MooncakeConnectorScheduler:
                 self._reqs_need_send_cp_ranks.pop(req_id, None)
             _emitted_batch: list[str] = []
             for req_id in self._reqs_in_batch:
-                if req_id in _cp_rank_to_req_id:
+                if req_id in _cp_req_id:
                     meta.reqs_in_batch.add(req_id)
                     _emitted_batch.append(req_id)
             for req_id in _emitted_batch:
