@@ -1388,6 +1388,12 @@ class MooncakeConnectorScheduler:
         )
 
         self.dycp_size = vllm_config.parallel_config.dycp_size
+        # [DyCP] 本 engine 在 DyCP 组内的 cp_rank, 部署时确定、稳定(与 CPAwareScheduler
+        # 同公式: data_parallel_rank % dycp_size)。build_connector_meta 据此判断本 engine
+        # 是否 emit 请求 KV, 不再依赖 scheduler_output.cp_rank(后者因 base schedule 在
+        # super().schedule() 内 build_connector_meta(891) 之后才由 cp_aware 设值,
+        # 时序倒置恒取 dataclass 默认 0)。
+        self.cp_rank = vllm_config.parallel_config.data_parallel_rank % self.dycp_size
 
         # Handshake base port
         self.side_channel_port = (
@@ -1532,24 +1538,24 @@ class MooncakeConnectorScheduler:
 
         # Clear the list once workers start the transfers
         if self.dycp_size > 1:
-            cp_rank = getattr(scheduler_output, 'cp_rank', None)
+            # [DyCP] 读 connector 自持的 cp_rank(见 __init__), 不再依赖 scheduler_output.cp_rank
+            # (后者因 base schedule 在 super().schedule() 内 build_connector_meta(891) 之后才由
+            # cp_aware 设值, 时序倒置恒取默认 0, 致短请求落 cp_rank1 engine 时 cp_rank in
+            # req_cp_ranks 恒 False 不 emit -> S0 garbage; 修法 b 后 cp_rank 正确, 短请求走通用
+            # 过滤即可, 无需 is_short_req 特判)。
+            cp_rank = self.cp_rank
             _emitted_send: list[str] = []
             for req_id in self._reqs_need_send:
                 req_cp_ranks = self._reqs_need_send_cp_ranks.get(req_id)
-                # [DyCP] 短请求(req_cp_ranks 长度==1)只在本 engine prefill, 本 engine 即
-                # 唯一 KV 持有者, 必须直接 emit send, 不能按 cp_rank 过滤.
-                # 根因: send 过滤 `cp_rank in req_cp_ranks` 是为长请求(多 cp_rank 协作,
-                #   每个 cp_rank engine 只 emit 自己那段)设计; 短请求单 cp_rank 用同样
-                #   过滤会因 scheduler_output.cp_rank 与 request.cp_ranks 不一致而恒 False
-                #   (短请求落到 cp_rank!=0 的 engine 时, request.cp_ranks=[1] 而 build_connector_meta
-                #   取到的 cp_rank=0) -> 永不 emit -> KV 未真正发出 -> D 拉空/错 -> garbage.
-                #   长请求靠下方分支B(req_id in cp_rank_to_req_id)emit, 不依赖 cp_rank, 不受影响.
-                is_short_req = req_cp_ranks is not None and len(req_cp_ranks) == 1
-                if is_short_req or (req_cp_ranks is not None and cp_rank is not None
+                if (req_cp_ranks is not None and cp_rank is not None
                         and cp_rank in req_cp_ranks):
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
                     _emitted_send.append(req_id)
                 elif req_id in _cp_rank_to_req_id:
+                    # [DyCP] 死代码: cp_rank_to_req_id 仍受同一时序 bug 影响
+                    # (scheduler_output 在 build_connector_meta 时恒为默认 None->[]),
+                    # 此分支永不命中; 长请求已靠上方 cp_rank in req_cp_ranks emit。
+                    # cp_rank_to_req_id 待后续根治。
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
                     _emitted_send.append(req_id)
             # 已发出的 send 项立即清理，避免下个 step 重复发出（见上方注释）。
