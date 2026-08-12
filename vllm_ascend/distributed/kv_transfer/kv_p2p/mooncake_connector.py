@@ -1551,13 +1551,6 @@ class MooncakeConnectorScheduler:
                         and cp_rank in req_cp_ranks):
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
                     _emitted_send.append(req_id)
-                elif req_id in _cp_rank_to_req_id:
-                    # [DyCP] 死代码: cp_rank_to_req_id 仍受同一时序 bug 影响
-                    # (scheduler_output 在 build_connector_meta 时恒为默认 None->[]),
-                    # 此分支永不命中; 长请求已靠上方 cp_rank in req_cp_ranks emit。
-                    # cp_rank_to_req_id 待后续根治。
-                    meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
-                    _emitted_send.append(req_id)
             # 已发出的 send 项立即清理，避免下个 step 重复发出（见上方注释）。
             for req_id in _emitted_send:
                 self._reqs_need_send.pop(req_id, None)
