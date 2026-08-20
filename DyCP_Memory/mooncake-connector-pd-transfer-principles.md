@@ -1,14 +1,15 @@
 ---
 name: mooncake-connector-pd-transfer-principles
-description: vllm-ascend mooncake_connector.py P/D KV传输原理——双信道(ZMQ握手+mooncake RDMA)、逐层地址模型、start_load_kv链路、PCP/DCP两级CP切分(split_metadata)、TP冗余拉取与reformat；扁平dycp_size适配后CP切分(_get_kv_split_metadata起)未迁为待适配主战场
-metadata:
+description: vllm-ascend mooncake_connector.py P/D KV传输原理——双信道(ZMQ握手+mooncake RDMA)、逐层地址模型、start_load_kv链路、PCP/DCP两级CP切分(split_metadata)、TP冗余拉取与reformat；domain版CP切分已迁(_get_kv_split_metadata折叠dycp进pcp_size维度+cp_rank过滤+domain_port_base+done计数)，layerwise版未迁
+metadata: 
   node_type: memory
   type: reference
+  originSessionId: 787ad7c6-b431-44b4-a3ad-07cc1a078022
 ---
 
 # mooncake_connector P/D KV 传输原理
 
-本文记 mooncake_connector 的 P/D KV cache 跨节点拉取**机制本身**，基于代码取证（见 [[vllm-debug-evidence-based]]）。当前代码已有 PCP/DCP 两级 CP 切分（`ReqMeta` 含 `remote_pcp_size`/`remote_dcp_size`/`remote_ptp_size`）与 domain 方案引入的扁平 `dycp_size`；版本无关的传输链路原理见正文第 1–6 节，扁平 dycp 的待适配现状见末节。PCP/DCP 的 Q/KV 切分/slot_mapping/scheduler 块膨胀原理见 [[pcp-dcp-kv-sharding]]，DyCP 总体方案见 [[dycp-design-principles]]，本文只讲连接器**传输链路**。
+本文记 mooncake_connector 的 P/D KV cache 跨节点拉取**机制本身**，基于代码取证（见 [[vllm-debug-evidence-based]]）。版本无关的传输链路原理见正文第 1–6 节，domain 方案 dycp 切分实现见末节（§8，已迁）。PCP/DCP 的 Q/KV 切分/slot_mapping/scheduler 块膨胀原理见 [[pcp-dcp-kv-sharding]]，DyCP 总体方案见 [[dycp-design-principles]]，domain 方案中心化 DyCP 见 [[domain-dycp-design-principles]]，本文只讲连接器**传输链路**。
 
 ## 1. 定位与三角色架构
 
@@ -63,7 +64,9 @@ mooncake TransferEngine 实现的 vLLM v1 KV connector，做 P(prefill/producer)
 2. `_get_group_pulls_metadata` → 每 remote port 配一组 `GroupPull`（group_id/remote_tp_offset/num_group_pulls/prefill_pp_rank/is_group_transfer_end）
 3. `kv_recv_thread.add_request` 入队 → `_transfer_kv_cache_all_groups`
 
-## 6. CP 切分原理（核心，`_get_kv_split_metadata`，基于 PCP/DCP 两级 CP）— 待适配主战场
+## 6. CP 切分原理（核心，`_get_kv_split_metadata`，基于 PCP/DCP 两级 CP 的基础）
+
+> 本节是两级 CP 切分的基础机制；domain 方案在此基础上把 dycp 维度折叠进来（§8，**已迁**）。
 
 1. **退化**：两端 CP 都为 1（`remote_pcp×remote_dcp×self.pcp×self.dcp == 1`）→ 单 port 直拉，用 `_get_remote_rank`（单 CP）/`_get_hybrid_remote_rank_group_pulls`（hybrid MLA）选一个远端 rank。
 2. **CP 组拓扑**（`get_cp_group_meta`）：按 kv_head 分组（MLA/sparse 视作单 head group），P/D 两端各建 cp_group，len = `pcp_size × dcp_size`，组内元素 = `port_base + pcp_rank_offset + dcp_rank_offset + kv_head_offset`。
@@ -79,8 +82,17 @@ mooncake TransferEngine 实现的 vLLM v1 KV connector，做 P(prefill/producer)
 - 拉完**仅 `is_group_transfer_end` 的 group 才 reformat**：`tp_num_need_pulls > 1` 时远端 KV 按 `[block, split, token, head, dim]` 传回，需 transpose 还原成 `[block, token, split, head, dim]`；按需做 cat / NZ 格式转换（hybrid MLA 走 torch 路径 `reformat_kv_cache_hybrid_linear_torch`，普通走 fused op 或慢路径 `reformat_kv_cache`）。
 - 完成后向 P 端发 DONE_RECVING，P 端计数到 `remote_port_send_num` 后释放延迟 block。
 
-## 8. 扁平 dycp 适配现状（待适配，不含方案，细节逐步对齐）
+## 8. domain 扁平 DyCP 切分实现（已迁，`_get_kv_split_metadata`，mooncake_connector.py:1361-1648）
 
-domain 方案引入扁平 `dycp_size`，与 PCP 互斥。当前代码相对两级 CP 版本的改动：`ReqMeta` 增 `local_dycp_ranks`/`remote_dycp_ranks`（按 CP rank 分组 block_ids）；`update_state_after_alloc` 在 blocks 为 list 时按 cp_ranks 逐个取 unhashed block_ids（两级 CP 版本统一 `get_unhashed_block_ids_all_groups`）；新增 `dycp_port_base`、`_reqs_need_send_cp_ranks`、`clear_reqs_need_recv`；`build_connector_meta` 按 `scheduler_output.cp_rank_to_req_id` 过滤，只为本 cp_rank 相关 req 构建 meta；SendingThread 直接收 `handshake_port`，去掉 `device_index` 计算。
+domain 方案把"DyCP/domain 维度"**折叠进旧 pcp_size 维度**复用两级 CP 拓扑函数，迁移已完成（推翻此前"未迁"判断）。以下只针对 vllm-ascend kv_p2p 的 `mooncake_connector.py`（domain 侧主力）；layerwise 版（`mooncake_layerwise_connector.py`）仍走 `utils.py` 两级 PCP/DCP，**未接 domain/dycp，与 domain DyCP 不兼容**。
 
-**待适配断点**：`_get_kv_split_metadata` 及其后所有方法（CP block 切分配对）**尚未按新 block_ids 结构改造**，留 TODO："此函数及其以后的修改都没有迁过来，由于 block_ids 数据结构变化，后期需结合 domain 方案代码及新 block_ids 结构修改"。适配目标：把第 6 节基于 PCP/DCP 两级 CP 的切分红程序改造为支持 **扁平 `dycp_size` + 按 cp_ranks 分组 block_ids 的新结构**。
+1. ReqMeta 增 `local_dycp_ranks`/`remote_dycp_ranks`(按 cp rank 分组 block_ids)、`remote_pcp_size`/`remote_dcp_size`/`remote_ptp_size`、`remote_multi_nodes_meta_mapping`、`num_prompt_blocks`(:80-96)。`add_new_req` 用 `req.cp_ranks` 填 `local_dycp_ranks`(:1045)，来源 `request_finished` 回的 `kv_transfer_params`(:1104-1119)。
+2. 折叠：`remote_pcp_size=len(remote_dycp_ranks)`、`local_pcp_size=len(local_dycp_ranks)`(:1380-1381)；`local_pcp_rank=self.pcp_rank+get_dycp_group().rank_in_group`(:1373)；本 rank 不在 `local_dycp_ranks` 直接返回空(:1374-1376)。约束 `assert not(pcp>1 and dycp>1)`、`assert not(pp>1 and pcp>1)`(:1162,1166)。
+3. port_base 切换：DyCP 开(`dp_per_domain>1`)用 `domain_port_base=kv_port+domain_parallel_rank*tp*pp*dp_per_domain`(:948,1452,1111)，否则 `side_channel_port`(旧版只用后者)。`handshake_port=side_channel_port+(pp_rank+pcp_rank)*tp_size+tp_rank`(:1177)。
+4. CP 拓扑 `get_cp_group_meta`(:1421-1445):对每 kv_head_group 枚举(pcp_rank∈dycp索引,dcp_rank)建 cp_group，`port=port_base+dcp_rank+tp_size*(pcp_rank+dycp_rank_select)+…`，`dycp_rank_select=0 if pcp_size>1 else dycp_ranks[0]`(:1436)——domain 折叠点，旧版无。
+5. D↔P 配对(:1447-1498):旧 `local_remote_block_port_mappings` 取模配对未改；scheduler 按 `scheduler_output.cp_rank`/`cp_rank_to_req_id` 仅下与本 dycp rank 相关 req(`build_connector_meta`:1037-1061)。
+6. block 切分(:1576-1641):`num_prompt_blocks` 按 `remote_cp_size` 均摊余数前排扣 prefix hit；本 rank 取 `cp_rank%local_cp_size==local_cp_rank`；prefill_dycp 时 `meta_remote_block_ids` 是按 dycp rank 索引 list-of-list 按同过滤取子集(:1603-1608)。
+7. 跨节点 host:`remote_multi_nodes_meta_mapping[str(dycp_port)]` 反查 host(:1507)支持域内跨物理节点。
+8. done 信号:新增 `_send_done_signal_to_free_remote_port`(:449-464)——`decode_cp_size==1` 只 tp_rank0 发；>1 用 `side_channel_port!=local_handshake_port` 判 owner；未拉过的端口也发 done 防泄漏。P 端 `KVCacheSendingThread` 按 `remote_port_send_num[port]["num"]` 计数到齐才释放(:267-274)，兼容域内多 dycp rank+跨节点。
+9. TP 冗余/reformat 未变:`tp_num_need_pulls=num_d_block_heads//num_p_block_heads`(MLA=1)，`inner_offset`/`inner_block_len` 切 head 段，`is_group_transfer_end` 触发 cat/nz reformat(:565-578)。
+10. 残留 TODO:`local_remote_block_port_mapping` 每次重算(:1520)、被注释空 task 短路(:1678)、被注释旧 port_base 块(:1453)。功能完整可用。

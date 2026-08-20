@@ -1,6 +1,6 @@
 ---
 name: dycp-design-principles
-description: DyCP（Dynamic Context Parallel）方案原理：长短分流、CP子组拓扑/路由、CPAwareScheduler子组共识、DP全组状态机、混合batch重排与计算布局、CP切分与MLA-CP attention机制
+description: DyCP（Dynamic Context Parallel）方案原理：长短分流、CP子组拓扑/路由、CPAwareScheduler子组共识（all_gather_object by req_id）、soft_rollback/emit-as-NEW/降级等调度回滚语义、DP全组状态机、混合batch重排与计算布局、CP切分与MLA-CP attention机制。调度回滚全量语义见 dycp-scheduler-rollback-semantics
 metadata: 
   node_type: memory
   type: reference
@@ -23,7 +23,10 @@ DyCP = Dynamic Context Parallel：在 **DP（数据并行）** 之上按请求�
 
 ## 3. 调度与子组共识（CPAwareScheduler）
 - `num_cp_seqs > 0` 时选用 `CPAwareScheduler`。
-- `schedule()` = 基类调度 + CP 元数据标注 + **逐拍子组共识 all_reduce（MIN）**：三态 `SCHEDULED=2 / NOT_SCHEDULED=1 / PREEMPTED=0`，min≥SCHEDULED→确认共同执行，min≥NOT_SCHEDULED→软回滚（重入队不重置 KV）。作用：让子组各 rank 对"本拍某 CP 请求是否真调度"达成一致，防错位。
+- `schedule()` = 基类调度 + CP 元数据标注 + **逐拍子组共识 all_gather_object（按 req_id 取 MIN）**：各 rank 把 `{req_id: status}` dict（含保留键 `__scheduled_cp__` 标本步是否调度到长，即旧 `local_has_cp` 改名为 `local_scheduled_cp`）经子组内一次 gloo `all_gather_object` 交换，本地按 req_id 取三态 MIN `SCHEDULED=2 / NOT_SCHEDULED=1 / PREEMPTED=0`，min≥SCHEDULED→confirmed 同执行、min≥NOT_SCHEDULED→软回滚、min==PREEMPTED→硬回滚。作用：让子组各 rank 对"本拍某 CP 请求是否真调度"达成一致。
+- **为何按 req_id 而非槽位 position（object 化根因）**：旧固定槽位 tensor+`all_reduce` MIN 对齐完全依赖各 rank `sorted(active_ids)` 同 position=同 req_id；但 `add_request_async` 子组内串行 `await` 到达有窗口，窗口内两端 active 集合不一致→同 position 非同一 req→共识把不同 req 状态投到同一槽 MIN→position 错位（确定性注入开关只是把这个微秒级到达窗口放大成必现，关闭注入后窗口仍在、仍可偶发同类错位卡死）。按 req_id 合并不依赖 position、并集无截断、不要求各端同 N/同 key；缺 key 的 req 按 `NOT_SCHEDULED` 取（不误判 `PREEMPTED`，仅显式投 PREEMPTED 才算硬回滚），故一端 SCHEDULED/另一端没到→MIN=NOT_SCHEDULED→软回滚，语义与"peer 没排到它"一致。
+- **阶段2 一并合并**：`__scheduled_cp__` 的全子组 MIN 即 `subgroup_all_schedule_cp_request`（=1 当且仅当子组所有端本拍都调度到长），驱动"含长端降级对齐两端 num_cp 同 0"（见 dycp-scheduler-rollback-semantics）。
+- 空拍端也必须进共识（发 `{"__scheduled_cp__":0}` 参与gather），否则忙端共识一直等空端→hang（旧机制下空拍端会跳过共识调用、忙端仍调共识，致忙端在集合通信上永久等待；object 版空拍端发 {"__scheduled_cp__":0} 参与同一次 gather 根治）。CP 完成/回滚全量语义见 [[dycp-scheduler-rollback-semantics]]。
 - CP 完成时也走**子组内**共识，不涉及全 DP。
 
 ## 4. DP 全组状态机（run_busy_loop + sync_dp_state）
@@ -47,8 +50,8 @@ DyCP = Dynamic Context Parallel：在 **DP（数据并行）** 之上按请求�
   - `SchedulerOutput.num_cp_request` = 前缀 CP 数量。
   - `PCPManager` 用 `num_scheduled_tokens[:num_cp_request]` 对 CP 区做 token 切分（`update_tokens_for_pcp`）。
   - `build_batch_req_id_to_cp_size` 用 `req_index < num_cp_request` 区分 CP/短。
-  - attention / positions / slot_mapping / 子组采样对齐都基于这个"前 CP、后短"的连续布局：CP 区走切分 query + 子组共识/采样对齐；短区走普通 decode。
-- **整体链路**：客户端路由长→CP子组 / 短→单引擎 → 各引擎 `CPAwareScheduler.schedule` 出 batch（可能长短混排）→ `reorder_batch_to_split_cp_and_normal` 把 CP 排到前 → PCPManager 按 num_cp_request 前缀对 CP 区切分/共识、短区普通 decode → 逐拍全 DP metadata all_reduce 强制所有引擎对齐。
+  - attention / positions / slot_mapping / 子组采样对齐都基于这个"前 CP、后短"的连续布局：CP 区走切分 query + 子组共识（all_gather_object by req_id，见§3）/采样对齐；短区走普通 decode。
+- **整体链路**：客户端路由长→CP子组 / 短→单引擎 → 各引擎 `CPAwareScheduler.schedule` 出 batch（可能长短混排）→ `reorder_batch_to_split_cp_and_normal` 把 CP 排到前 → PCPManager 按 num_cp_request 前缀对 CP 区切分、子组共识用 all_gather_object by req_id（见§3）、短区普通 decode → 逐拍全 DP metadata all_reduce 强制所有引擎对齐。
 
 ## 6. CP 切分与 MLA-CP attention 机制（vllm-ascend）
 
