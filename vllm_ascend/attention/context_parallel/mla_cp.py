@@ -17,6 +17,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
 from vllm_ascend.device.device_op import DeviceOperator
 
 # isort: off
@@ -1430,7 +1431,9 @@ def split_attn_metadata(
         prefill=dp_prefill,
         num_dycp_reqs=0,
     )
-    dp_cc, _, _, _ = generate_dp_chunked_metadata(dp_metadata, chunked_prefill_workspace_size, block_size)
+    dp_cc, _, _, _ = generate_dp_chunked_metadata(
+        dp_metadata, chunked_prefill_workspace_size, block_size,
+    )
     dp_metadata.prefill.chunked_context = dp_cc
 
     return dycp_metadata, dp_metadata
@@ -1584,6 +1587,18 @@ def generate_dp_chunked_metadata(
     chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
     cu_seq_lens_cpu = torch.zeros(num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True)
     torch.cumsum(chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
+    # 修复: 补算 chunk_actual_seq_lengths_kv_list。这是 ChunkedContextMetadata 的必填
+    # 字段(mla_v1.py:119 类定义 ChunkedContextMetadata 有 chunk_actual_seq_lengths_kv_list:
+    # list[list[int]]), mla_v1.py:523 的正确构造路径会逐 chunk 对 chunk_seq_lens 做
+    # cumsum 算出它并传入; 本函数(generate_dp_chunked_metadata)是 DyCP 路径下的对应
+    # 实现, 之前漏算漏传, 致走到 chunked context 路径(长请求 chunked prefill)时
+    # ChunkedContextMetadata.__init__() missing 1 required positional argument:
+    # 'chunk_actual_seq_lengths_kv_list' TypeError 崩。算法与 mla_v1.py:523 一致:
+    # 每个 chunk 对 chunk_seq_lens[i] 逐 prefill 累计 KV 序列长度。
+    chunk_actual_seq_lengths_kv_list = [
+        torch.cumsum(chunk_seq_lens[i], dim=0).tolist()
+        for i in range(num_chunks)
+    ]
     return ChunkedContextMetadata(
         cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(device, non_blocking=True),
         starts=chunk_starts.pin_memory().to(device, non_blocking=True),
@@ -1593,6 +1608,7 @@ def generate_dp_chunked_metadata(
         chunk_seq_lens_npu=chunk_seq_lens.npu(),
         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
         workspace=chunked_metadata.workspace,
+        chunk_actual_seq_lengths_kv_list=chunk_actual_seq_lengths_kv_list,
     ), context_lens_cpu, max_context_chunk, num_chunks
 
 def generate_dycp_chunked_metadata(
@@ -1607,10 +1623,12 @@ def generate_dycp_chunked_metadata(
     cp_virtual_block_size: int,
     cp_local_block_size: int,
 ):
-    chunked_context_metadata, context_lens_cpu, max_context_chunk, num_chunks = generate_dp_chunked_metadata(attn_metadata, chunked_prefill_workspace_size, block_size)
+    chunked_context_metadata, context_lens_cpu, max_context_chunk, num_chunks = generate_dp_chunked_metadata(
+        attn_metadata, chunked_prefill_workspace_size, block_size,
+    )
     if chunked_context_metadata is None:
         return None
-
+    chunk_seq_tot_list = chunked_context_metadata.seq_tot
     num_prefills = attn_metadata.num_prefills
     num_decodes = attn_metadata.num_decodes
     long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
@@ -1665,6 +1683,16 @@ def generate_dycp_chunked_metadata(
         chunk_seq_lens=chunked_context_metadata.chunk_seq_lens,
         chunk_seq_lens_npu=chunked_context_metadata.chunk_seq_lens_npu,
         workspace=chunked_context_metadata.workspace,
+        # 修复: 补传 chunk_actual_seq_lengths_kv_list。CPChunkedContextMetadata
+        # (common_cp.py:63 类定义)有此必填字段 chunk_actual_seq_lengths_kv_list:
+        # list[list[int]], 之前本构造点漏传, 致 generate_dycp_chunked_metadata 走到
+        # (长请求 DyCP chunked prefill)时 CPChunkedContextMetadata.__init__() 
+        # missing 'chunk_actual_seq_lengths_kv_list' TypeError 崩。本字段值直接透传
+        # 上游 generate_dp_chunked_metadata 已修复构造的 chunked_context_metadata,
+        # 与本函数对 cu_seq_lens/chunk_seq_lens 等字段透传方式一致(P 版的
+        # chunk_actual_seq_lengths_kv_list 与 Dp 版同源, 均为逐 chunk chunk_seq_lens
+        # cumsum, 由上游统一算出)。
+        chunk_actual_seq_lengths_kv_list=chunked_context_metadata.chunk_actual_seq_lengths_kv_list,
         padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.npu(),
         padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
         local_context_lens_allranks=local_context_lens_allranks.tolist(),
