@@ -2304,7 +2304,7 @@ class MooncakeConnectorWorker:
                     final_block_idx = len(remote_block_nums)
                 remote_block_nums.append(block_num)
 
-        # [DyCP] remote_block_ids 结构: 发送端(P)已在 cp_aware_scheduler 的
+        # [DyCP] remote_block_ids 结构: 发送端(P)已在 update_from_output 的
         # _normalize_dycp_remote_block_ids 统一规整为 per-cp_rank canonical 多段
         # (3 层), 长度 == len(remote_dycp_ranks); 发射 rank 的段在 index 0, 未发射
         # (如 hard rollback 未 prefill 的 cp_rank)槽位为空段。规整覆盖三种产出形态:
