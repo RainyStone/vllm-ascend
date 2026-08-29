@@ -1,5 +1,4 @@
 from typing import ClassVar, Optional, Tuple, TypeVar
-import logging
 
 import numpy as np
 import torch
@@ -19,7 +18,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
-logger = logging.getLogger(__name__)
 from vllm_ascend.device.device_op import DeviceOperator
 
 # isort: off
@@ -139,20 +137,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         metadata_cls.slot_mapping = self.slot_mapping
 
 
-        # [探针] caller beacon: 调用 split_attn_metadata 前打印。try/+warning 强制输出,
-        # 用 'vllm' 标准 logger 名 + warning 级, 凌驾任何 INFO 级别过滤, 最稳。(注: 经验证
-        # getLogger('vllm.').info 形式在本环境也能打, logger 形式非根因, 此处仅强化可见性。)
-        # TODO[探针] 验证完 chunk 路径后删除。
-        try:
-            import logging as _pl
-            _pl.getLogger("vllm").warning(
-                "[DYCP] Probe/chunk_split 准备调用 split_attn_metadata num_dycp_reqs=%d",
-                common_attn_metadata.num_dycp_reqs,
-            )
-        except Exception:
-            pass
-
-
         metadata_cls.num_dycp_reqs = common_attn_metadata.num_dycp_reqs
         dycp_metadata, dp_metadata = split_attn_metadata(metadata_cls, metadata_cls.num_dycp_reqs, self.dycp_size, self.chunked_prefill_workspace_size, self.block_size, common_attn_metadata, self.dcp_size, self.pcp_size, self.dycp_size, self.cp_virtual_block_size, self.cp_local_block_size)
         metadata_cls.dp_metadata = dp_metadata
@@ -234,35 +218,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         chunked_context_metadata = super().build_chunked_metadata(common_prefix_len, common_attn_metadata)
         if chunked_context_metadata is None:
             return None
-        # [DyCP 修复] num_dycp_reqs==0 拍(全 batch 无长 CP 请求,如 v97 短请求混批)走
-        # 基线朴素 ChunkedContextMetadata,不做 PAD 的 CP-rank 分层切分。本拍
-        # _forward_prefill 已因 num_dycp_reqs==0 委派基线 _compute_prefill_context
-        # (mla_cp _forward_prefill 条件 'not common_pcp_size>1 or num_dycp_reqs==0'),
-        # 需 seq_tot / chunk_actual_seq_lengths_kv_list / chunk_seq_lens_npu / starts
-        # 同源未 PADDED;否则 TND 不变量破坏 -> npu_fused_infer_attention_score 报
-        # 'T(768) should be equal to actual_seq_kv(1408)' 崩。且 OVERRIDE 原 PAD 公式
-        # cdiv(ctx, cp_v)*cp_l 在 ctx=1408、cp_v=128*dcp_size*common_pcp_size=256、
-        # cp_l=128 下 = 768 < ctx,会按 PADDED 缩量仅加载短请求半截 cached-prefix(语义错)。
-        # PCP-only 模式不区分长短(num_dycp_reqs 恒 >0),此分支永不触发,0 影响。
-        if common_attn_metadata.num_dycp_reqs == 0:
-            # TODO[探针] 验证后删除: 对账 num_dycp_reqs==0 早返 BASE 自洽度
-            try:
-                import logging as _pl
-                _seq_tot = chunked_context_metadata.seq_tot
-                _kv_list = chunked_context_metadata.chunk_actual_seq_lengths_kv_list
-                _self_ok = all(
-                    st == (kv[-1] if len(kv) > 0 else 0)
-                    for st, kv in zip(_seq_tot, _kv_list)
-                )
-                _pl.getLogger('vllm').warning(
-                    '[DYCP] Probe/chunk_split early-return-Base selfconsistent=%s '
-                    'num_chunks=%d seq_tot=%s chunk_actual_seq_kv_last=%s',
-                    _self_ok, len(_seq_tot), _seq_tot,
-                    [(kv[-1] if len(kv) > 0 else None) for kv in _kv_list],
-                )
-            except Exception:
-                pass
-            return chunked_context_metadata
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert long_seq_metadata is not None
@@ -716,14 +671,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        # [DYCP Probe] forward 层入口: per-layer 边界, 两端对账到达第几层
-        try:
-            import logging as _pl
-            _fwd_seq = getattr(self, '_probe_fwd_seq', 0) + 1
-            self._probe_fwd_seq = _fwd_seq
-            _pl.getLogger('vllm.').info('[DYCP] Probe/fwd_enter rank=%s layer=%s fwd_seq=%d num_dycp_reqs=%s num_prefills=%s', getattr(self,'dycp_rank',getattr(self,'pcp_rank',-1)), layer_name, _fwd_seq, attn_metadata.num_dycp_reqs, attn_metadata.num_prefills)
-        except Exception:
-            pass
         num_decode_tokens = attn_metadata.num_decode_tokens
         forward_context = get_forward_context()
         o_proj_input_shape = (forward_context.num_tokens, self.num_heads * self.v_head_dim)
@@ -766,41 +713,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 cp_kv_no_split = kv_no_split[num_decode_tokens: num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size]
                 is_prefill = self._forward_common(layer_name, cp_q_c, cp_kv_no_split, kv_cache, dycp_metadata, need_gather_q_kv, o_proj_input[num_decode_tokens: num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size])
             if dp_metadata:
-                # [DYCP Probe] dp 段进入: 非CP短请求 dp_metadata 分支入口
-                try:
-                    import logging as _pl
-                    _pl.getLogger('vllm.').info('[DYCP] Probe/dp_fwd_enter rank=%s layer=%s dp_npref=%s', getattr(self,'dycp_rank',getattr(self,'pcp_rank',-1)), layer_name, dp_metadata.num_prefills)
-                except Exception:
-                    pass
                 dp_q_c = q_c[num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size :]
                 dp_kv_no_split = kv_no_split[num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size :]
                 is_prefill = self._forward_common(layer_name, dp_q_c, dp_kv_no_split, kv_cache, dp_metadata, need_gather_q_kv, o_proj_input[num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size:])
-                # [DYCP] Probe/dp-write: 混合batch下非CP短请求(DP段)写block的slot + 回读所写block前5 token的KV,
-                # 取证 suppressor(cp_rank1) 与 owner(cp_rank0) 写入是否一致(定位 S0/S1 vegetables 根因)。
-                try:
-                    torch.npu.synchronize()
-                    import logging as _lg
-                    _sm = dp_metadata.slot_mapping.detach().cpu().tolist()
-                    _kvbs = int(kv_cache[0].shape[1])
-                    _valid = [s for s in _sm if s is not None and int(s) >= 0]
-                    if _valid:
-                        _bid = int(_valid[0]) // _kvbs
-                        _kper = [round(float(kv_cache[0][_bid, i].float().sum().item()), 4) for i in range(min(5, _kvbs))]
-                        _vper = [round(float(kv_cache[1][_bid, i].float().sum().item()), 4) for i in range(min(5, _kvbs))]
-                        _ksum = round(sum(_kper), 4)
-                        _vsum = round(sum(_vper), 4)
-                        _dpq0 = [round(float(x), 4) for x in dp_q_c[0].float().flatten()[:6].tolist()]
-                    else:
-                        _bid, _kper, _vper, _ksum, _vsum, _dpq0 = -1, None, None, None, None, None
-                    _lg.getLogger("vllm.").info(
-                        "[DYCP] Probe/dp-write dycp_rank=%s layer=%s dp_npref=%s dp_slot_mapping=%s kvbs=%s "
-                        "block_id=%s K_sum=%s V_sum=%s K_per_tok=%s V_per_tok=%s dp_qc0=%s",
-                        self.dycp_rank, layer_name, dp_metadata.num_prefills, _sm, _kvbs, _bid,
-                        _ksum, _vsum, _kper, _vper, _dpq0,
-                    )
-                except Exception as _e:
-                    import logging as _lg
-                    _lg.getLogger("vllm.").info("[DYCP] Probe/dp-write ERR %s", repr(_e))
         else:
             is_prefill = self._forward_common(layer_name, q_c, kv_no_split, kv_cache, attn_metadata, need_gather_q_kv, o_proj_input, prefill_preprocess_res, decode_preprocess_res)
         # O proj
@@ -947,25 +862,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
-        # [DyCP] 诊断: 打prefill_q_c(q_proj前) + prefill_q_nope(q_proj后) per-token sum,
-        # 对照baseline PCP找query差异(FIA输入唯一未比项, kv经restore还原同但q是local)
-        try:
-            torch.npu.synchronize()
-            import logging as _lg
-            _nq = min(4, int(prefill_q_c.shape[0]))
-            _qc_per = [round(float(prefill_q_c[i].float().sum().item()), 4) for i in range(_nq)]
-            _qn_per = [round(float(prefill_q_nope[i].float().sum().item()), 4) for i in range(_nq)]
-            _qc0 = [round(float(x), 4) for x in prefill_q_c[0].float().flatten()[:8].tolist()]
-            _qn0 = [round(float(x), 4) for x in prefill_q_nope[0].float().flatten()[:8].tolist()]
-            _lg.getLogger("vllm.").info(
-                "[DYCP] Probe/p-q cp_rank=%s prefill_q_c_per=%s prefill_q_nope_per=%s "
-                "qc0=%s qn0=%s",
-                getattr(self, "dycp_rank", getattr(self, "pcp_rank", "?")), _qc_per, _qn_per,
-                _qc0, _qn0,
-            )
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger("vllm.").info("[DYCP] Probe/p-q ERR %s", repr(_e))
         cos = attn_metadata.prefill.cos[: num_actual_tokens - num_decode_tokens]
         sin = attn_metadata.prefill.sin[: num_actual_tokens - num_decode_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
@@ -979,47 +875,13 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
             prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin
         )
-        # [DyCP] 诊断: all_gather前 local k_pe(rope后) per + cos/sin per, 对照开PCP vs 开DyCP
-        # 找rope/切分差异(同pcp_world_rank但local token不同→k_pe不同)
-        try:
-            torch.npu.synchronize()
-            import logging as _lg
-            _n = min(4, int(prefill_k_pe.shape[0]))
-            _kpe_local = [round(float(prefill_k_pe[i].float().sum().item()), 4) for i in range(_n)]
-            _cos = [round(float(cos[i].float().sum().item()), 4) for i in range(_n)] if cos is not None else None
-            _sin = [round(float(sin[i].float().sum().item()), 4) for i in range(_n)] if sin is not None else None
-            _lg.getLogger("vllm.").info(
-                "[DYCP] Probe/local-kpe cp_rank=%s dycp_size=%s n_actual=%s "
-                "kpe_local_per=%s cos_per=%s sin_per=%s",
-                getattr(self, "dycp_rank", getattr(self, "pcp_rank", "?")), self.dycp_size,
-                num_actual_tokens, _kpe_local, _cos, _sin,
-            )
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger("vllm.").info("[DYCP] Probe/local-kpe ERR %s", repr(_e))
         prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
         prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
         if num_dycp_reqs > 0:
-            # [DYCP Probe] dycp all_gather 入口: per-instance 单调序号 + shape
-            _ag_seq = getattr(self, '_probe_ag_seq', 0) + 1
-            self._probe_ag_seq = _ag_seq
-            _ag_rank = getattr(self, 'dycp_rank', getattr(self, 'pcp_rank', -1))
-            _ag_shape = tuple(int(x) for x in prefill_kv_c_k_pe.shape)
-            try:
-                import logging as _pl
-                _pl.getLogger('vllm.').info('[DYCP] Probe/dn_ag_enter rank=%s ag_seq=%d num_dycp_reqs=%s n_actual=%s inshape=%s dycp_size=%s', _ag_rank, _ag_seq, num_dycp_reqs, num_actual_tokens, _ag_shape, self.dycp_size)
-            except Exception:
-                pass
             if self.dycp_size > 1:
                 prefill_kv_c_k_pe = get_dycp_group().all_gather(prefill_kv_c_k_pe, 0)
             else:
                 prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
-            # [DYCP Probe] dycp all_gather 出口: 同序号 + gathered shape
-            try:
-                import logging as _pl
-                _pl.getLogger('vllm.').info('[DYCP] Probe/dn_ag_exit rank=%s ag_seq=%d outshape=%s', _ag_rank, _ag_seq, tuple(int(x) for x in prefill_kv_c_k_pe.shape))
-            except Exception:
-                pass
         prefill_kv_c_k_pe = torch.index_select(
             prefill_kv_c_k_pe, 0, attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
         )
@@ -1028,48 +890,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
         prefill_k_c_normed = prefill_k_c_normed.squeeze(1)
         slot_mapping = attn_metadata.slot_mapping[self.common_pcp_size * num_decode_tokens :]
-        # [DyCP] 诊断: 写block前打印slot_mapping/KV值/计数/restore_idx，
-        # 定位5token超短序列走DualChunkSwap时KV是否写到block[1]的正确slot。
-        try:
-            torch.npu.synchronize()
-            import logging as _lg
-            _sm = slot_mapping.detach().cpu().tolist()
-            _n = min(8, int(kv_c_normed.shape[0]))
-            _kv_per = [round(float(kv_c_normed[i].float().sum().item()), 4) for i in range(_n)]
-            _kpe_per = [round(float(k_pe[i].float().sum().item()), 4) for i in range(_n)]
-            _ridx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx.detach().cpu().tolist()
-            _lg.getLogger("vllm.").info(
-                "[DYCP] Probe/p-write-pre cp_rank=%s n_actual=%s n_pcp_padded=%s n_dec=%s cps=%s "
-                "n_dycp_reqs=%s slot_mapping=%s kv_c_normed_per=%s k_pe_per=%s restore_idx=%s",
-                getattr(self, "dycp_rank", getattr(self, "pcp_rank", "?")),
-                num_actual_tokens, getattr(attn_metadata, "num_actual_tokens_pcp_padded", "?"),
-                num_decode_tokens, self.common_pcp_size, getattr(attn_metadata, "num_dycp_reqs", "?"),
-                _sm, _kv_per, _kpe_per, _ridx,
-            )
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger("vllm.").info("[DYCP] Probe/p-write-pre ERR %s", repr(_e))
         if self.is_kv_producer:
             attn_metadata.reshape_cache_event = torch.npu.Event()
         DeviceOperator.reshape_and_cache(
             key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slot_mapping
         )
-        # [DyCP] 审计: P端写block1后读block1前5token的KV统计(K cache), 供D端拉取后对比。
-        try:
-            import logging as _lg
-            torch.npu.synchronize()
-            _blk1_k_sum = float(kv_cache[0][1, :5].float().sum().item())
-            _blk1_v_sum = float(kv_cache[1][1, :5].float().sum().item())
-            _lg.getLogger("vllm.").info(
-                "[DYCP] Probe/p-block1-kv cp_rank=%s block1_K_sum=%.4f block1_V_sum=%.4f "
-                "block1_K_per_tok=%s",
-                getattr(self, "dycp_rank", getattr(self, "pcp_rank", "?")),
-                _blk1_k_sum, _blk1_v_sum,
-                [round(float(kv_cache[0][1, i].float().sum().item()), 4) for i in range(5)],
-            )
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger("vllm.").info("[DYCP] Probe/p-block1-kv ERR %s", repr(_e))
         if self.is_kv_producer:
             attn_metadata.reshape_cache_event.record()
         pcp_metadata = attn_metadata.prefill.pcp_metadata
@@ -1171,25 +996,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         q_full_idx = pcp_metadata.q_full_idx
         attn_output = torch.index_select(torch.cat([output_head, output_tail], dim=0), 0, q_full_idx)
-        # [DyCP] 二分探针: attn_output(index_select后, _compute_prefill_context前)每rank本地4行
-        # per-token sum. rank0本地4行=[t0,t1,pad,pad], rank1=[t2,t3,t4,pad].
-        # 若rank1前3行(t2,t3,t4)与不开DyCP对应token不一致 -> attention本身算错(pad mask缺);
-        # 若一致而o_proj后错 -> 下游scatter/层间错位. 二分定位.
-        try:
-            torch.npu.synchronize()
-            import logging as _lg
-            _n = min(4, int(attn_output.shape[0]))
-            _per = [round(float(attn_output[i].float().sum().item()), 4) for i in range(_n)]
-            _lg.getLogger("vllm.").info(
-                "[DYCP] Probe/attn-out cp_rank=%s n_tokens=%s head_rows=%s tail_rows=%s "
-                "attn_output_local_per=%s",
-                getattr(self, "dycp_rank", getattr(self, "pcp_rank", "?")),
-                int(attn_output.shape[0]),
-                int(output_head.shape[0]), int(output_tail.shape[0]), _per,
-            )
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger("vllm.").info("[DYCP] Probe/attn-out ERR %s", repr(_e))
         attn_lse = None
         if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
             attn_lse = torch.index_select(torch.cat([lse_head, lse_tail], dim=0), 0, q_full_idx)
@@ -1546,29 +1352,10 @@ def split_attn_metadata(
     prefill_meta = attn_metadata.prefill
     num_prefills = attn_metadata.num_prefills
 
-    # [探针] split_attn_metadata 入口 beacon, 早于所有 early-return, 任何调用都打。
-    # try/+warning 强制输出(凌驾任何 INFO 级别过滤)。TODO[探针] 验证后删除。
-    try:
-        import logging as _pl
-        _pl.getLogger("vllm").warning(
-            "[DYCP] Probe/chunk_split 进入 split_attn_metadata num_dycp_reqs=%d num_prefills=%d",
-            num_dycp_reqs, num_prefills,
-        )
-    except Exception:
-        pass
-
     if num_dycp_reqs == 0:
         return None, attn_metadata
     if num_dycp_reqs >= num_prefills: # TODO [DyCP] 00, why? attn_metadata从传入的参数来看，是父类传入，为什么可以既作dycp_metadata也可作dp_metadata
         return attn_metadata, None
-
-    try:
-        import logging as _pl
-        _pl.getLogger("vllm").warning(
-            "[DYCP] Probe/chunk_split 准备切分 attn_metadata",
-        )
-    except Exception:
-        pass
 
     if isinstance(prefill_meta.query_lens, torch.Tensor):
         dycp_token_num = prefill_meta.query_lens[:num_dycp_reqs].sum().item()
@@ -1645,7 +1432,7 @@ def split_attn_metadata(
         num_dycp_reqs=0,
     )
     dp_cc, _, _, _ = generate_dp_chunked_metadata(
-        dp_metadata, chunked_prefill_workspace_size, block_size, caller_tag="dp",
+        dp_metadata, chunked_prefill_workspace_size, block_size,
     )
     dp_metadata.prefill.chunked_context = dp_cc
 
@@ -1768,7 +1555,6 @@ def generate_dp_chunked_metadata(
     attn_metadata: AscendMLAMetadata,
     chunked_prefill_workspace_size: int,
     block_size: int,
-    caller_tag: str = "dp",
     ):
     prefill_meta = attn_metadata.prefill
     chunked_metadata = prefill_meta.chunked_context
@@ -1801,19 +1587,6 @@ def generate_dp_chunked_metadata(
     chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
     cu_seq_lens_cpu = torch.zeros(num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True)
     torch.cumsum(chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
-    # [探针] 切了 chunk(num_chunks>=1 即对 prefill 的 context 做 chunked prefill)时打印
-    # 切分信息。caller_tag 区分来源: "cp"=长请求 CP 路(generate_dycp_chunked_metadata
-    # 上游调用)、"dp"=DP 路(split_attn_metadata 对 dp_metadata 调用)。留工作区不提交。
-    try:
-        import logging as _pl
-        _pl.getLogger("vllm").warning(
-            "[DYCP] Probe/chunk_split caller_tag=%s num_prefills=%d num_chunks=%d "
-            "max_context_chunk=%d max_context_len=%d context_lens_cpu=%s",
-            caller_tag, num_prefills, num_chunks, max_context_chunk, max_context_len_cpu,
-            context_lens_cpu.tolist(),
-        )
-    except Exception:
-        pass
     # 修复: 补算 chunk_actual_seq_lengths_kv_list。这是 ChunkedContextMetadata 的必填
     # 字段(mla_v1.py:119 类定义 ChunkedContextMetadata 有 chunk_actual_seq_lengths_kv_list:
     # list[list[int]]), mla_v1.py:523 的正确构造路径会逐 chunk 对 chunk_seq_lens 做
@@ -1851,32 +1624,11 @@ def generate_dycp_chunked_metadata(
     cp_local_block_size: int,
 ):
     chunked_context_metadata, context_lens_cpu, max_context_chunk, num_chunks = generate_dp_chunked_metadata(
-        attn_metadata, chunked_prefill_workspace_size, block_size, caller_tag="cp",
+        attn_metadata, chunked_prefill_workspace_size, block_size,
     )
     if chunked_context_metadata is None:
         return None
-    # [探针] 长请求(CP/DyCP)被切了 chunk 时打印 CP 路切分信息。留工作区不提交。
-    # chunk_actual_seq_lengths_kv_list 各 chunk 的 KV 累计序列长度, 用于核对子组各 rank
-    # 是否切同一 num_chunks/同一形状(不一致即 per-layer all_gather 形状不配对风险)。
     chunk_seq_tot_list = chunked_context_metadata.seq_tot
-    chunk_actual_seq_lengths_kv_list_probe = (
-        chunked_context_metadata.chunk_actual_seq_lengths_kv_list
-    )
-    # 仅用此拍已可用的字段, padded_local_max_context_chunk_across_ranks 在其后约 40 行才
-    # 计算, 此处引用会 NameError, 故不放入探针。
-    try:
-        import logging as _pl
-        _pl.getLogger("vllm").warning(
-            "[DYCP] Probe/cp_chunk_split num_dycp_reqs=%d num_chunks=%d "
-            "max_context_chunk=%d dycp_size=%d pcp_size=%d dcp_size=%d "
-            "cp_seq_tot_per_chunk=%s chunk_actual_seq_lengths_kv_list=%s",
-            num_dycp_reqs, num_chunks, max_context_chunk,
-            dycp_size, pcp_size, dcp_size,
-            chunk_seq_tot_list, chunk_actual_seq_lengths_kv_list_probe,
-        )
-    except Exception:
-        pass
-
     num_prefills = attn_metadata.num_prefills
     num_decodes = attn_metadata.num_decodes
     long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata

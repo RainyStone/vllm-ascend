@@ -166,15 +166,6 @@ class KVCacheTaskTracker:
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
-            # [DYCP] Probe: 定位 finished_sending 重复上报源（正常DONE计数达标 vs 其它）
-            logger.info(
-                "[DYCP] Probe/update_done_task_count req=%s in_reqs_to_process=%s "
-                "reqs_to_process=%s finished_requests=%s",
-                request_id,
-                request_id in self.reqs_to_process,
-                list(self.reqs_to_process),
-                list(self.finished_requests),
-            )
             if request_id in self.reqs_to_process:
                 self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
@@ -219,18 +210,6 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.info(
-                    "Force freed expired request: %s. "
-                    "Reason: Request exceeded timeout threshold (%s seconds). "
-                    "Action: Resources have been forcibly released to prevent memory leak.",
-                    request_id,
-                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                )
-                # [DYCP] Probe: expired 兜底路径二次 finished_sending 候选源
-                logger.info(
-                    "[DYCP] Probe/expired(P) req=%s reqs_to_process=%s finished_requests=%s",
-                    request_id, list(self.reqs_to_process), list(self.finished_requests),
-                )
             else:
                 break
         return expired_requests
@@ -341,26 +320,14 @@ class KVCacheSendingThread(threading.Thread):
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
                     remote_port_send_num = msg[2]
-                    # [DYCP] Probe: P端收到 D 的 DONE_RECVING_MSG，定位重复 finished_sending 源头
-                    logger.info(
-                        "[DYCP] Probe/DONE_RECVING(P) req=%s self.handshake_port=%s "
-                        "remote_port_send_num=%s cur_port_send_num=%s",
-                        request_id,
-                        self.handshake_port,
-                        remote_port_send_num.get(self.handshake_port) if remote_port_send_num else None,
-                        self.port_send_num.get(request_id),
-                    )
                     if remote_port_send_num:
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
                         if self.port_send_num[request_id] >= remote_port_send_num[self.handshake_port]["num"]:
-                            logger.info("[DYCP] Probe/DONE_count_reached(P) req=%s count=%s -> update_done",
-                                        request_id, self.port_send_num[request_id])
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
                     else:
-                        logger.info("[DYCP] Probe/DONE_no_count(P) req=%s -> update_done", request_id)
                         self.task_tracker.update_done_task_count(request_id)
                     # Acknowledge the request completion.
                     while True:
@@ -532,12 +499,6 @@ class KVCacheRecvingThread(threading.Thread):
             "decode_cp_size": decode_cp_size,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
-        logger.info(
-            "[DYCP] Probe/add_request(D) req=%s remote_req=%s remote_handshake_port=%s "
-            "all_task_done=%s decode_cp_size=%s num_group_pulls=%s",
-            request_id, remote_request_id, remote_handshake_port,
-            all_task_done, decode_cp_size, len(group_pulls),
-        )
         self.request_queue.put(trans_info)
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -595,17 +556,11 @@ class KVCacheRecvingThread(threading.Thread):
         try:
             if transfer_failed:
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
-                logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
                     logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
                     self._transfer_kv_cache_all_groups(req_meta)
-                    logger.info(
-                        "[DYCP] Probe/transfer_done(D) req=%s remote_req=%s port=%s "
-                        "all_task_done=%s -> will update_done=%s",
-                        request_id, remote_request_id, remote_handshake_port,
-                        all_task_done, all_task_done,
-                    )
+                    logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
                 except Exception as e:
                     transfer_failed = True
                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
@@ -613,10 +568,6 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             if all_task_done:
                 self.task_tracker.update_done_task_count(request_id)
-                logger.info(
-                    "[DYCP] Probe/update_done_after(D) req=%s finished_requests=%s",
-                    request_id, list(self.task_tracker.finished_requests),
-                )
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
                 self._clear_failed_recv_request(request_id)
@@ -626,12 +577,6 @@ class KVCacheRecvingThread(threading.Thread):
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
             self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
-            logger.info(
-                "[DYCP] Probe/done_signal_sent(D) req=%s remote_req=%s port=%s "
-                "remote_port_send_num_keys=%s",
-                request_id, remote_request_id, remote_handshake_port,
-                list(remote_port_send_num.keys()) if remote_port_send_num else None,
-            )
 
     def _send_done_signal_to_free_remote_port(
         self, request_id: str, decode_cp_size: int | None, remote_port_send_num: dict[int, RemotePortInfo]
@@ -790,21 +735,6 @@ class KVCacheRecvingThread(threading.Thread):
                         src_list.append(src)
                         dst_list.append(dst)
                         length_list.append(length)
-                        # [DyCP] 审计: D端block_len vs P端block_len 是否一致(P端eff_block256 vs D端128?).
-                        try:
-                            import logging as _lg
-                            _lg.getLogger("vllm.").info(
-                                "[DYCP] Probe/transfer-addrs gid=%s layer=%s cache=%s "
-                                "D_block_len=%s inner_block_len=%s local_bid=%s "
-                                "remote_bid=%s length=%s local_scale=%s remote_scale=%s",
-                                group_idx, layer_idx, cache_idx,
-                                block_len, inner_block_len, local_block_id,
-                                remote_block_id, length, local_scale, remote_scale,
-                            )
-                        except Exception as _e:
-                            import logging as _lg
-                            _lg.getLogger("vllm.").info(
-                                "[DYCP] Probe/transfer-addrs ERR %s", repr(_e))
                     logger.debug(
                         "Mooncake kv transfer meta: request_id=%s group_idx=%s layer_idx=%s local_block_ids=%s "
                         "remote_block_ids=%s tp_num_need_pulls=%s remote_tp_offset=%s session_id=%s",
@@ -854,45 +784,6 @@ class KVCacheRecvingThread(threading.Thread):
                 ready_attention_group_reformat_block_ids.append(reformat_group)
         if not ready_attention_group_reformat_block_ids:
             return
-        # [DyCP] Probe/B-d-recv-nonzero: D 端在 KV 跨 RDMA 拉取完成后(batch_transfer_sync_read
-        # 已把字节写入本地 kv_caches), 逐 cache(MLA 下 kv_cache[0]=kv_lora / kv_cache[1]=k_rope)
-        # 逐 block 统计非零元素数与绝对值和, 证实 D 是否真把"双 cache"都收成非空, 且长请求的每一
-        # 个 block(子组里不同 cp_rank 贡献的 block)都有非零内容。对 dycp 与 pcp 均触发,
-        # 便于 dycp(多 block 拼接) vs pcp 直接对比。仅检视首个 attention 层以控制日志量。
-        try:
-            import logging as _probe_lg
-            for (_probe_gidx, _probe_blkids, _probe_np, _probe_layer_indices) in ready_attention_group_reformat_block_ids:
-                _probe_grp_spec, _probe_full_layers = self.kv_group2layeridx[_probe_gidx]
-                _probe_name_by_idx = dict(zip(_probe_full_layers, _probe_grp_spec["layer_names"]))
-                for _probe_layer_idx in _probe_layer_indices:
-                    _probe_ln = _probe_name_by_idx.get(_probe_layer_idx)
-                    if _probe_ln is None or _probe_ln not in self.kv_caches:
-                        continue
-                    # 注: KVCacheRecvingThread 不继承 MooncakeWorker, 故不能调用
-                    # self._as_kv_cache_tuple; 这里手工归一化为 tensor 列表(MLA 下为
-                    # [kv_lora, k_rope], FullAttention 下可能是单个 tensor 或 [K, V])。
-                    _probe_kv_raw = self.kv_caches[_probe_ln]
-                    if isinstance(_probe_kv_raw, (list, tuple)):
-                        _probe_kv_tensors = list(_probe_kv_raw)
-                    else:
-                        _probe_kv_tensors = [_probe_kv_raw]
-                    for _probe_cache_idx, _probe_kv_tensor in enumerate(_probe_kv_tensors):
-                        for _probe_grp in _probe_blkids:
-                            for _probe_bid in _probe_grp:
-                                _probe_blk = _probe_kv_tensor[_probe_bid]
-                                _probe_numel = _probe_blk.numel()
-                                _probe_nz = (_probe_blk != 0).sum().item()
-                                _probe_asum = float(_probe_blk.abs().sum().item())
-                                _probe_lg.getLogger("vllm.").info(
-                                    "[DYCP] Probe/B-d-recv-nonzero req=%s layer_idx=%s layer=%s "
-                                    "cache_idx=%s block_id=%s shape=%s nonzero=%s numel=%s abssum=%.4f",
-                                    remote_request_id, _probe_layer_idx, _probe_ln, _probe_cache_idx, _probe_bid,
-                                    tuple(_probe_kv_tensor.shape), _probe_nz, _probe_numel, _probe_asum,
-                                )
-                    break  # 仅看首个 attention 层(其它层同构造, 避免日志爆炸)
-        except Exception as _e:
-            import logging as _probe_lg
-            _probe_lg.getLogger("vllm.").info("[DYCP] Probe/B-d-recv-nonzero ERR req=%s %s", remote_request_id, repr(_e))
 
         gqa_reformat_groups = [
             (group_idx, grouped_local_block_ids, num_group_pulls, layer_indices)
@@ -1666,13 +1557,6 @@ class MooncakeConnectorScheduler:
             _emitted_send: list[str] = []
             for req_id in self._reqs_need_send:
                 req_cp_ranks = self._reqs_need_send_cp_ranks.get(req_id)
-                logger.info(
-                    "[DYCP] Probe/send-decide req=%s req_cp_ranks=%s my_cp_rank=%s "
-                    "cp_rank_in_ranks=%s",
-                    req_id, list(req_cp_ranks) if req_cp_ranks is not None else None,
-                    cp_rank,
-                    (cp_rank in req_cp_ranks) if (req_cp_ranks is not None and cp_rank is not None) else None,
-                )
                 if (req_cp_ranks is not None and cp_rank is not None
                         and cp_rank in req_cp_ranks):
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
@@ -1691,12 +1575,6 @@ class MooncakeConnectorScheduler:
             # 与 dycp_size==1 分支一致：已下发给 worker 的 recv 项也清理。
             for req_id in _emitted_recv:
                 self._reqs_need_recv.pop(req_id, None)
-            logger.info(
-                "[DYCP] Probe/build_connector_meta(dycp>1) cp_rank=%s emitted_send=%s "
-                "remaining_need_send=%s emitted_recv=%s",
-                cp_rank, _emitted_send, list(self._reqs_need_send.keys()),
-                _emitted_recv,
-            )
         else:
             meta.requests_to_send = self._reqs_need_send
             meta.reqs_in_batch = self._reqs_in_batch
@@ -1732,65 +1610,6 @@ class MooncakeConnectorScheduler:
 
         computed_block_ids = block_ids
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
-        # [DYCP] Probe(V-D1): 判别本 P rank 持有全量 vs 分片 block_ids。
-        #   ratio = num_prompt_blocks / per_group_len == 1  -> 全量(B3/path A 成立)
-        #   ratio == dycp_size                              -> 分片(B1/B2)
-        #   其它                                            -> 异常
-        _probe_num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
-        _probe_per_group_len = computed_block_lens[0] if computed_block_lens else 0
-        _probe_ratio = (
-            _probe_num_prompt_blocks / _probe_per_group_len if _probe_per_group_len else None
-        )
-        logger.info(
-            "[DYCP] Probe(V-D1)/request_finished req=%s engine_id=%s dycp_size=%s pcp_size=%s dcp_size=%s "
-            "block_size=%s num_prompt_tokens=%s num_prompt_blocks=%s computed_block_lens=%s "
-            "ratio(num_prompt_blocks/per_group_len)=%s cp_ranks=%s",
-            request.request_id,
-            self.engine_id,
-            self.dycp_size,
-            self.pcp_size,
-            self.dcp_size,
-            self.block_size,
-            len(request.prompt_token_ids),
-            _probe_num_prompt_blocks,
-            computed_block_lens,
-            _probe_ratio,
-            request.cp_ranks,
-        )
-        # [DyCP] 阶段0探针: 打本 cp_rank 持有的 block_id 具体值(坐实两 cp_rank block_id 是否不同)。
-        logger.info(
-            "[DYCP] Probe/stage0-p-blockids req=%s engine_id=%s cp_ranks=%s "
-            "computed_block_ids=%s remote_port=%s",
-            request.request_id, self.engine_id, request.cp_ranks,
-            computed_block_ids,
-            (self.dycp_port_base if self.dycp_size > 1 else self.side_channel_port),
-        )
-        # [DYCP] Probe/A-p-sample: P 端长请求采样首 token —— 判别 P prefill 采到的是
-        # 期望答案(如 Berlin) 还是 echo 回 prompt 头部(token 2..)。该探针对 dycp 与 pcp
-        # 均触发(request_finished 对所有 kv_producer 请求生效), 便于 dycp vs pcp 直接对比。
-        try:
-            _pt = list(request.prompt_token_ids)
-            _ot = list(request.output_token_ids)
-            _last12_prompt = _pt[-12:] if len(_pt) >= 12 else list(_pt)
-            _first8_out = _ot[:8]
-            # echo 自检: P 采到的 output 是否等于 prompt 某处连续片段(头部 echo 判据)
-            _echo = False
-            _echo_at = -1
-            if _first8_out and len(_pt) >= 2:
-                _limit = min(8, len(_pt))
-                for _off in range(1, _limit):
-                    if _pt[_off:_off + len(_first8_out)] == _first8_out:
-                        _echo = True
-                        _echo_at = _off
-                        break
-            logger.info(
-                "[DYCP] Probe/A-p-sample req=%s engine_id=%s dycp_size=%s cp_ranks=%s "
-                "n_prompt=%s n_out=%s last12_prompt=%s first8_out=%s echo=%s echo_at=%s",
-                request.request_id, self.engine_id, self.dycp_size, request.cp_ranks,
-                len(_pt), len(_ot), _last12_prompt, _first8_out, _echo, _echo_at,
-            )
-        except Exception as _e:
-            logger.info("[DYCP] Probe/A-p-sample ERR req=%s %s", request.request_id, repr(_e))
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
@@ -2205,16 +2024,6 @@ class MooncakeConnectorWorker:
                     len(done_sending),
                     len(done_recving),
                 )
-        if self.kv_role == "kv_consumer":
-            _recv_q = getattr(getattr(self, "kv_recv_thread", None), "task_tracker", None)
-            _recv_pending = list(_recv_q.finished_requests) if _recv_q else "<no-thread>"
-            logger.info(
-                "[DYCP] Probe/get_finished(D) dp_rank=%s engine_id=%s done_recving=%s "
-                "done_sending=%s recv_finished_pending=%s",
-                getattr(self, "dp_rank", "?"), getattr(self, "engine_id", "?"),
-                sorted(done_recving), sorted(done_sending),
-                _recv_pending,
-            )
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -2262,51 +2071,6 @@ class MooncakeConnectorWorker:
         if prefill_dycp_enable:
             decode_dycp_enable = bool(getattr(meta, "local_dycp_ranks", None))
 
-        # [DYCP] Probe(契约): 确认 D 端收到的 remote/local_block_ids 实际形状。
-        #   type=tuple/list + len_outer==group数 -> 单 per-group BlockIds
-        #   len_outer==dycp_size                 -> per-cp_rank list[BlockIds]
-        try:
-            _probe_rb_type = type(meta.remote_block_ids).__name__
-            _probe_rb_outer = len(meta.remote_block_ids)
-            _probe_rb_inner = [
-                (len(g) if hasattr(g, "__len__") else "?") for g in meta.remote_block_ids
-            ]
-        except TypeError:
-            _probe_rb_type = type(meta.remote_block_ids).__name__
-            _probe_rb_outer = "n/a(non-iterable)"
-            _probe_rb_inner = []
-        try:
-            _probe_lb_outer = len(meta.local_block_ids)
-            _probe_lb_inner = [
-                (len(g) if hasattr(g, "__len__") else "?") for g in meta.local_block_ids
-            ]
-        except TypeError:
-            _probe_lb_outer = "n/a(non-iterable)"
-            _probe_lb_inner = []
-        logger.info(
-            "[DYCP] Probe(契约)/_get_kv_split_metadata req=%s engine_id=%s dycp_size=%s "
-            "remote_pcp_size=%s remote_dcp_size=%s remote_ptp_size=%s "
-            "remote_dycp_ranks=%s local_dycp_ranks=%s "
-            "num_external_tokens=%s num_prompt_blocks=%s "
-            "remote_block_ids[type=%s len_outer=%s per_group_lens=%s] "
-            "local_block_ids[len_outer=%s per_group_lens=%s]",
-            req_id,
-            self.engine_id,
-            self.dycp_size,
-            meta.remote_pcp_size,
-            meta.remote_dcp_size,
-            meta.remote_ptp_size,
-            meta.remote_dycp_ranks,
-            meta.local_dycp_ranks,
-            meta.num_external_tokens,
-            meta.num_prompt_blocks,
-            _probe_rb_type,
-            _probe_rb_outer,
-            _probe_rb_inner,
-            _probe_lb_outer,
-            _probe_lb_inner,
-        )
-
         if (meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1
                 and not prefill_dycp_enable and not decode_dycp_enable):
             if self._is_hma_required:
@@ -2316,15 +2080,6 @@ class MooncakeConnectorWorker:
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             local_block_ids_list = [meta.local_block_ids for _ in remote_handshake_port_list]
             remote_block_ids_list = [meta.remote_block_ids for _ in remote_handshake_port_list]
-            logger.info(
-                "[DYCP] Probe/split-degenerate(D) req=%s remote_port=%s remote_dycp_ranks=%s "
-                "chosen_rank_list=%s port_list=%s num_shards=%s "
-                "local_block_lens=%s remote_block_lens=%s",
-                req_id, meta.remote_port, getattr(meta, "remote_dycp_ranks", None),
-                chosen_rank_list, remote_handshake_port_list, len(remote_handshake_port_list),
-                [len(g) for g in meta.local_block_ids] if meta.local_block_ids else None,
-                [len(g) for g in meta.remote_block_ids] if meta.remote_block_ids else None,
-            )
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
         # [DyCP] 折叠 dycp 维度进 pcp_size(对齐原版 domain 5a3f162b~1:1376-1385)。
@@ -2499,16 +2254,6 @@ class MooncakeConnectorWorker:
         )
 
         local_remote_block_port_mapping = copy.deepcopy(self.local_remote_block_port_mapping[meta.remote_engine_id])
-        # [DYCP] Probe/portmap-rebuild: 取证每次重建后 mapping 段数 == 当前 remote_cp_size.
-        try:
-            logger.info(
-                "[DYCP] Probe/portmap-rebuild req=%s remote_engine_id=%s "
-                "remote_dycp_ranks=%s remote_cp_size=%s len_mapping=%s",
-                req_id, meta.remote_engine_id, list(remote_dycp_ranks), remote_cp_size,
-                len(local_remote_block_port_mapping),
-            )
-        except Exception as _e:
-            logger.info("[DYCP] Probe/portmap-rebuild ERR %s", repr(_e))
 
         num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
 
@@ -2572,19 +2317,6 @@ class MooncakeConnectorWorker:
         # 按 local_cp_rank 选段(与 remote_block_nums 同序), 对齐原版 domain 5a3f162b~1:1602-1608。
         if prefill_dycp_enable:
             meta_remote_block_ids = list(meta.remote_block_ids)
-            # [DYCP] Probe/struct(D): 坐实接收端已拿到 canonical 3 层(发送端规整后)。
-            try:
-                logger.info(
-                    "[DYCP] Probe/struct(D) req=%s engine_id=%s prefill_dycp_enable=%s "
-                    "num_dycp_ranks=%s remote_cp_size=%s local_cp_size=%s local_cp_rank=%s "
-                    "remote_block_ids[type=%s len_outer=%s per_elem_lens=%s]",
-                    req_id, self.engine_id, prefill_dycp_enable,
-                    len(remote_dycp_ranks), remote_cp_size, local_cp_size, local_cp_rank,
-                    type(meta.remote_block_ids).__name__, len(meta.remote_block_ids),
-                    [(len(g) if hasattr(g, "__len__") else "?") for g in meta.remote_block_ids],
-                )
-            except Exception as _e:
-                logger.info("[DYCP] Probe/struct(D) ERR %s", repr(_e))
             meta_remote_block_ids = [
                 seg for cp_rank, seg in enumerate(meta_remote_block_ids)
                 if cp_rank % local_cp_size == local_cp_rank
@@ -2616,23 +2348,6 @@ class MooncakeConnectorWorker:
         # D rank will get remote block 1 in port 30004 and save it in local block 5
         # [DyCP] dycp 下 meta_remote_block_ids 是 per-cp_rank list[BlockIds], [remote_kv_id]
         # 取该 cp_rank 段后 [group_idx] 取该段内 per-group block_ids。
-        # [DYCP] Probe/split-len: 取证 remote_handshake_port_list vs remote_block_nums 长度错配(v54 IndexError).
-        try:
-            logger.info(
-                "[DYCP] Probe/split-len req=%s engine_id=%s remote_engine_id=%s "
-                "remote_dycp_ranks=%s remote_cp_size=%s num_prompt_blocks=%s "
-                "pm_cache_hit_before=%s "
-                "len_port_list=%s port_list_seg_lens=%s "
-                "len_remote_block_nums=%s remote_block_nums=%s",
-                req_id, self.engine_id, meta.remote_engine_id,
-                list(remote_dycp_ranks), remote_cp_size, meta.num_prompt_blocks,
-                self.local_remote_block_port_mapping.get(meta.remote_engine_id) is not None,
-                len(remote_handshake_port_list),
-                [len(x) for x in remote_handshake_port_list],
-                len(remote_block_nums), list(remote_block_nums),
-            )
-        except Exception as _e:
-            logger.info("[DYCP] Probe/split-len ERR %s", repr(_e))
         local_block_offset = 0
         for remote_kv_id in range(len(remote_handshake_port_list)):
             num_blocks_to_pull = remote_block_nums[remote_kv_id]
@@ -2660,14 +2375,6 @@ class MooncakeConnectorWorker:
             f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
         )
 
-        logger.info(
-            "[DYCP] Probe/split-full(D) req=%s remote_port=%s remote_dycp_ranks=%s "
-            "num_shards=%s port_list=%s tp_num_need_pulls=%s "
-            "per_shard(remote_port,remote_block_ids,local_block_ids)=%s",
-            req_id, meta.remote_port, getattr(meta, "remote_dycp_ranks", None),
-            len(remote_handshake_port_list), remote_handshake_port_list, tp_num_need_pulls,
-            list(zip(remote_handshake_port_list, remote_block_ids_list, local_block_ids_list)),
-        )
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
     def _get_group_pulls_metadata(
