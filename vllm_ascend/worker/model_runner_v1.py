@@ -639,8 +639,33 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         sync_token_ids = sampled_token_ids[:num_rows].contiguous()
+        try:
+            import logging as _pl
+            _pl.getLogger('vllm.').info('[DYCP] Probe/sample_bcast_enter rank=%s num_cp_request=%s num_rows=%s', getattr(self,'dycp_rank',-1), num_cp_request, num_rows)
+        except Exception:
+            pass
         dycp_group.broadcast(sync_token_ids, src=0)
+        try:
+            import logging as _pl
+            _pl.getLogger('vllm.').info('[DYCP] Probe/sample_bcast_exit rank=%s num_cp_request=%s num_rows=%s', getattr(self,'dycp_rank',-1), num_cp_request, num_rows)
+        except Exception:
+            pass
         sampled_token_ids[:num_rows].copy_(sync_token_ids)
+        # [DyCP] Probe/A2-p-sample-bcast: 在 CP 采样跨 rank 广播之后, 直接打印本步各
+        # CP(长)请求 P 端采到的首 token id -> 判别 P prefill 注意力数值是否正确
+        # (采到期望答案如 Berlin, 还是 echo 回 prompt 头部)。仅 P 端 dycp 分支触发,
+        # 与 Probe/A-p-sample(request_finished 打 output_token_ids)互补, 后者 dycp 与
+        # pcp 均触发, 便于 dycp vs pcp 直接对比。
+        try:
+            import logging as _pl
+            _first_tok_ids = sampled_token_ids[:num_rows, 0].detach().cpu().tolist()
+            _pl.getLogger('vllm.').info(
+                '[DYCP] Probe/A2-p-sample-bcast rank=%s num_cp_request=%s first_token_per_cp=%s',
+                getattr(self, 'dycp_rank', -1), num_cp_request, _first_tok_ids,
+            )
+        except Exception as _e:
+            import logging as _pl
+            _pl.getLogger('vllm.').info('[DYCP] Probe/A2-p-sample-bcast ERR %s', repr(_e))
 
     def _update_batch_req_cp_sizes( # TODO [DyCP] 看起来是重建 req_id_to_cp_size，why？为什么要重建
         self,
@@ -739,7 +764,62 @@ class NPUModelRunner(GPUModelRunner):
         packed_tensor = torch.zeros(2, self.dp_size, device=device_str, dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        # [DYCP] Probe/meta_ar_seq: per-runner 单调递增的"metadata all_reduce 序号"。
+        # 本函数是全 DP 拓扑上唯一可探的 dist.all_reduce：真实前向(execute_model)、
+        # cadence dummy(worker 0-token step)、busy-loop execute_dummy_batch 三条路径
+        # 均经 _determine_batch_execution_and_padding -> _sync_metadata_across_dp 在此归一。
+        # 跨 DP 对照 meta_ar_seq 应严格 1:1 对齐；若某 DP 的 meta_ar_seq 领先其它 DP，
+        # 即 collective 入队错位 -> 后续 every-N-step sync_dp_state all_reduce(同一通信域)
+        # 落在不同 stream 位置 -> collective-type-mismatch 死锁。
+        self._meta_ar_seq = getattr(self, "_meta_ar_seq", 0) + 1
+        # [DyCP] Probe/all_reduce_enter 增强: 记录本次 metadata all_reduce 的 1~3 级
+        # 调用栈函数名(caller1 是 _sync_metadata_across_dp 的直接调用方,caller3 再上两层),
+        # 用于跨 DP 对账时定位"某个 DP 多发 1 个 AR"的精确调用路径。已知合法路径:
+        #   1) 真实前向:        caller1=_determine_batch_execution_and_padding,
+        #                      caller2=<model_runner execute_model 主前向方法>,
+        #                      caller3=<再上一层, 通常为 worker.execute_model>;
+        #   2) 0-token cadence dummy(worker guard 在 tokens==0 时触发):
+        #                      caller2=_dummy_run, caller3=<worker.execute_model>(src=cadence 路径);
+        #   3) busy-loop idle dummy(空闲 rank): caller2=_dummy_run, caller3=execute_dummy_batch(src=busy_loop);
+        #   4) 隐藏路径(疑似多 AR 根因): external_launcher 角落 _dummy_run(1)、
+        #                      warmup/compile / profile _dummy_run 等。若 v106 在错位那一拍
+        #                      出现 caller2/caller3 不属于上述 1~3 任一路径, 即为多 1 AR 的真凶。
+        import sys as _probe_sys
+        try:
+            _f1 = _probe_sys._getframe(1)               # _sync_metadata_across_dp 的直接调用方
+            _caller1 = _f1.f_code.co_name
+            _f2 = _f1.f_back
+            _caller2 = _f2.f_code.co_name if _f2 is not None else "?"
+            _f3 = _f2.f_back if _f2 is not None else None
+            _caller3 = _f3.f_code.co_name if _f3 is not None else "?"
+        except (ValueError, AttributeError):
+            _caller1 = _caller2 = _caller3 = "?"
+        # [DyCP 取证] 决定性探针: 打印本 cadence AR 通信域的 world_size 与 dp_size。
+        # world_size=4 -> cadence AR 是全 DP 4 路(应互锁各 DP); world_size=2 -> 实为
+        # per-subgroup 2 路(sub0/sub1 独立漂移, %32 的 4 路 sync_dp_state 才撞车=真因)。
+        # dp_size 对照(packed_tensor 按 dp_size 分槽, 与 group 规模应一致)。
+        try:
+            _grp_ws = dist.get_world_size(group=group)
+        except Exception:
+            _grp_ws = -1
+        logger.info(
+            "[DYCP] Probe/all_reduce_enter dp_rank=%s meta_ar_seq=%s "
+            "num_tokens=%s cudagraph_mode=%s grp_ws=%s dp_size=%s "
+            "caller1=%s caller2=%s caller3=%s",
+            self.dp_rank, self._meta_ar_seq, num_tokens, cudagraph_mode,
+            _grp_ws, self.dp_size, _caller1, _caller2, _caller3,
+        )
         dist.all_reduce(packed_tensor, group=group)
+        try:
+            import logging as _pl
+            _pl.getLogger("vllm.").info(
+                "[DYCP] Probe/all_reduce_exit dp_rank=%s meta_ar_seq=%s "
+                "(本 cadence AR 已返回=已与全 DP 配对完成; 若某 DP 有 enter 无 exit "
+                "= 卡在 all_reduce 等对端)",
+                self.dp_rank, self._meta_ar_seq,
+            )
+        except Exception:
+            pass
         if device_str == "npu":
             packed_tensor = packed_tensor.cpu()
 
@@ -767,6 +847,14 @@ class NPUModelRunner(GPUModelRunner):
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
+        # [DYCP Probe] _update_states 入口(step 边界)
+        try:
+            import logging as _pl
+            _us_seq = getattr(self, '_probe_us_seq', 0) + 1
+            self._probe_us_seq = _us_seq
+            _pl.getLogger("vllm.").info("[DYCP] Probe/upd_enter rank=%s us_seq=%d num_cp=%s n_new=%s n_cached=%s total=%s", getattr(self,"dycp_rank",-1), _us_seq, getattr(scheduler_output,"num_cp_request",0), len(scheduler_output.scheduled_new_reqs), len(scheduler_output.scheduled_cached_reqs.req_ids), scheduler_output.total_num_scheduled_tokens)
+        except Exception:
+            pass
         req_data = scheduler_output.scheduled_cached_reqs
 
         if self.use_async_scheduling:
@@ -779,6 +867,13 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
+        # [DYCP Probe] _update_states 退出前(step 边界)
+        try:
+            import logging as _pl
+            _us_seq2 = getattr(self, '_probe_us_seq', -1)
+            _pl.getLogger("vllm.").info("[DYCP] Probe/upd_exit rank=%s us_seq=%d", getattr(self,"dycp_rank",-1), _us_seq2)
+        except Exception:
+            pass
         return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
@@ -958,6 +1053,19 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens[:num_cp_request], position_pcp, position_mask = self.pcp_manager.update_tokens_for_pcp(
                 num_scheduled_tokens, self.arange_np
             )
+            # [DyCP] 诊断: 打update_tokens_for_pcp返回的position_pcp + pcp_world_rank,
+            # 对照开DyCP vs 开PCP找positions为何DyCP各rank相同(异常)而PCP不同.
+            try:
+                import logging as _lg
+                _pp = position_pcp[:8].tolist() if hasattr(position_pcp, "tolist") else list(position_pcp)[:8]
+                _lg.getLogger("vllm.").info(
+                    "[DYCP] Probe/positions common_pcp_rank=%s dycp_size=%s pcp_mgr.pcp_world_rank=%s "
+                    "position_pcp[:8]=%s",
+                    self.common_pcp_rank, self.dycp_size, self.pcp_manager.pcp_world_rank, _pp,
+                )
+            except Exception as _e:
+                import logging as _lg
+                _lg.getLogger("vllm.").info("[DYCP] Probe/positions ERR %s", repr(_e))
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             total_num_pcp_scheduled_tokens = sum(num_scheduled_tokens[:num_cp_request])
@@ -990,6 +1098,24 @@ class NPUModelRunner(GPUModelRunner):
                 total_num_pcp_tokens_pre_split:
                 total_num_pcp_tokens_pre_split + num_short_tokens]
             positions_np = tmp_positions_np
+            # [DyCP] 探针: 验证混合 batch 下非 CP 短请求的 positions 正确(应为各短
+            # 请求原始位置 0,1,2,...). 切分后短请求段来自 positions_np[pre_split:].
+            try:
+                import logging as _lg
+                _short_pos = positions_np[total_num_pcp_scheduled_tokens: total_num_scheduled_tokens]
+                _short_pos = _short_pos.tolist() if hasattr(_short_pos, "tolist") else list(_short_pos)
+                _non_cp_nst = num_scheduled_tokens[num_cp_request:num_reqs]
+                _lg.getLogger("vllm.").info(
+                    "[DYCP] Probe/short_positions pre_split=%s pcp_sched=%s total=%s "
+                    "non_cp_num_scheduled_tokens=%s short_positions=%s",
+                    total_num_pcp_tokens_pre_split, total_num_pcp_scheduled_tokens,
+                    total_num_scheduled_tokens,
+                    _non_cp_nst.tolist() if hasattr(_non_cp_nst, "tolist") else list(_non_cp_nst),
+                    _short_pos,
+                )
+            except Exception as _e:
+                import logging as _lg
+                _lg.getLogger("vllm.").info("[DYCP] Probe/short_positions ERR %s", repr(_e))
 
         if self.use_prefill_cp and self.pcp_manager.pcp_use_hybrid_attn:
             assert self.pcp_manager.num_scheduled_pcp_tokens_padded is not None
@@ -2142,6 +2268,18 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        try:
+            import logging as _pl
+            _pl.getLogger("vllm.").info(
+                "[DYCP] Probe/wexec_enter dp_rank=%s num_sched=%s num_cp=%s "
+                "has_kv_xfer=%s dycp_size=%s (worker execute_model 入口; num_sched=0 "
+                "的拍见 w0token 探针, 与 host Probe/beat_ar_sc 逐拍对照)",
+                getattr(self, "dp_rank", -1), num_scheduled_tokens,
+                getattr(scheduler_output, "num_cp_request", 0),
+                has_kv_transfer_group(), getattr(self, "dycp_size", -1),
+            )
+        except Exception:
+            pass
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Fix up prev_req_id_to_index for requests that were discarded
@@ -2183,6 +2321,22 @@ class NPUModelRunner(GPUModelRunner):
                         return make_empty_encoder_model_runner_output(scheduler_output)
 
                 if not num_scheduled_tokens:
+                    try:
+                        import logging as _pl
+                        _pl.getLogger("vllm.").info(
+                            "[DYCP] Probe/w0token dp_rank=%s num_sched=0 has_kv_xfer=%s "
+                            "ext_launcher=%s dycp_size=%s (0-token 拍分支: 仅 "
+                            "ext_launcher+DP 走 _dummy_run 发 1 个 cadence AR; 否则 "
+                            "has_kv_xfer→kv_connector_no_forward 不发任何 metadata AR; "
+                            "不发 AR 的拍若 host 仍 sc++ = step_counter 与 cadence AR "
+                            "错位的直接起源, 须与 all_reduce_enter/exit 对照确认)",
+                            getattr(self, "dp_rank", -1),
+                            has_kv_transfer_group(),
+                            self.parallel_config.distributed_executor_backend == "external_launcher",
+                            getattr(self, "dycp_size", -1),
+                        )
+                    except Exception:
+                        pass
                     if (
                         self.parallel_config.distributed_executor_backend == "external_launcher"
                         and self.parallel_config.data_parallel_size > 1
@@ -3554,6 +3708,10 @@ class NPUModelRunner(GPUModelRunner):
         profile_cpp: bool = False,
         num_dycp_reqs: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        logger.info(
+            "[DYCP] Probe/dummy_run_enter dp_rank=%s num_tokens=%s uniform_decode=%s",
+            self.dp_rank, num_tokens, uniform_decode,
+        )
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
         # If cudagraph_mode.decode_mode() == FULL and

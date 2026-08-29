@@ -476,98 +476,136 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        self.profile_memory()
-        # enable msMonitor to monitor the performance of vllm-ascend
-        if get_ascend_config().msmonitor_use_daemon:
-            dp.step()
+        # [DyCP v107 Probe] worker_call AR-delta 取证: 计算单次 worker
+        # execute_model 进/出的 _meta_ar_seq 差(ar_delta). 正常应=1;
+        # ar_delta=2 表示同 call 内进了 2 次 _sync_metadata_across_dp(cadence
+        # guard _dummy_run + 真前向 _determine_batch_execution_and_padding 双发)
+        # => 每拍 worker 比 EngineCore step_counter 多 1 个 dp_group all_reduce,
+        # 下个 %32 sync_dp_state 边界与 idle 同组 int32-vs-bool 不配对 -> Gloo
+        # 永久挂(v106 DP3 死锁根因). 钉死该 call 后删除(见 TODO).
+        self._worker_call_seq = getattr(self, "_worker_call_seq", 0) + 1
+        _pwc_call_seq = self._worker_call_seq
+        _pwc_kind = "execute_model"
+        _pwc_sched_tokens = scheduler_output.total_num_scheduled_tokens
+        _pwc_pre_ar = getattr(self.model_runner, "_meta_ar_seq", 0)
+        logger.info(
+            "[DYCP] Probe/worker_call ENTER dp_rank=%s kind=%s "
+            "call_seq=%s sched_tokens=%s meta_pre=%s",
+            self.model_runner.dp_rank, _pwc_kind, _pwc_call_seq,
+            _pwc_sched_tokens, _pwc_pre_ar)
+        try:
+            self.profile_memory()
+            # enable msMonitor to monitor the performance of vllm-ascend
+            if get_ascend_config().msmonitor_use_daemon:
+                dp.step()
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
+            if self._pp_send_work:
+                for handle in self._pp_send_work:
+                    handle.wait()
+                self._pp_send_work = []
 
-        # TODO [DyCP] 这里和 v0.18.0 domain 方案有些不同，v0.18.0 domain 方案的 execute_model 方法会传入 scheduler_output list，这里要确认下下面是否正确
-        # [DyCP] A 0-token step (e.g. a request finishing with 0 newly
-        # scheduled tokens, FINISHED_LENGTH_CAPPED) must still emit the per-step
-        # full-DP metadata all_reduce to keep every DP rank's collective stream
-        # aligned with the every-N-step sync_dp_state all_reduce on the same
-        # communicator. model_runner.execute_model short-circuits on 0 tokens
-        # (returns EMPTY, no all_reduce), so issue a dummy forward here BEFORE
-        # calling it. This cadence path is DyCP-only (dycp_size > 1), and within
-        # DyCP it must cover EVERY DP rank's 0-token step, not only CP requests:
-        # the original `none_tokens_in_peer_sched` flag is set solely by
-        # cp_aware_scheduler for CP requests, so a short (single-engine)
-        # request's finish skipped this dummy and emitted 0 all_reduces -> its
-        # step_counter led the all_reduce count by 1 -> it entered sync_dp_state
-        # while peers were still in a metadata all_reduce -> collective-type-
-        # mismatch deadlock. Guard out external_launcher, whose 0-token short-
-        # circuit in model_runner_v1.py already runs its own dummy (would
-        # double-count here).
-        # [DyCP] D 端(consumer) dycp_size==1（DyCP 仅在 P/producer 端开启），原 dycp_size>1
-        # 门控会把 D 端 0-token step（WAITING_FOR_REMOTE_KVS 空转、remote-prefill finish）
-        # 漏掉，导致收请求的 D rank 与空闲 rank 的 execute_dummy_batch all_reduce 计数
-        # 错位 → collective-type-mismatch 死锁。故对 is_kv_consumer 的 D 端一并放开；
-        # 非 PD 的纯 DP（无 kv_connector）仍由 dycp_size>1 守住，行为不变。
-        if (scheduler_output.total_num_scheduled_tokens == 0
-                and self.parallel_config.data_parallel_size > 1
-                and (self.parallel_config.dycp_size > 1
-                     or self.vllm_config.kv_transfer_config.is_kv_consumer)
-                and self.parallel_config.distributed_executor_backend
-                    != "external_launcher"):
-            self.model_runner._dummy_run(1, uniform_decode=True)
+            # TODO [DyCP] 这里和 v0.18.0 domain 方案有些不同，v0.18.0 domain 方案的 execute_model 方法会传入 scheduler_output list，这里要确认下下面是否正确
+            # [DyCP] A 0-token step (e.g. a request finishing with 0 newly
+            # scheduled tokens, FINISHED_LENGTH_CAPPED) must still emit the per-step
+            # full-DP metadata all_reduce to keep every DP rank's collective stream
+            # aligned with the every-N-step sync_dp_state all_reduce on the same
+            # communicator. model_runner.execute_model short-circuits on 0 tokens
+            # (returns EMPTY, no all_reduce), so issue a dummy forward here BEFORE
+            # calling it. This cadence path is DyCP-only (dycp_size > 1), and within
+            # DyCP it must cover EVERY DP rank's 0-token step, not only CP requests:
+            # the original `none_tokens_in_peer_sched` flag is set solely by
+            # cp_aware_scheduler for CP requests, so a short (single-engine)
+            # request's finish skipped this dummy and emitted 0 all_reduces -> its
+            # step_counter led the all_reduce count by 1 -> it entered sync_dp_state
+            # while peers were still in a metadata all_reduce -> collective-type-
+            # mismatch deadlock. Guard out external_launcher, whose 0-token short-
+            # circuit in model_runner_v1.py already runs its own dummy (would
+            # double-count here).
+            # [DyCP] D 端(consumer) dycp_size==1（DyCP 仅在 P/producer 端开启），原 dycp_size>1
+            # 门控会把 D 端 0-token step（WAITING_FOR_REMOTE_KVS 空转、remote-prefill finish）
+            # 漏掉，导致收请求的 D rank 与空闲 rank 的 execute_dummy_batch all_reduce 计数
+            # 错位 → collective-type-mismatch 死锁。故对 is_kv_consumer 的 D 端一并放开；
+            # 非 PD 的纯 DP（无 kv_connector）仍由 dycp_size>1 守住，行为不变。
+            if (scheduler_output.total_num_scheduled_tokens == 0
+                    and self.parallel_config.data_parallel_size > 1
+                    and (self.parallel_config.dycp_size > 1
+                         or self.vllm_config.kv_transfer_config.is_kv_consumer)
+                    and self.parallel_config.distributed_executor_backend
+                        != "external_launcher"):
+                # [DYCP] Probe/cadence_dummy: 0-token step 的 cadence dummy 触发点。
+                # 本 dummy 经 _dummy_run -> _sync_metadata_across_dp 发一次 metadata
+                # all_reduce(meta_ar_seq +1)。D 端(is_kv_consumer) 与 P 端(dycp_size>1)
+                # 均可能命中，下方 log 区分命中的分支以便和 all_reduce_enter 对账。
+                logger.info(
+                    "[DYCP] Probe/cadence_dummy dp_rank=%s src=cadence "
+                    "guard_dycp_gt1=%s guard_kv_consumer=%s",
+                    self.model_runner.dp_rank,
+                    self.parallel_config.dycp_size > 1,
+                    self.vllm_config.kv_transfer_config.is_kv_consumer,
+                )
+                self.model_runner._dummy_run(1, uniform_decode=True)
 
-        intermediate_tensors = None
-        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
+            intermediate_tensors = None
+            forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+            if forward_pass and not get_pp_group().is_first_rank:
+                # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+                # it will conflict with the all-gather operation in flashcomm1.
+                if enable_sp():
+                    all_gather_group = None
+                else:
+                    all_gather_group = get_tp_group()
+                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
+                assert tensor_dict is not None
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
+
+            if self.profiler is not None:
+                self.profiler.step()
+
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+                return output
+
+            assert isinstance(output, IntermediateTensors)
+            parallel_config = self.vllm_config.parallel_config
+            assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
             # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
-            assert tensor_dict is not None
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=all_gather_group,
             )
 
-        if self.profiler is not None:
-            self.profiler.step()
+            kv_connector_output = output.kv_connector_output
+            if not kv_connector_output:
+                return None
 
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+            # In case of PP with kv transfer, we need to pass through the
+            # kv_connector_output
+            if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
+                return EMPTY_MODEL_RUNNER_OUTPUT
+            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
             return output
 
-        assert isinstance(output, IntermediateTensors)
-        parallel_config = self.vllm_config.parallel_config
-        assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-        # it will conflict with the all-gather operation in flashcomm1.
-        if enable_sp():
-            all_gather_group = None
-        else:
-            all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
-
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
-            return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
-
+        finally:
+            _pwc_post_ar = getattr(self.model_runner, "_meta_ar_seq", 0)
+            logger.info(
+                "[DYCP] Probe/worker_call EXIT dp_rank=%s kind=%s "
+                "call_seq=%s sched_tokens=%s meta_pre=%s meta_post=%s "
+                "ar_delta=%s",
+                self.model_runner.dp_rank, _pwc_kind, _pwc_call_seq,
+                _pwc_sched_tokens, _pwc_pre_ar, _pwc_post_ar,
+                _pwc_post_ar - _pwc_pre_ar)
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
@@ -861,9 +899,41 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
-        self.profile_memory()
-        self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
+        # [DyCP v107 Probe] busy-loop idle dummy 的 worker_call AR-delta 取证
+        # (与 execute_model 同口径). 正常 ar_delta=1; 若=2 即本 call 双发第 2 个
+        # metadata all_reduce, 是 v106 死锁根因(钉死后删除,见 TODO).
+        self._worker_call_seq = getattr(self, "_worker_call_seq", 0) + 1
+        _pwc_call_seq = self._worker_call_seq
+        _pwc_kind = "execute_dummy_batch"
+        _pwc_sched_tokens = 0
+        _pwc_pre_ar = getattr(self.model_runner, "_meta_ar_seq", 0)
+        logger.info(
+            "[DYCP] Probe/worker_call ENTER dp_rank=%s kind=%s "
+            "call_seq=%s sched_tokens=%s meta_pre=%s",
+            self.model_runner.dp_rank, _pwc_kind, _pwc_call_seq,
+            _pwc_sched_tokens, _pwc_pre_ar)
+        try:
+            self.profile_memory()
+            # [DYCP] Probe/bl_dummy_src: busy-loop 空闲 rank 的 cadence dummy 触发点。
+            # 来源=busy_loop(对应 core.py Probe/bl_dummy eng=? cyc=?)，与 cadence dummy
+            # (src=cadence) 区分；两者都经 _dummy_run -> _sync_metadata_across_dp 发
+            # 一次 metadata all_reduce(meta_ar_seq +1)。
+            logger.info(
+                "[DYCP] Probe/bl_dummy_src dp_rank=%s src=busy_loop num_tokens=%s",
+                self.model_runner.dp_rank,
+                self.model_runner.decode_token_per_req,
+            )
+            self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
+        finally:
+            _pwc_post_ar = getattr(self.model_runner, "_meta_ar_seq", 0)
+            logger.info(
+                "[DYCP] Probe/worker_call EXIT dp_rank=%s kind=%s "
+                "call_seq=%s sched_tokens=%s meta_pre=%s meta_post=%s "
+                "ar_delta=%s",
+                self.model_runner.dp_rank, _pwc_kind, _pwc_call_seq,
+                _pwc_sched_tokens, _pwc_pre_ar, _pwc_post_ar,
+                _pwc_post_ar - _pwc_pre_ar)
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()

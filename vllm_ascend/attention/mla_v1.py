@@ -1614,8 +1614,24 @@ class AscendMLAImpl(MLAAttentionImpl):
         cos = attn_metadata.prefill.cos
         sin = attn_metadata.prefill.sin
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
+        # [DyCP] 审计基线探针: 非CP普通prefill写block的slot(与DyCP对比)。
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
+        # [DyCP] baseline探针: 非CP普通prefill写block后, 读首token所在block前5 token的KV,
+        # 与CP路径 p-block1-kv 逐层对比, 定位CP attention从哪层起算错KV。
+        try:
+            torch.npu.synchronize()
+            import logging as _lg
+            _s0 = int(prefill_slots[0].item())
+            _bid = _s0 // 128
+            _k_per = [round(float(kv_cache[0][_bid, i].float().sum().item()), 4) for i in range(5)]
+            _v_per = [round(float(kv_cache[1][_bid, i].float().sum().item()), 4) for i in range(5)]
+            _lg.getLogger("vllm.").info(
+                "[DYCP] Probe/p-block-kv-baseline bid=%s slots[:5]=%s K_per=%s V_per=%s",
+                _bid, prefill_slots[:5].detach().cpu().tolist(), _k_per, _v_per,
+            )
+        except Exception:
+            pass
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)

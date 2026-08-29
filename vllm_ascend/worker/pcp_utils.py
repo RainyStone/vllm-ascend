@@ -1288,6 +1288,29 @@ class PCPManager:
                     "head_actual_seq_lengths_kv": head_actual_seq_lengths_kv,
                     "tail_actual_seq_lengths_kv": tail_actual_seq_lengths_kv,
                 }
+                # [DyCP] 诊断: 打印本步PCP切分实况(seq_len/chunk_len/各idx/mask/chunk_id),
+                # 对照0.18 domain版定位v0.21适配遗漏。单CP短序列下idx/mask真实值。
+                try:
+                    import logging as _lg
+                    _ql = query_lens[: self.num_dycp_reqs]
+                    _ql_list = _ql.tolist() if hasattr(_ql, "tolist") else list(_ql)
+                    _lg.getLogger("vllm.").info(
+                        "[DYCP] Probe/pcp-meta cp_rank=%s pcp_world=%s num_dycp_reqs=%s "
+                        "seq_lens=%s chunk_seqlens=%s q_head_chunk_id=%s q_tail_chunk_id=%s "
+                        "q_head_idx=%s q_tail_idx=%s kv_tail_proj_idx=%s "
+                        "kv_with_q_head_attn_idx_in_tail=%s kv_with_q_tail_attn_idx_in_tail=%s "
+                        "head_actual_seq_lengths_kv=%s tail_actual_seq_lengths_kv=%s "
+                        "attn_mask_seqlens=%s head_attn_nomask_seqlens=%s tail_attn_nomask_seqlens=%s",
+                        self.pcp_world_rank, self.pcp_world_size, self.num_dycp_reqs,
+                        _ql_list, chunk_seqlens, q_head_chunk_id, q_tail_chunk_id,
+                        q_head_idx, q_tail_idx, kv_tail_proj_idx,
+                        kv_with_q_head_attn_idx_in_tail, kv_with_q_tail_attn_idx_in_tail,
+                        head_actual_seq_lengths_kv, tail_actual_seq_lengths_kv,
+                        attn_mask_seqlens, head_attn_nomask_seqlens, tail_attn_nomask_seqlens,
+                    )
+                except Exception as _e:
+                    import logging as _lg
+                    _lg.getLogger("vllm.").info("[DYCP] Probe/pcp-meta ERR %s", repr(_e))
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
                     :num_actual_tokens_pcp_padded
                 ]
