@@ -218,17 +218,16 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         chunked_context_metadata = super().build_chunked_metadata(common_prefix_len, common_attn_metadata)
         if chunked_context_metadata is None:
             return None
-        # [DyCP 修复] num_dycp_reqs==0 拍(全 batch 无长 CP 请求, 如 v97 短请求混批)走
-        # 基线朴素 ChunkedContextMetadata, 不做 PAD 的 CP-rank 分层切分。本拍
+        # [DyCP 修复] num_dycp_reqs==0 拍(全 batch 无长 CP 请求,如 v97 短请求混批)走
+        # 基线朴素 ChunkedContextMetadata,不做 PAD 的 CP-rank 分层切分。本拍
         # _forward_prefill 已因 num_dycp_reqs==0 委派基线 _compute_prefill_context
         # (mla_cp _forward_prefill 条件 'not common_pcp_size>1 or num_dycp_reqs==0'),
         # 需 seq_tot / chunk_actual_seq_lengths_kv_list / chunk_seq_lens_npu / starts
-        # 同源未 PADDED; 否则 TND 不变量破坏 -> npu_fused_infer_attention_score 报
+        # 同源未 PADDED;否则 TND 不变量破坏 -> npu_fused_infer_attention_score 报
         # 'T(768) should be equal to actual_seq_kv(1408)' 崩。且 OVERRIDE 原 PAD 公式
         # cdiv(ctx, cp_v)*cp_l 在 ctx=1408、cp_v=128*dcp_size*common_pcp_size=256、
-        # cp_l=128 下 = 768 < ctx, 会按 PADDED 缩量仅加载短请求半截 cached-prefix
-        # (语义错)。PCP-only 模式不区分长短(num_dycp_reqs 恒 >0), 此分支永不触发,
-        # 0 影响。
+        # cp_l=128 下 = 768 < ctx,会按 PADDED 缩量仅加载短请求半截 cached-prefix(语义错)。
+        # PCP-only 模式不区分长短(num_dycp_reqs 恒 >0),此分支永不触发,0 影响。
         if common_attn_metadata.num_dycp_reqs == 0:
             return chunked_context_metadata
 
