@@ -23,8 +23,6 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
-import numpy as np
-
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -280,18 +278,15 @@ class AscendFusedMoE(FusedMoE):
 
         setup_moe_comm_method(self.moe_config)
         if get_ascend_config().enable_moonep:
-            expert_map = self._expert_map
-            if expert_map is None:
-                map_is_identity = True
-            else:
-                map_np = expert_map.cpu().numpy()
-                map_is_identity = bool(
-                    map_np.shape == (map_np.size,) and (map_np == np.arange(map_np.size)).all()
-                )
-            if self.dynamic_eplb or self.mix_placement or not map_is_identity:
+            # Dynamic EPLB and mix-placement redistribute experts, which the
+            # MoonEP owner semantics (expert e lives on rank e // epn, ids are
+            # global) do not support. The linear-placement expert mask that
+            # plain EP attaches is fine — it is not yet populated at __init__
+            # and ownership never depends on it.
+            if self.dynamic_eplb or self.mix_placement:
                 raise NotImplementedError(
-                    "enable_moonep requires dynamic EPLB / mix_placement and an identity (linear "
-                    "placement) expert map — plain contiguous expert sharding only, POC scope."
+                    "enable_moonep requires dynamic EPLB and mix_placement to be disabled "
+                    "(plain contiguous expert sharding only, POC scope)."
                 )
             from vllm_ascend.ops.fused_moe.moonep_comm import register_moonep_layer
 
