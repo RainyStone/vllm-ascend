@@ -23,6 +23,8 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+import numpy as np
+
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -279,9 +281,13 @@ class AscendFusedMoE(FusedMoE):
         setup_moe_comm_method(self.moe_config)
         if get_ascend_config().enable_moonep:
             expert_map = self._expert_map
-            map_is_identity = expert_map is None or bool(
-                torch.equal(expert_map.cpu(), torch.arange(expert_map.numel()))
-            )
+            if expert_map is None:
+                map_is_identity = True
+            else:
+                map_np = expert_map.cpu().numpy()
+                map_is_identity = bool(
+                    map_np.shape == (map_np.size,) and (map_np == np.arange(map_np.size)).all()
+                )
             if self.dynamic_eplb or self.mix_placement or not map_is_identity:
                 raise NotImplementedError(
                     "enable_moonep requires dynamic EPLB / mix_placement and an identity (linear "
