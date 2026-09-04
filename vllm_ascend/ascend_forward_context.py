@@ -29,6 +29,8 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+    # MoonEP dispatch over CANN SHMEM symmetric memory (ascend-moonep backend).
+    SHMEM = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -221,6 +223,36 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+# MoonEP dispatch capacity (S): the static per-rank token capacity of the
+# ascend-moonep Buffer. Set from the scheduler's max_num_batched_tokens so that
+# every per-step MoE call fits inside the pre-allocated symmetric memory.
+_moonep_tokens_capacity: int | None = None
+
+
+def set_moonep_tokens_capacity(vllm_config) -> None:
+    """Set the MoonEP static per-rank token capacity S.
+
+    Steps never exceed ``max_num_batched_tokens`` (the scheduler batches one
+    step at a time), so sizing the symmetric buffers to that value guarantees
+    dispatch never overflows, at the cost of a per-rank symmetric footprint of
+    O(S*K*H). Only meaningful when ``enable_moonep`` is on.
+    """
+    global _moonep_tokens_capacity
+    if _moonep_tokens_capacity is not None:
+        return
+    max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    # Decode / profile / capture steps may run with more tokens than the
+    # scheduler batch cap when prefill chunking is off; cover the graph
+    # capture sizes as well.
+    if vllm_config.compilation_config.cudagraph_capture_sizes:
+        max_num_tokens = max(max_num_tokens, vllm_config.compilation_config.max_cudagraph_capture_size)
+    _moonep_tokens_capacity = int(max_num_tokens)
+
+
+def get_moonep_tokens_capacity():
+    return _moonep_tokens_capacity
+
+
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
@@ -329,6 +361,18 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     """
     if not is_moe_model(vllm_config):
         return None
+
+    # MoonEP override: expert-parallel MoE steps whose token count fits the
+    # static SHMEM capacity S are routed through ascend-moonep dispatch;
+    # anything larger falls through to the SoC default (MC2/ALLTOALL/etc.).
+    if (
+        get_ascend_config().enable_moonep
+        and vllm_config.parallel_config.enable_expert_parallel
+        and get_ep_group().world_size > 1
+        and get_moonep_tokens_capacity() is not None
+        and num_tokens <= get_moonep_tokens_capacity()
+    ):
+        return MoECommType.SHMEM
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()

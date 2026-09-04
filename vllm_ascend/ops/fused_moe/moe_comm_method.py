@@ -58,6 +58,12 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
         _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
         _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        if get_ascend_config().enable_moonep:
+            # Imported lazily so a build without the ascend-moonep package (or
+            # with the feature disabled) never touches it at module import.
+            from vllm_ascend.ops.fused_moe.moonep_comm import MoonEPCommImpl
+
+            _MoECommMethods[MoECommType.SHMEM] = MoonEPCommImpl(moe_config)
     else:
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 

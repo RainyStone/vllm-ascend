@@ -164,6 +164,12 @@ class AscendConfig:
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
+        # MoonEP (SHMEM symmetric-memory MoE dispatch) — ascend-moonep backend.
+        # Requires: enable_expert_parallel, E % ep_size == 0 and the
+        # ascend-moonep package installed. Enable via engine additional config:
+        #   --additional-config '{"enable_moonep": true}'
+        self.enable_moonep = bool(additional_config.get("enable_moonep", False))
+
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
             "enable_matmul_allreduce",

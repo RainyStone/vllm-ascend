@@ -148,7 +148,8 @@ def _prefetch_postprocess_impl_fake(stop_flag: torch.Tensor) -> None:
 def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tensor) -> torch.Tensor:
     moe_comm_type = _EXTRA_CTX.moe_comm_type
     if (
-        moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+        moe_comm_type
+        in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2, MoECommType.SHMEM}
         or _EXTRA_CTX.flash_comm_v1_enabled
     ):
         return final_hidden_states

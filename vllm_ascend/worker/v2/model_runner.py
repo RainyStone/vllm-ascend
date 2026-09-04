@@ -44,6 +44,7 @@ from vllm_ascend.ascend_forward_context import (
     select_moe_comm_method,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    set_moonep_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method
@@ -126,6 +127,7 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_query_len = self.num_speculative_steps + 1
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        set_moonep_tokens_capacity(vllm_config)
         set_mc2_mask(vllm_config, self.device)
 
         # we need to update full graph params in run_fullgraph,

@@ -180,6 +180,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
     _EXTRA_CTX,
+    set_moonep_tokens_capacity,
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
@@ -499,6 +500,7 @@ class NPUModelRunner(GPUModelRunner):
 
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.uniform_decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.uniform_decode_query_len)
+        set_moonep_tokens_capacity(vllm_config)
         set_mc2_mask(vllm_config, self.device)
         # Compute potential_max_tokens once here; it is reused by the skip-allreduce
         # decision and the o_proj static-exchange buffer sizing (see get_potential_max_tokens).
