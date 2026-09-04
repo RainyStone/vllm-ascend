@@ -48,6 +48,17 @@ Limitations (POC scope, all fail fast):
   * per-step token count must fit the static capacity S
     (``max_num_batched_tokens``), otherwise the step falls back to the
     SoC-default comm method.
+  * Capacity envelope (empirical, this ascend-moonep build): the planning
+    kernel silently drops dispatched rows once a rank's receive share exceeds
+    its S*K symmetric chunk (measured at R=4 with heavy per-expert skew and
+    with every rank padding to expert 0 — combine then misplaces rows for the
+    other ranks). Pad rows therefore route to each rank's own first expert
+    (zero-weight; MOONEP_PAD_EXPERT0=1 restores the expert-0 behavior), and
+    expert loads must stay roughly balanced across ranks (uniform routing
+    passes bit-exact comm checks at R=4; MindSpeed-MM's slot/prefetch scheme
+    exists precisely to enforce that balance, and is out of POC scope here).
+    Models with E >> R and smooth routers (e.g. E=256 / R=4: per-rank receive
+    is the sum over its 64 owned experts) sit well inside the envelope.
 
 The ascend-moonep library is imported lazily so a stock vllm-ascend install
 (without the package or with ``enable_moonep`` off) is unaffected.
@@ -272,6 +283,14 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         hidden_p[:T].copy_(hidden_states)
         route_p[:T].copy_(topk_weights.to(torch.float32))
         topk_p[:T].copy_(topk_ids.to(torch.int32))
+        # Pad rows route to this rank's *own* first expert (rank*epn): routing
+        # every rank's pads to expert 0 piles S-T rows onto one rank, which the
+        # MoonEP planning/combine kernels misplace for high ranks (R >= 3).
+        # Pads are zero-hidden / zero-weight, so their expert is irrelevant to
+        # the result. (MOONEP_PAD_EXPERT0=1 restores the expert-0 behavior.)
+        if T < capacity and os.environ.get("MOONEP_PAD_EXPERT0", "0") != "1":
+            epn_pad = self.num_experts // get_ep_group().world_size
+            topk_p[T:].fill_(get_ep_group().rank_in_group * epn_pad)
         tpe = torch.bincount(topk_p.reshape(-1), minlength=E).to(torch.int32).contiguous()
 
         buffer = _buffer_for(E, K, H)
@@ -320,19 +339,30 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # (mirrors MindSpeed shmem_ep_forward; the Ascend combine kernel does
         # not apply weights itself). The MLP output rows map 1:1 onto the
         # dispatched shard rows (grouped matmul preserves row order).
-        rows = hidden_states.to(torch.float32) if hidden_states.dtype != torch.float32 else hidden_states
         w = combine_metadata.w_trim
-        assert rows.shape[0] == w.shape[0], (
-            f"MoonEP combine: MLP produced {rows.shape[0]} rows but dispatch captured "
-            f"{w.shape[0]} row weights."
+        assert hidden_states.shape[0] == w.shape[0], (
+            f"MoonEP combine: MLP produced {hidden_states.shape[0]} rows but dispatch "
+            f"captured {w.shape[0]} row weights."
         )
-        weighted = (rows * w.unsqueeze(-1)).to(torch.bfloat16).contiguous()
-        out, _, _ = combine_metadata.buffer.combine(
+        rows = hidden_states.to(torch.float32) if hidden_states.dtype != torch.float32 else hidden_states
+        weighted = (rows * w.unsqueeze(-1)).to(torch.bfloat16)
+        # The combine kernel expects the full [S*K, H] shard tensor: its prologue
+        # copies the input into the symmetric chunk so remote ranks can RMA-GET
+        # this rank's computed rows. Only the prefix (rows_total) is real; the
+        # tail is never referenced by any plan, so pad with zeros.
+        buffer = combine_metadata.buffer
+        nvs = int(buffer._require_ctx()["NvS"])
+        S = int(buffer._require_ctx()["S"])
+        H = int(buffer._require_ctx()["H"])
+        full = torch.zeros(nvs, H, dtype=torch.bfloat16, device=weighted.device)
+        full[:weighted.shape[0]].copy_(weighted)
+        out, _, _ = buffer.combine(
             plan=combine_metadata.plan,
-            hidden_nvsh=weighted,
+            hidden_nvsh=full,
             route_weights_nvs=None,
             inter_rank_sync=True,
         )
+        assert out.shape == (S, H), f"MoonEP combine returned {tuple(out.shape)}"
         return out[:T].view(combine_metadata.hidden_shape)
 
 
