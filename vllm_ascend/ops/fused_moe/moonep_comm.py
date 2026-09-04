@@ -40,7 +40,6 @@ this comm method reuses ``PrepareAndFinalizeWithAll2All`` and the standard
 ``unified_apply_mlp``.
 
 Limitations (POC scope, all fail fast):
-  * tensor parallel size must be 1 (no TP token slicing),
   * no dynamic EPLB / expert maps / mix-placement (plain contiguous expert
     sharding), and no LoRA,
   * the MoE layer cannot run inside captured CUDA graphs (collective device
@@ -72,7 +71,6 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu  # noqa: F401
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
@@ -250,11 +248,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 "MoonEP dispatch cannot run inside captured CUDA graphs; "
                 "run with --enforce-eager (or disable cudagraph) when enable_moonep is on."
             )
-        if get_tensor_model_parallel_world_size() != 1:
-            raise NotImplementedError(
-                "MoonEP comm method supports tensor parallel size 1 only (POC scope)."
-            )
-
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids

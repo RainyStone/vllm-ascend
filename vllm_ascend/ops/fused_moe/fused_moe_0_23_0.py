@@ -278,10 +278,14 @@ class AscendFusedMoE(FusedMoE):
 
         setup_moe_comm_method(self.moe_config)
         if get_ascend_config().enable_moonep:
-            if self.dynamic_eplb or self._expert_map is not None or self.mix_placement:
+            expert_map = self._expert_map
+            map_is_identity = expert_map is None or bool(
+                torch.equal(expert_map.cpu(), torch.arange(expert_map.numel()))
+            )
+            if self.dynamic_eplb or self.mix_placement or not map_is_identity:
                 raise NotImplementedError(
-                    "enable_moonep requires dynamic EPLB / expert maps / mix_placement to be "
-                    "disabled (plain contiguous expert sharding only, POC scope)."
+                    "enable_moonep requires dynamic EPLB / mix_placement and an identity (linear "
+                    "placement) expert map — plain contiguous expert sharding only, POC scope."
                 )
             from vllm_ascend.ops.fused_moe.moonep_comm import register_moonep_layer
 
