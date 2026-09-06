@@ -211,6 +211,28 @@ class _MoonEPRuntime:
 _MOONEP_RUNTIME = _MoonEPRuntime()
 
 
+def ensure_runtime_initialized() -> None:
+    """MindSpeed-style wiring-time init for the MoonEP runtime.
+
+    Mirrors MindSpeed-MM (init_moonep_layer_states): as soon as the model graph
+    exists (end of worker load_model — every AscendFusedMoE layer is then
+    registered), construct all symmetric Buffers and run the single collective
+    ShmemRuntime.init_with_buffer, *before any forward*. Doing it lazily inside
+    the first forward worked for the MTE path but the UDMA path stalls in the
+    engine; early collective init on an otherwise-quiet device state is the
+    MindSpeed pattern that keeps the UDMA/URMA kernels healthy.
+
+    Idempotent; no-op when MoonEP is not enabled or EP world size <= 1.
+    """
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    if not get_ascend_config().enable_moonep:
+        return
+    if get_ep_group().world_size <= 1:
+        return
+    _MOONEP_RUNTIME._ensure_initialized()
+
+
 def _buffer_for(E: int, K: int, H: int):
     _MOONEP_RUNTIME._ensure_initialized()
     return _MOONEP_RUNTIME._buffers[(E, K, H)]
