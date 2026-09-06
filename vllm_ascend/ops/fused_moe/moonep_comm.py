@@ -172,6 +172,7 @@ class _MoonEPRuntime:
                 "MoonEP: no MoE layers registered (register_moonep_layer). "
                 "MoE layers must be created before the first forward."
             )
+        print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=creating-buffers nkeys={len(keys)}", flush=True)
         # Validate + create every Buffer *before* the single collective init.
         for E, K, H, nle in keys:
             if E % R != 0:
@@ -205,7 +206,28 @@ class _MoonEPRuntime:
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
             }
         if not ShmemRuntime.is_initialized():
-            ShmemRuntime.init_with_buffer(group=group)
+            bootstrap = os.environ.get("MOONEP_SHMEM_BOOTSTRAP", "uid")
+            print(
+                f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-enter "
+                f"bootstrap={bootstrap}",
+                flush=True,
+            )
+            if bootstrap == "ipport":
+                # Config-store bootstrap (the path ascend-moonep's own multi-rank
+                # tests validated) instead of the UID-over-HCCL broadcast.
+                from ascend_moonep.buffer_c import symmetric_descriptors
+
+                port = int(os.environ.get("MOONEP_SHMEM_IP_PORT", "28765"))
+                ShmemRuntime.init_with_ip_port(
+                    group=group,
+                    ip_port=f"tcp://127.0.0.1:{port}",
+                    descriptors=symmetric_descriptors(),
+                    enable_udma=use_udma,
+                    qp_count=0,
+                )
+            else:
+                ShmemRuntime.init_with_buffer(group=group)
+            print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
