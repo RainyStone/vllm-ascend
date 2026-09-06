@@ -331,6 +331,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         hidden_trim = h_nvs[:rows_total]
         # Row-aligned per-row route weights (see module docstring / probe):
         # clone because the symmetric weights_buf is shared by all layers.
+        if os.environ.get("MOONEP_PACE_SYNC", "0") == "1":
+            torch.npu.synchronize()
         w_trim = w_nvs[:rows_total].clone().to(torch.float32).contiguous()
 
         return MoETokenDispatchOutput(
