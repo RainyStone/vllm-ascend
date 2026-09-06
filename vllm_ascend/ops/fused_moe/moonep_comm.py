@@ -97,6 +97,8 @@ class MoonEPCombineMetadata:
     w_trim: torch.Tensor  # [rows_total] fp32, row-aligned with dispatched rows
     num_tokens: int  # actual (pre-pad) token count of this MoE call
     hidden_shape: torch.Size  # original hidden_states shape (for restore)
+    state: object | None = None  # _LayerWeightState when slot mode active
+    group_list: torch.Tensor | None = None  # [epn+B] int64 counts (slot mode)
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +110,14 @@ class MoonEPCombineMetadata:
 # ---------------------------------------------------------------------------
 _moonep_layer_registry: list[dict] = []
 _registry_lock = threading.Lock()
+_SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
 
 
-def register_moonep_layer(*, E: int, K: int, H: int, nle: int) -> None:
+def register_moonep_layer(*, E: int, K: int, H: int, nle: int, layer=None) -> None:
     """Record one MoE layer for MoonEP. Cheap; only called when enabled."""
     with _registry_lock:
-        _moonep_layer_registry.append({"E": int(E), "K": int(K), "H": int(H), "nle": int(nle)})
+        _moonep_layer_registry.append(
+            {"E": int(E), "K": int(K), "H": int(H), "nle": int(nle), "layer": layer})
 
 
 def _registry_keys() -> set[tuple]:
@@ -133,6 +137,9 @@ class _MoonEPRuntime:
         self._fail: Exception | None = None
         self._buffers: dict[tuple, object] = {}
         self._pads: dict[tuple, dict] = {}
+
+    def _slot_states(self) -> list:
+        return getattr(self, "_states", [])
 
     def _ensure_initialized(self):
         with self._lock:
@@ -228,6 +235,30 @@ class _MoonEPRuntime:
             else:
                 ShmemRuntime.init_with_buffer(group=group)
             print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
+        if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
+            from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
+
+            dev = int(torch.npu.current_device())
+            ep_grp = get_ep_group()
+            rank = ep_grp.rank_in_group
+            states = []
+            seen = set()
+            with _registry_lock:
+                entries = list(_moonep_layer_registry)
+            for e in entries:
+                layer = e.get("layer")
+                if layer is None or id(layer) in seen:
+                    continue
+                seen.add(id(layer))
+                w13 = layer.w13_weight
+                F = int(w13.shape[2]) // 2
+                state = _LayerWeightState(layer, int(e["E"]), int(e["H"]), F, rank, dev)
+                states.append(state)
+            self._states = states
+            for st in states:
+                st.publish()
+            # map local vllm w13 tensor identity -> its balance state
+            self._state_by_w13 = {id(st._w13_src): st for st in states}
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
@@ -347,6 +378,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         cu = cu.to(torch.int64)
         counts = cu - torch.cat((cu.new_zeros(1), cu[:-1]))
         local_counts = counts[rank * epn:(rank + 1) * epn].contiguous()
+        slot_counts = None
+        if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
+            # load-balance path: rows for prefetched (slot) experts stay local
+            slot_counts = counts[E:].contiguous()
+            local_counts = torch.cat((local_counts, slot_counts))
         rows_total = int(local_counts.sum().item())
         if rows_total < 0 or rows_total > int(K) * capacity:
             raise RuntimeError(f"MoonEP: invalid dispatched row count {rows_total}.")
@@ -357,6 +393,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             torch.npu.synchronize()
         w_trim = w_nvs[:rows_total].clone().to(torch.float32).contiguous()
 
+        state = (
+            getattr(_SLOT_TLS, "state", None)
+            if os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
+            else None
+        )
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
             group_list=local_counts,
@@ -367,6 +408,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 w_trim=w_trim,
                 num_tokens=T,
                 hidden_shape=hidden_states.shape,
+                state=state,
+                group_list=local_counts,
             ),
         )
 
@@ -418,3 +461,45 @@ class MoonEPCommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def fused_experts(self, fused_experts_input):
+        if os.environ.get("MOONEP_SLOT_MODE", "0") != "1":
+            return super().fused_experts(fused_experts_input)
+        from vllm_ascend.ops.fused_moe.moonep_balance import run_slot_forward
+        from vllm_ascend.ops.fused_moe.moe_runtime_args import build_token_dispatch_input
+
+        w1 = fused_experts_input.weights.w1
+        if isinstance(w1, (list, tuple)):
+            raise NotImplementedError(
+                "MoonEP slot mode requires single (non-fusion) weight tensors."
+            )
+        rt = _MOONEP_RUNTIME
+        state = getattr(rt, "_state_by_w13", {}).get(id(w1))
+        if state is None:
+            raise RuntimeError(
+                "MoonEP slot mode: no balance state for this layer's w13 "
+                "(ensure_runtime_initialized must run after weight loading)."
+            )
+        _SLOT_TLS.state = state
+        try:
+            disp = self.token_dispatcher.token_dispatch(
+                build_token_dispatch_input(fused_experts_input=fused_experts_input)
+            )
+            meta = disp.combine_metadata
+            mlp_rows = run_slot_forward(
+                state=meta.state,
+                buffer=meta.buffer,
+                plan=meta.plan,
+                hidden_trim=disp.hidden_states,
+                group_list=meta.group_list,
+                fused_experts_input=fused_experts_input,
+            )
+            routed_out = self.token_dispatcher.token_combine(mlp_rows, meta)
+        finally:
+            _SLOT_TLS.state = None
+        return FusedExpertsResult(
+            routed_out=routed_out,
+            group_list_type=disp.group_list_type,
+            expert_tokens=disp.group_list,
+            swiglu_limit=fused_experts_input.swiglu_limit,
+        )

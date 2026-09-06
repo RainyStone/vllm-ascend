@@ -23,6 +23,8 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+import os
+
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -290,11 +292,16 @@ class AscendFusedMoE(FusedMoE):
                 )
             from vllm_ascend.ops.fused_moe.moonep_comm import register_moonep_layer
 
+            if os.environ.get("MOONEP_SLOT_MODE", "0") == "1" and self.quant_config is not None:
+                raise NotImplementedError(
+                    "MoonEP slot mode requires unquantized (bf16) MoE weights (POC)."
+                )
             register_moonep_layer(
                 E=self.moe_config.num_experts,
                 K=self.top_k,
                 H=self.hidden_size,
                 nle=self.local_num_experts,
+                layer=self,
             )
         self.quant_type = self._get_quant_type()
 
