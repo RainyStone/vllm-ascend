@@ -243,7 +243,11 @@ def run_slot_forward(
     done once at init for inference). Returns the MLP output rows (same order
     as hidden_trim) for the caller's combine.
     """
-    if _EXTRA_CTX.capturing:
+    try:
+        capturing = _EXTRA_CTX.capturing
+    except Exception:
+        capturing = False  # outside an engine forward context (harness use)
+    if capturing:
         raise RuntimeError("MoonEP slot mode cannot run inside captured graphs.")
     buffer.prefetch_projections(
         plan=plan,

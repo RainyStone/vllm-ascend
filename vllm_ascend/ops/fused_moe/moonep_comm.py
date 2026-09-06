@@ -212,6 +212,28 @@ class _MoonEPRuntime:
                 "route": torch.zeros(capacity, K, dtype=torch.float32, device=dev),
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
             }
+        if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
+            from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
+
+            dev = int(torch.npu.current_device())
+            ep_grp = get_ep_group()
+            rank = ep_grp.rank_in_group
+            states = []
+            seen = set()
+            with _registry_lock:
+                entries = list(_moonep_layer_registry)
+            for e in entries:
+                layer = e.get("layer")
+                if layer is None or id(layer) in seen:
+                    continue
+                seen.add(id(layer))
+                w13 = layer.w13_weight
+                F = int(w13.shape[2]) // 2
+                states.append(
+                    _LayerWeightState(layer, int(e["E"]), int(e["H"]), F, rank, dev))
+            self._states = states
+            self._state_by_w13 = {id(st._w13_src): st for st in states}
+
         if not ShmemRuntime.is_initialized():
             bootstrap = os.environ.get("MOONEP_SHMEM_BOOTSTRAP", "uid")
             print(
@@ -236,29 +258,8 @@ class _MoonEPRuntime:
                 ShmemRuntime.init_with_buffer(group=group)
             print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
         if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
-            from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
-
-            dev = int(torch.npu.current_device())
-            ep_grp = get_ep_group()
-            rank = ep_grp.rank_in_group
-            states = []
-            seen = set()
-            with _registry_lock:
-                entries = list(_moonep_layer_registry)
-            for e in entries:
-                layer = e.get("layer")
-                if layer is None or id(layer) in seen:
-                    continue
-                seen.add(id(layer))
-                w13 = layer.w13_weight
-                F = int(w13.shape[2]) // 2
-                state = _LayerWeightState(layer, int(e["E"]), int(e["H"]), F, rank, dev)
-                states.append(state)
-            self._states = states
-            for st in states:
+            for st in self._states:
                 st.publish()
-            # map local vllm w13 tensor identity -> its balance state
-            self._state_by_w13 = {id(st._w13_src): st for st in states}
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
