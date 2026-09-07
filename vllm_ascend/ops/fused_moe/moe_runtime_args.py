@@ -151,6 +151,9 @@ def build_fused_experts_input(
     swiglu_alpha: float | None = 1.0,
     swiglu_beta: float | None = 0.0,
     lora_context=None,
+    # MoonEP shmem 调度的每层状态（仅 MoECommType.SHMEM 路径非 None），
+    # 由 AscendUnquantizedFusedMoEMethod.apply 从 routed_experts 透传
+    moonep_state=None,
 ) -> MoEFusedExpertsInput:
     if swiglu_limit is None:
         swiglu_limit = 0.0
@@ -206,6 +209,7 @@ def build_fused_experts_input(
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         lora_context=lora_context,
+        moonep_state=moonep_state,
     )
 
 

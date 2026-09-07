@@ -3706,6 +3706,11 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
+
+            # MoonEP shmem 调度：构建各 MoE 层的对称内存状态并发布权重。
+            # 必须落在 DeviceMemoryProfiler 窗口内——VMM 分配不走 torch
+            # caching allocator，不计入 profiling 会导致 KV cache 超分配。
+            self._maybe_init_moonep_shmem()
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
@@ -3742,6 +3747,50 @@ class NPUModelRunner(GPUModelRunner):
         logger.info(
             "Model runner load_model total time: %.2f seconds",
             load_model_total_time,
+        )
+
+    def _maybe_init_moonep_shmem(self) -> None:
+        """MoonEP shmem 调度的初始化入口（模型加载完成后、profiler 窗口内调用）。
+
+        做的事：收集全部 AscendMoERunner 层 → 推导 Buffer 静态容量 S →
+        为每层构建 VMM home chunk / [E+B] 投影 / [epn+B] 打包视图并发布
+        权重 → 统一拉起 ShmemRuntime（两段式，descriptor 快照须覆盖全部
+        VMM 分配）。
+        """
+        shmem_cfg = self.ascend_config.shmem_moonep_config
+        if not shmem_cfg.enabled:
+            return
+        # 延迟 import：未安装 ascend-moonep 时不影响其他路径
+        from vllm.distributed.parallel_state import get_ep_group
+
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+        from vllm_ascend.ops.fused_moe.moonep_shmem.runtime import (
+            init_moonep_shmem_states,
+        )
+
+        moe_runners = [m for m in self.model.modules() if isinstance(m, AscendMoERunner)]
+        if not moe_runners:
+            raise ValueError(
+                "shmem_moonep 已启用但模型中没有 AscendMoERunner 层；"
+                "请确认模型为 MoE 且 enable_expert_parallel=True"
+            )
+
+        # S（每 rank 静态 token 容量）推导：显式配置优先，否则取
+        # ceil(max_num_batched_tokens / tp_size)——与 All2All prepare 的
+        # TP pad/切分语义对齐（每个 TP rank 上的 token 数上界）
+        if shmem_cfg.max_tokens_per_rank is not None:
+            max_tokens_per_rank = shmem_cfg.max_tokens_per_rank
+        else:
+            max_batched = self.vllm_config.scheduler_config.max_num_batched_tokens
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            max_tokens_per_rank = (max_batched + tp_size - 1) // tp_size
+
+        init_moonep_shmem_states(
+            moe_runners=moe_runners,
+            ep_group=get_ep_group().device_group,
+            max_tokens_per_rank=max_tokens_per_rank,
+            num_slots_B=shmem_cfg.num_slots_B,
+            token_padding=shmem_cfg.token_padding,
         )
 
     def _start_dump_data(self) -> None:

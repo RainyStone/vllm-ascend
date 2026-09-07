@@ -27,6 +27,9 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+    # MoonEP 对称内存调度（ascend-moonep Buffer，单边 RMA + 动态副本专家），
+    # 与 EPLB 互斥；由 additional_config.shmem_moonep.enabled 强制选择
+    SHMEM = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -483,7 +486,19 @@ def select_moe_comm_method(
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     lora_config = getattr(vllm_config, "lora_config", None)
-    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
+    # MoonEP shmem 调度：配置强制选择（优先级最高，仿 LoRA 强制 ALLTOALL）。
+    # 互斥/能力校验集中在 AscendConfig（ascend_config.py），这里只做
+    # 运行时硬性条件检查。shmem 路径与 token 数无关（Buffer 静态容量 S 在
+    # 初始化时固定），因此覆盖 profile_run/dummy_run 与正常 forward。
+    # getattr 兜底：单测会用不含该字段的 SimpleNamespace mock ascend_config
+    _shmem_cfg = getattr(get_ascend_config(), "shmem_moonep_config", None)
+    if _shmem_cfg is not None and _shmem_cfg.enabled:
+        if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
+            raise ValueError(
+                "shmem_moonep 要求 enable_expert_parallel=True 且 EP world size > 1"
+            )
+        moe_comm_type = MoECommType.SHMEM
+    elif not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths

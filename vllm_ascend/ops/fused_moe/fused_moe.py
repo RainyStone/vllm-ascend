@@ -312,6 +312,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
+                # MoonEP shmem 调度的每层对称内存状态，模型加载后由
+                # init_moonep_shmem_states 挂载；非 SHMEM 路径恒为 None
+                moonep_state=getattr(layer, "_moonep_state", None),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -488,6 +491,35 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self._promote_attr_to_buffer("moe_load")
             if self.multi_stage:
                 self._promote_attr_to_buffer("load_counter")
+
+        # MoonEP shmem 调度的层级守卫（配置级互斥校验见
+        # AscendConfig._validate_shmem_moonep；此处校验每层的实际状态）
+        if ascend_config.shmem_moonep_config.enabled:
+            if self.quant_type != QuantType.NONE:
+                raise ValueError(
+                    f"shmem_moonep v1 仅支持 bf16 非量化，层 {layer_name} "
+                    f"的 quant_type={self.quant_type}"
+                )
+            if self.global_redundant_expert_num != 0:
+                raise ValueError(
+                    f"shmem_moonep 要求冗余专家数为 0，层 {layer_name} 实际为 "
+                    f"{self.global_redundant_expert_num}（请检查 EPLB 配置）"
+                )
+            if getattr(routed_experts, "zero_expert_num", 0) > 0:
+                raise NotImplementedError(
+                    "shmem_moonep v1 不支持 zero_expert（zero_expert 的 topk "
+                    "改写与 MoonEP planning 的全局专家号约定不兼容）"
+                )
+            if self.multistream_overlap_shared_expert:
+                raise ValueError(
+                    "shmem_moonep 与 multistream_overlap_shared_expert 互斥："
+                    "B 权重槽全层共享要求单层串行使用"
+                )
+            if enable_dbo:
+                raise ValueError(
+                    "shmem_moonep 与 DBO（dual-batch overlap）互斥：双 batch "
+                    "交叠会打破 B 权重槽的单层串行复用契约"
+                )
 
         setup_moe_comm_method(self.moe_config)
         if self.multistream_overlap_shared_expert:
@@ -707,7 +739,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # `maybe_all_reduce_tensor_model_parallel`.
         moe_comm_type = _EXTRA_CTX.moe_comm_type
         if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2, MoECommType.SHMEM}
             and not shared_expert_dp_enabled()
         ):
             shared_out = tensor_model_parallel_all_reduce(shared_out)

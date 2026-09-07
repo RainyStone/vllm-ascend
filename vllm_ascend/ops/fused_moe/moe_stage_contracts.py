@@ -77,6 +77,11 @@ class MoEFusedExpertsInput:
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
     lora_context: Any = None
+    # MoonEP shmem 调度专用的每层状态（MoonEPLayerState），由
+    # init_moonep_shmem_states 在模型加载后挂载到 routed_experts 上，
+    # AscendUnquantizedFusedMoEMethod.apply 透传到此处；仅
+    # MoECommType.SHMEM 路径消费，其他路径恒为 None。
+    moonep_state: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,21 @@ class MoEAllToAllCombineMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class MoEShmemCombineMetadata:
+    """MoonEP shmem 调度的 dispatch → combine 携带状态。
+
+    plan 生命周期为单次 forward（combine 后即结束，不复用）；w_nvs 为
+    dispatch 返回的逐槽路由权重（fp32），供 combine 前逐槽加权使用——
+    MoonEP 的 combine 本身无权。
+    """
+
+    plan: Any
+    num_actual_tokens: int
+    w_nvs: torch.Tensor
+    moonep_state: Any
+
+
+@dataclass(frozen=True, slots=True)
 class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
     hidden_states: torch.Tensor
     group_list: torch.Tensor
@@ -165,6 +185,7 @@ __all__ = [
     "MoEMC2CombineMetadata",
     "MoEAllGatherCombineMetadata",
     "MoEAllToAllCombineMetadata",
+    "MoEShmemCombineMetadata",
     "MoETokenDispatchOutput",
     "MoEMlpComputeInput",
     "TMoECombineMetadata",

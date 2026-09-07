@@ -78,6 +78,10 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
+        # MoonEP shmem 调度（ascend-moonep 对称内存）配置；与 EPLB 互斥
+        shmem_moonep_config = additional_config.get("shmem_moonep", {})
+        self.shmem_moonep_config = ShmemMoonepConfig(shmem_moonep_config)
+
         from vllm_ascend import envs as ascend_envs
 
         self.scheduler_config = SchedulerConfig(
@@ -357,6 +361,65 @@ class AscendConfig:
             additional_config.get("sparse_kv_offload_config", {}),
         )
         self._validate_sparse_c8_kv_offload_compatibility()
+
+        # MoonEP shmem 调度（ascend-moonep 对称内存）配置；与 EPLB 互斥
+        self._validate_shmem_moonep()
+
+    def _validate_shmem_moonep(self) -> None:
+        """MoonEP shmem 调度的互斥/能力校验。
+
+        互斥项：
+          - dynamic EPLB / 冗余专家：MoonEP 每次前向由 prefetch_weight 动态
+            建立副本（运行时均衡），与周期性静态重排机制重复；
+          - enable_fused_mc2：fused 算子要求 NZ 权重格式且为单算子闭环，
+            无法嵌入 prefetch/combine 流程；
+          - 量化：v1 仅支持 bf16（W8A8/W4A8/MXFP4 的权重格式适配留待 v2，
+            comm_method.py 中预留了分支点）；
+          - LoRA：LoRA 补丁依赖 alltoall/allgather 的路由元数据；
+          - multistream_overlap_shared_expert / DBO：B 权重槽全层共享的
+            复用契约要求同一 rank 任意时刻至多一个 MoE 层在使用槽位。
+        """
+        if not self.shmem_moonep_config.enabled:
+            return
+        if self.eplb_config.dynamic_eplb:
+            raise ValueError(
+                "shmem_moonep 与 eplb_config.dynamic_eplb 互斥：MoonEP 运行时"
+                "动态均衡已覆盖 EPLB 的周期性重排能力，请关闭 dynamic_eplb"
+            )
+        if self.eplb_config.num_redundant_experts != 0:
+            raise ValueError(
+                "shmem_moonep 要求 eplb_config.num_redundant_experts == 0："
+                "副本专家由 MoonEP 的 B 预取槽在运行时动态建立"
+            )
+        if self.enable_fused_mc2 == 1:
+            raise ValueError(
+                "shmem_moonep 与 enable_fused_mc2 互斥：fused 算子要求 NZ "
+                "权重格式且不可拆分，请置 enable_fused_mc2=0"
+            )
+        if self.vllm_config.quant_config is not None:
+            raise ValueError(
+                "shmem_moonep v1 仅支持 bf16 非量化模型，检测到 quant_config="
+                f"{self.vllm_config.quant_config}；量化适配留待 v2"
+            )
+        if self.vllm_config.lora_config is not None:
+            raise ValueError("shmem_moonep v1 不支持 LoRA")
+        if getattr(self, "multistream_overlap_shared_expert", False):
+            raise ValueError(
+                "shmem_moonep 与 multistream_overlap_shared_expert 互斥："
+                "B 权重槽全层共享要求单层串行使用"
+            )
+        if self.vllm_config.speculative_config is not None:
+            raise ValueError(
+                "shmem_moonep v1 不支持投机采样（MTP/drafter 的 MoE 层未挂 "
+                "moonep 状态，且双层并发会打破 B 槽串行复用契约）"
+            )
+        logger.info(
+            "shmem_moonep 已启用: num_slots_B=%s token_padding=%d "
+            "max_tokens_per_rank=%s",
+            self.shmem_moonep_config.num_slots_B or "auto(=epn)",
+            self.shmem_moonep_config.token_padding,
+            self.shmem_moonep_config.max_tokens_per_rank or "auto",
+        )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
@@ -920,6 +983,55 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class ShmemMoonepConfig:
+    """MoonEP shmem 调度配置（additional_config 的 "shmem_moonep" 节）。
+
+    字段：
+      enabled:             是否启用（启用后 MoECommType 强制为 SHMEM）
+      num_slots_B:         每 rank 权重预取槽数，None=epn（每属主专家一槽，
+                           与训练版行为一致；调小省显存但降低热点覆盖能力）
+      token_padding:       每个 VM group 段向上对齐的 token 数（昇腾默认 1）
+      max_tokens_per_rank: MoonEP Buffer 的静态 token 容量 S；None=自动取
+                           ceil(max_num_batched_tokens / tp_size)
+    """
+
+    _defaults = {
+        "enabled": False,
+        "num_slots_B": None,
+        "token_padding": 1,
+        "max_tokens_per_rank": None,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"shmem_moonep config has no attribute '{key}'")
+        self._validate_config()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"shmem_moonep config has no attribute '{key}'")
+
+    def _validate_config(self):
+        if not isinstance(self.config["enabled"], bool):
+            raise TypeError("shmem_moonep.enabled must be a bool")
+        if self.config["num_slots_B"] is not None:
+            if not isinstance(self.config["num_slots_B"], int) or self.config["num_slots_B"] <= 0:
+                raise ValueError("shmem_moonep.num_slots_B 必须为正整数或 null（=epn）")
+        if not isinstance(self.config["token_padding"], int) or self.config["token_padding"] < 1:
+            raise ValueError("shmem_moonep.token_padding 必须为 >=1 的整数")
+        if self.config["max_tokens_per_rank"] is not None:
+            if not isinstance(self.config["max_tokens_per_rank"], int) or self.config["max_tokens_per_rank"] <= 0:
+                raise ValueError("shmem_moonep.max_tokens_per_rank 必须为正整数或 null（自动推导）")
 
 
 class ShortRequestFirstConfig:

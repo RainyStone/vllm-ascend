@@ -373,6 +373,14 @@ class NPUWorker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        # MoonEP shmem 调度：进程组销毁前释放 ascend-moonep 的 VMM/对称内存
+        # 资源（Buffer 构造时 explicitly_destroy=True，需显式销毁）
+        if get_ascend_config().shmem_moonep_config.enabled:
+            from vllm_ascend.ops.fused_moe.moonep_shmem.runtime import (
+                destroy_all_moonep_states,
+            )
+            destroy_all_moonep_states()
+
         if model_runner := getattr(self, "model_runner", None):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
