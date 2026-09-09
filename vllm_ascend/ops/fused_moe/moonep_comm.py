@@ -74,7 +74,7 @@ import torch_npu  # noqa: F401
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
-from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommMethod
+from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
