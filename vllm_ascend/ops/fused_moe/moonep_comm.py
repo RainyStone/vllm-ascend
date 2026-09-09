@@ -127,6 +127,14 @@ def _dump_slot_stats():
               flush=True)
 
 
+def _moonep_slot_count(E: int, epn: int) -> int:
+    """Effective prefetch-slot count B: env MOONEP_B, default epn = E/R."""
+    b = int(os.environ.get("MOONEP_B", epn))
+    if b < 1 or b > epn:
+        raise ValueError(f"MOONEP_B must be in [1, {epn}], got {b}")
+    return b
+
+
 def register_moonep_layer(*, E: int, K: int, H: int, nle: int, layer=None) -> None:
     """Record one MoE layer for MoonEP. Cheap; only called when enabled."""
     with _registry_lock:
@@ -214,7 +222,7 @@ class _MoonEPRuntime:
             # B (prefetch slots) must equal epn for the planning kernel.
             buf = Buffer(
                 int(capacity), H, K, E, R,
-                token_padding=1, B=E // R, group=group,
+                token_padding=1, B=_moonep_slot_count(E, E // R), group=group,
                 explicitly_destroy=True,
                 **({"use_udma": True} if use_udma else {}),
             )

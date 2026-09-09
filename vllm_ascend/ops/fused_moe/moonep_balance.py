@@ -118,7 +118,9 @@ class _LayerWeightState:
         epn = w13.shape[0]
         assert w13.shape[1] == H and w13.shape[2] == 2 * F, w13.shape
         assert w2.shape == (epn, F, H), w2.shape
-        B = epn
+        B = int(os.environ.get("MOONEP_B", epn))
+        if B < 1 or B > epn:
+            raise ValueError(f"MOONEP_B must be in [1, {epn}], got {B}")
         self.E, self.H, self.F, self.epn, self.B = E, H, F, epn, B
 
         shared = _SharedSlots.get(E, H, F, B, rank, dev)
