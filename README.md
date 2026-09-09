@@ -57,7 +57,9 @@ export PYTHONPATH=/path/to/this/repo:$PYTHONPATH   # 覆盖 stock vllm_ascend
 export ASCEND_CUSTOM_OPP_PATH=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export MOONEP=1 MOONEP_DISABLE_UDMA=1             # MoonEP + MTE 内核（引擎内当前可用路径）
+export MOONEP=1 MOONEP_SHMEM_BOOTSTRAP=ipport      # 引擎必须 ipport(config-store)引导,见限制#1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False  # URMA 必需,见限制#1②
+export MOONEP_DISABLE_UDMA=1             # MTE 内核(无需 URMA 时;开 URMA 去掉此行)
 ```
 
 ## 使用
@@ -99,7 +101,11 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
 | 开关 | 作用 |
 |---|---|
 | `MOONEP=1`（additional_config `enable_moonep`） | 启用 MoonEP comm（需 EP>1） |
-| `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（**引擎内目前必须**，UDMA 见限制） |
+| `MOONEP_SHMEM_BOOTSTRAP=ipport` | shmem 引导方式（**引擎内必须 ipport**，默认已改；uid 走 HCCL 广播会死锁，见限制#1） |
+| `MOONEP_SHMEM_IP_PORT` | ipport 引导的 config-store 端口（默认 28765） |
+| `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
+| `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
+| `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
 | `MOONEP_SLOT_MODE=1` | slot/冗余专家平衡模式（仅 bf16 无量化） |
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
@@ -107,9 +113,23 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
 
 ## 限制与已知问题（重要）
 
-1. **引擎内 UDMA 死锁**：UDMA（URMA）路径在 vllm 引擎进程模型下死锁（standalone torchrun 正常）。
-   已定位到 HDK/驱动层：对称内存 fabric 需要 **HDK ≥ 26.0.RC1**（当前 25.7.rc1）。
-   因此引擎内请用 `MOONEP_DISABLE_UDMA=1`（MTE），性能为兼容路径水平。
+1. **引擎内 UDMA 路径已可用（2026-09-09 实测定案）**，两个坑：
+   - **① shmem 引导**：默认 `uid` bootstrap 在引擎的 HCCL 组上做 UID 广播会触发
+     设备任务异常（`UB_INLINE_WRITE` / `[HDCommunicate][Put] Invalid length` +
+     `Device oom 0x7110012`）→ 死锁。**必须 `MOONEP_SHMEM_BOOTSTRAP=ipport`**
+     （config-store，无 HCCL 广播）；代码默认已改 ipport。
+   - **② torch_npu `expandable_segments` 分配器 × URMA 上下文死锁（根因已定）**：
+     vllm-ascend 默认设 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`；
+     URMA 上下文（`enable_udma=True`）下，真实规模（数十 GB）设备分配后再做首个
+     moonep 跨卡同步即设备侧死锁（双卡 100% util 自旋，无任务异常）。最小复现：
+     引擎 spawn 链 + 28GB 分配 + expandable_segments:True + URMA on → 首 dispatch
+     死锁；去掉 expandable_segments 即通过（HCCL 交错/流/进程链均非触发因子）。
+     **引擎开 URMA 时必须 `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False`**
+     （vllm-ascend 尊重外部值）。实测：URMA on + ipport + 该 env → Qwen3-30B-A3B
+     TP2/EP2 引擎 e2e 完整通过（输出落盘）。
+     代价：无 expandable segments 时内存碎片/OOM 容忍度下降（vllm-ascend 默认开它
+     的目的）；如需两全，须由 torch_npu/ascend-moonep 修 URMA 与 expandable
+     segments 的 VA/页表兼容（或 HDK ≥ 26.0.RC1）。
 2. **NPU 对称内存可用性**：部分设备（长时间被占/驱动状态损坏的卡）会报
    `aclrtMemSetAccess ... 507899`（= ACL_ERROR_RT_DRV_INTERNAL_ERROR，驱动内部错误），
    需要设备 reset 或驱动升级；故障与 MoonEP 代码无关（MTE/UDMA 同样失败）。

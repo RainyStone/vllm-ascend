@@ -257,7 +257,14 @@ class _MoonEPRuntime:
             self._state_by_w13 = {id(st._w13_src): st for st in states}
 
         if not ShmemRuntime.is_initialized():
-            bootstrap = os.environ.get("MOONEP_SHMEM_BOOTSTRAP", "uid")
+            # Engine 环境默认走 ipport/config-store bootstrap：uid 路径要在
+            # 每个 worker 的 HCCL 组上做 UID 广播（dist.broadcast over HCCL），
+            # 在引擎里与刚创建的 UDMA-flagged VMM 上下文及模型加载后的设备态
+            # 冲突（实测 UB_INLINE_WRITE/HD Put 任务异常 → 全体自旋）。ipport
+            # 只在本机 rank0 起 config-store，无 HCCL 广播，引擎内实测通过
+            # （2026-09-09：uid 卡 init_with_buffer:182，ipport 可到首层 MoE
+            # dispatch）。standalone torchrun 无此问题，可用 MOONEP_SHMEM_BOOTSTRAP=uid 覆盖。
+            bootstrap = os.environ.get("MOONEP_SHMEM_BOOTSTRAP", "ipport")
             print(
                 f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-enter "
                 f"bootstrap={bootstrap}",
