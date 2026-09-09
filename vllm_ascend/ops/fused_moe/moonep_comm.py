@@ -73,8 +73,12 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.distributed.parallel_state import get_ep_group
 
+import atexit
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
+
+atexit.register(_dump_slot_stats)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
@@ -111,6 +115,18 @@ class MoonEPCombineMetadata:
 _moonep_layer_registry: list[dict] = []
 _registry_lock = threading.Lock()
 _SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
+
+# optional per-step slot statistics (MOONEP_SLOT_STATS=1, dumped at process exit)
+_SLOT_STATS = {"calls": 0, "with_slots": 0, "slot_rows": 0, "prefetch_experts": 0}
+
+
+def _dump_slot_stats():
+    import os
+    if os.environ.get("MOONEP_SLOT_STATS", "0") == "1":
+        s = _SLOT_STATS
+        print(f"[moonep-stats] dispatch_calls={s['calls']} calls_with_slot_rows={s['with_slots']} "
+              f"total_slot_rows={s['slot_rows']} total_prefetched_expert_slots={s['prefetch_experts']}",
+              flush=True)
 
 
 def register_moonep_layer(*, E: int, K: int, H: int, nle: int, layer=None) -> None:
@@ -387,6 +403,14 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         rows_total = int(local_counts.sum().item())
         if rows_total < 0 or rows_total > int(K) * capacity:
             raise RuntimeError(f"MoonEP: invalid dispatched row count {rows_total}.")
+        if os.environ.get("MOONEP_SLOT_STATS", "0") == "1" and slot_counts is not None:
+            s = _SLOT_STATS
+            s["calls"] += 1
+            sr = int(slot_counts.sum().item())
+            s["slot_rows"] += sr
+            if sr > 0:
+                s["with_slots"] += 1
+            s["prefetch_experts"] += int((plan.experts_to_copy[ep_group.rank_in_group] >= 0).sum().item())
         hidden_trim = h_nvs[:rows_total]
         # Row-aligned per-row route weights (see module docstring / probe):
         # clone because the symmetric weights_buf is shared by all layers.
