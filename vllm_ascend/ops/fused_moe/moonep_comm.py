@@ -77,8 +77,6 @@ import atexit
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
-
-atexit.register(_dump_slot_stats)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
@@ -528,3 +526,5 @@ class MoonEPCommImpl(MoECommMethod):
             expert_tokens=disp.group_list,
             swiglu_limit=fused_experts_input.swiglu_limit,
         )
+
+atexit.register(_dump_slot_stats)
