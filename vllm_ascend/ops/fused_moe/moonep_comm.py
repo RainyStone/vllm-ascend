@@ -341,6 +341,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ) -> MoETokenDispatchOutput[TMoECombineMetadata]:
+        _maybe_arm_udma_dump()
         if _EXTRA_CTX.capturing:
             raise RuntimeError(
                 "MoonEP dispatch cannot run inside captured CUDA graphs; "
@@ -536,3 +537,48 @@ class MoonEPCommImpl(MoECommMethod):
         )
 
 atexit.register(_dump_slot_stats)
+
+
+# ---------------------------------------------------------------------------
+# UDMA stall watchdog: MOONEP_UDMA_DUMP=1 arms a background torch_npu profiler
+# at the first dispatch and dumps the device trace after a stall window, to
+# capture which kernel never completes when UDMA deadlocks inside the engine.
+# ---------------------------------------------------------------------------
+_udma_dump_armed = False
+
+
+def _maybe_arm_udma_dump() -> None:
+    global _udma_dump_armed
+    if _udma_dump_armed:
+        return
+    if os.environ.get("MOONEP_UDMA_DUMP", "0") != "1":
+        return
+    if os.environ.get("MOONEP_DISABLE_UDMA", "0") == "1":
+        return
+    _udma_dump_armed = True
+    wait = int(os.environ.get("MOONEP_UDMA_DUMP_WAIT", "45"))
+    import time
+
+    def _dump():
+        try:
+            import torch_npu
+            from torch_npu import profiler
+
+            d = f"/tmp/udma_dump_r{os.environ.get('LOCAL_RANK', '?')}"
+            os.makedirs(d, exist_ok=True)
+            pr = profiler.profile(
+                activities=[
+                    profiler.ProfilerActivity.CPU,
+                    profiler.ProfilerActivity.NPU,
+                ],
+                on_trace_ready=profiler.tensorboard_trace_handler(d),
+            )
+            pr.start()
+            time.sleep(wait)
+            print("[udma-dump] stopping profiler (stall window elapsed)", flush=True)
+            pr.stop()
+            print("[udma-dump] DUMP DONE -> " + d, flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[udma-dump] failed: {exc}", flush=True)
+
+    threading.Thread(target=_dump, daemon=True).start()
