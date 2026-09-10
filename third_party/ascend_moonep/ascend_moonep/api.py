@@ -35,6 +35,39 @@ from .buffer_c import (
     map_to_sym_ptr,
 )
 from .planning import MoonEPCommPlan, allocate_planning_outputs
+
+# ASCEND_MOONEP_TIME_STATS=1: per-segment host timers inside the library call path.
+import time as _time
+
+_TSTATS_ON = os.environ.get("ASCEND_MOONEP_TIME_STATS", "0") == "1"
+_TRACE_ON = os.environ.get("ASCEND_MOONEP_TRACE", "0") == "1"
+_TSTATS: dict = {}
+
+
+def _ts(name, t0):
+    """Accumulate one segment and return the current timestamp (chainable)."""
+    if not _TSTATS_ON:
+        return 0.0
+    now = _time.perf_counter()
+    acc = _TSTATS.setdefault(name, [0.0, 0])
+    acc[0] += now - t0
+    acc[1] += 1
+    return now
+
+
+def _dump_lib_tstats():
+    if not _TSTATS_ON or not _TSTATS:
+        return
+    parts = ["[moonep-lib-tstats]"]
+    for name, (total, calls) in _TSTATS.items():
+        parts.append(
+            f"{name}: calls={calls} total={total:.3f}s avg={total / max(calls, 1) * 1e3:.3f}ms")
+    print(" ".join(parts), flush=True)
+
+
+import atexit as _atexit
+
+_atexit.register(_dump_lib_tstats)
 from .ops import (
     CombineOp,
     DispatchOp,
@@ -623,7 +656,12 @@ class Buffer:
     ) -> None:
         import os as _os
         _dbg = _os.environ.get("ASCEND_MOONEP_TRACE", "0") == "1"
-        stream = torch_npu.npu.current_stream().npu_stream
+        _t = _time.perf_counter() if _TSTATS_ON else 0.0
+        _t = _ts("disp_hdr", _t)
+        # ``cross_rank_barrier`` is a no-op and ignores the stream, so only pay
+        # for the stream query when tracing is actually on.
+        stream = torch_npu.npu.current_stream().npu_stream if (_dbg or _TSTATS_ON) else None
+        _t = _ts("disp_get_stream", _t)
         if _dbg:
             _cur = torch_npu.npu.current_stream()
             print(
@@ -634,6 +672,7 @@ class Buffer:
             )
         if inter_rank_sync:
             cross_rank_barrier(ctx, stream)
+        _t = _ts("disp_barrier", _t)
         if _dbg:
             print(f"[moonep-trace r{ctx['rank']}] dispatch: cross_rank_barrier done", flush=True)
 
@@ -644,6 +683,7 @@ class Buffer:
             ctx['kernels']['planning'].compute(
                 ctx, topk_flat, tokens_per_expert, cu_seqlens, plan,
                 shmem_instance_id=0)
+            _t = _ts("disp_plan_kernel", _t)
             if _dbg:
                 print(f"[moonep-trace r{ctx['rank']}] dispatch: planning compute done", flush=True)
 
@@ -657,6 +697,7 @@ class Buffer:
             build_dedup_map=planning_args is not None,
             shmem_instance_id=0,
         )
+        _t = _ts("disp_data_kernel", _t)
         if _dbg:
             print(f"[moonep-trace r{ctx['rank']}] dispatch: dispatch kernel done", flush=True)
         if not zero_copy:
@@ -666,6 +707,7 @@ class Buffer:
                 route_weights_nvs.copy_(
                     ctx['weights_buf_local'].view(torch.float32)
                 )
+        _t = _ts("disp_bnd_copy", _t)
 
     def _run_combine_on_current_stream(
         self,
@@ -679,7 +721,9 @@ class Buffer:
         inter_rank_sync: bool,
         zero_copy: bool,
     ) -> None:
-        stream = torch_npu.npu.current_stream().npu_stream
+        # cross_rank_barrier is a no-op and ignores the stream; only query it
+        # when tracing (the call is far from free inside a running engine).
+        stream = torch_npu.npu.current_stream().npu_stream if _TSTATS_ON or _TRACE_ON else None
         if not zero_copy:
             # master-style boundary copies into the shard (same stream).
             ctx['hidden_buf_local'].copy_(hidden_nvsh)

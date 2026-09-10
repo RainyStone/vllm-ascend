@@ -124,6 +124,8 @@ host 时间钉在关键路径上。已做的优化（单位：每层每 rank，d
 | MoonEP-MTE | 44274 | 9732 | **6797** | **0.87** | 0.188 / 0.108 |
 | MoonEP-URMA | 36379 | 8459 | **5805** | **0.75** | 0.171 / 0.164 |
 
+**测量纪律（本机实测）**：同一份代码 40 分钟内的绝对吞吐会漂移 ~8%（6797 → 6131 tok/s，设备空闲、无租户），所以单次跑数不能跨窗口比较，A/B 必须同窗口背靠背；本文所有 Δ 均为同窗口 A/B。
+
 剩余瓶颈已从"逐层同步"转到 **prefill 的库内 planning**（`disp_lib` prefill 0.32/0.57ms，随 N*K 行数线性）与 URMA 上下文自身开销；prefill 通信占比 MTE 82% / URMA 99%。
 
 **改这几处必须遵守的两条硬约束（踩过的坑）**：
@@ -158,6 +160,7 @@ host 时间钉在关键路径上。已做的优化（单位：每层每 rank，d
 | `MOONEP_NO_SYNC=0` | 关闭零同步 dispatch（默认开；改回逐层 `.item()` + 切片语义） |
 | `MOONEP_REUSE_OUT=0` | 关闭库内 dispatch 输出复用（默认开） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
+| `ASCEND_MOONEP_TIME_STATS=1` | 库内分段计时（barrier/planning 核/dispatch 核/边界拷贝，`[moonep-lib-tstats]`） |
 | `MOONEP_CAP_TRACE=1` | 打印每步选中的 dispatch 容量 |
 
 ## 限制与已知问题（重要）

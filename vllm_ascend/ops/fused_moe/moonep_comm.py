@@ -584,8 +584,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         ep_group = get_ep_group()
         epn = E // ep_group.world_size
         rank = ep_group.rank_in_group
-        cu = cu.to(torch.int64)
-        counts = cu - torch.cat((cu.new_zeros(1), cu[:-1]))
+        cu64 = cu.to(torch.int64)
+        # counts[i] = cu[i] - cu[i-1] with an implicit cu[-1] = 0 (the leading
+        # zero term is why this keeps the concat: slicing per rank would be off
+        # by one for rank 0).
+        counts = cu64 - torch.cat((cu64.new_zeros(1), cu64[:-1]))
         local_counts = counts[rank * epn:(rank + 1) * epn].contiguous()
         slot_counts = None
         if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
