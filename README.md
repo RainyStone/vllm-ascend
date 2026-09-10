@@ -109,12 +109,12 @@ host 时间钉在关键路径上。已做的优化（单位：每层每 rank，d
 | pad 尾部惰性写：只在 (T, 容量, pad 专家) 变化时写尾部 `[T:]`（`copy_` 每次覆盖 `[0:T]`） | 开 | disp_pad ≈0.03ms，每层省 3 次 launch |
 | hot path 去掉 `.to()` 临时张量（`copy_` 自带类型转换） | 开 | — |
 | **步长自适应容量池**（借鉴上游 vLLM `MoonEPBufferPool`）：init 预建 128/256/512/…/S_max 的 pow2 容量 Buffer，每步按 rank 对称步长（`forward_context.max_tokens_across_dp`）选最小容量 | 开 | 同码 A/B **+1.7%**，disp_buf 0.53→0.47ms |
-| 库内输出复用 `reuse_outputs`：缓存每层的 32MB `empty_like` + planning 输出表 | 关（实验） | 待 A/B（目标把 disp_lib 0.16→~0.06ms） |
-| 零同步 dispatch：不再读回 rows_total，MLP 直接吃完整 `[NvS,H]` + count-mode group_list | 关（实验） | dispatch 0.55→**0.29ms**、disp_post 0.33→**0.05ms**；但 combine 侧需设备侧 mask（+0.13ms）→ E2E 与同步版打平 |
+| 库内输出复用 `reuse_outputs`：缓存每层的 32MB `empty_like` + planning 输出表 | 开 | **+3.4%**，disp_lib 0.16 → **0.12ms** |
+| 零同步 dispatch：不再读回 rows_total，MLP 直接吃完整 `[NvS,H]` + count-mode group_list，combine 输入尾部由设备侧 `where` mask 清零 | 开 | **+20.5%**，dispatch 0.475→**0.30ms**、disp_post →**≈0** |
 
-累计（已验证口径：首 token 与 MC2 全一致 = 315）：dp2ep2 MTE G128 **4684 → 5469 tok/s（+16.8%）**、
-prefill 131.8 → 154.4（+17.2%），相对 MC2 从 0.59 升到 **0.69**；tp2 同码复测 2982 tok/s（原 2581-2658）。
-容量池与零同步路径的 N=1024 正确性复验被设备占用阻塞（冒烟规模已验证）。
+累计（已验证口径：首 token 与 MC2 全一致 = 315，dp2ep2 MTE G128 同会话 A/B）：
+**5511 → 5698（+reuse）→ 6639（+no-sync）→ 6744 tok/s（两个都开，+22.4%）**；
+相对已提交基线 4684 tok/s 累计 **+44%**。prefill/decode 拆分与三路线组件表见下节报告口径。
 
 **改这几处必须遵守的两条硬约束（踩过的坑）**：
 
@@ -145,8 +145,8 @@ prefill 131.8 → 154.4（+17.2%），相对 MC2 从 0.59 升到 **0.69**；tp2 
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
 | `MOONEP_POOL=0` | 关闭步长自适应容量池（退回固定 `max_num_batched_tokens` 容量） |
 | `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（默认 pow2 阶梯，≥128） |
-| `MOONEP_NO_SYNC=1` | 零同步 dispatch（实验；需配合 combine 侧设备 mask，默认关） |
-| `MOONEP_REUSE_OUT=1` | 库内 dispatch 输出复用（实验；默认关） |
+| `MOONEP_NO_SYNC=0` | 关闭零同步 dispatch（默认开；改回逐层 `.item()` + 切片语义） |
+| `MOONEP_REUSE_OUT=0` | 关闭库内 dispatch 输出复用（默认开） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
 | `MOONEP_CAP_TRACE=1` | 打印每步选中的 dispatch 容量 |
 

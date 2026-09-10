@@ -572,7 +572,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         h_nvs, w_nvs, cu, plan = buffer.dispatch(
             hidden_c, route_c, topk_c, tpe,
             zero_copy=False, inter_rank_sync=True,
-            reuse_outputs=os.environ.get("MOONEP_REUSE_OUT", "0") == "1",
+            reuse_outputs=os.environ.get("MOONEP_REUSE_OUT", "1") == "1",
         )
         _t2 = time.perf_counter()
 
@@ -601,7 +601,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             if sr > 0:
                 s["with_slots"] += 1
             s["prefetch_experts"] += int((plan.experts_to_copy[ep_group.rank_in_group] >= 0).sum().item())
-        if os.environ.get("MOONEP_NO_SYNC", "0") == "1":
+        if os.environ.get("MOONEP_NO_SYNC", "1") != "0":
             # Fast path: keep the row count on the device. The MLP takes the
             # full [NvS, H] shard plus the count-mode `group_list` and the
             # grouped matmul walks exactly sum(group_list) rows (rows past the
