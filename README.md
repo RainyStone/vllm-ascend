@@ -53,7 +53,8 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
 source /usr/local/Ascend/cann/set_env.sh
 unset MOONEP_SHMEM_IPPORT
 export ASCEND_RT_VISIBLE_DEVICES=0,1             # 空闲的健康卡
-export PYTHONPATH=/path/to/this/repo:$PYTHONPATH   # 覆盖 stock vllm_ascend
+export PYTHONPATH=/path/to/this/repo/third_party/ascend_moonep:/path/to/this/repo:$PYTHONPATH
+                                                 # vendored ascend-moonep 放最前(见代码结构),再覆盖 stock vllm_ascend
 export ASCEND_CUSTOM_OPP_PATH=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -191,6 +192,12 @@ prefill 131.8 → 154.4（+17.2%），相对 MC2 从 0.59 升到 **0.69**；tp2 
 
 ## 代码结构
 
+- `third_party/ascend_moonep/` — **vendored 的 ascend-moonep Python 层**（外部库无法推送改动，
+  故随本仓库携带；编译产物 `_C*.so` 与 `lib/*.so` 仍取自外部构建目录，可用
+  `ASCEND_MOONEP_BUILD_DIR` 指定）。**运行前把它放在 `PYTHONPATH` 最前面**:
+  `export PYTHONPATH=<repo>/third_party/ascend_moonep:$PYTHONPATH`。
+  携带的本地修改见 `third_party/ascend_moonep/README.md`（VMM device id 修复 +
+  `dispatch(reuse_outputs=)`）。
 - `vllm_ascend/ops/fused_moe/moonep_comm.py` — MoonEP comm 方法（owner 模式、运行时池、选择逻辑）
 - `vllm_ascend/ops/fused_moe/moonep_balance.py` — slot/平衡模式（权重镜像、预取、[epn+B] 别名 GEMM）
 - 其余小改动：`ascend_config.py`（开关）、`ascend_forward_context.py`（MoECommType.SHMEM）、
