@@ -96,6 +96,38 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
 
 `MOONEP_SLOT_STATS=1` 会在进程退出时打印：dispatch 总次数、发生槽平衡的次数、槽内行数、预取的远程专家槽数。
 
+## 性能优化点（dispatch/combine host 段，2026-09-10）
+
+引擎内 MoonEP 单层开销的大头在 host 段：每层十几到二十个小算子（本机单个 elementwise
+op ≈ 4-5µs host / ≈22µs 延迟，`int(x.sum().item())` ≈ 49/65µs），且逐层 `.item()` 同步把
+host 时间钉在关键路径上。已做的优化（单位：每层每 rank，dp2ep2 / MTE / 1024 seq×256 prompt）：
+
+| 优化 | 默认 | 实测 |
+|---|---|---|
+| `torch.bincount` → `torch.histc`：bincount 输出长度动态、需要 host 往返 | 开 | disp_tpe 0.30 → **0.02ms** |
+| pad 尾部惰性写：只在 (T, 容量, pad 专家) 变化时写尾部 `[T:]`（`copy_` 每次覆盖 `[0:T]`） | 开 | disp_pad ≈0.03ms，每层省 3 次 launch |
+| hot path 去掉 `.to()` 临时张量（`copy_` 自带类型转换） | 开 | — |
+| **步长自适应容量池**（借鉴上游 vLLM `MoonEPBufferPool`）：init 预建 128/256/512/…/S_max 的 pow2 容量 Buffer，每步按 rank 对称步长（`forward_context.max_tokens_across_dp`）选最小容量 | 开 | 同码 A/B **+1.7%**，disp_buf 0.53→0.47ms |
+| 库内输出复用 `reuse_outputs`：缓存每层的 32MB `empty_like` + planning 输出表 | 关（实验） | 待 A/B（目标把 disp_lib 0.16→~0.06ms） |
+| 零同步 dispatch：不再读回 rows_total，MLP 直接吃完整 `[NvS,H]` + count-mode group_list | 关（实验） | dispatch 0.55→**0.29ms**、disp_post 0.33→**0.05ms**；但 combine 侧需设备侧 mask（+0.13ms）→ E2E 与同步版打平 |
+
+累计（已验证口径：首 token 与 MC2 全一致 = 315）：dp2ep2 MTE G128 **4684 → 5469 tok/s（+16.8%）**、
+prefill 131.8 → 154.4（+17.2%），相对 MC2 从 0.59 升到 **0.69**；tp2 同码复测 2982 tok/s（原 2581-2658）。
+容量池与零同步路径的 N=1024 正确性复验被设备占用阻塞（冒烟规模已验证）。
+
+**改这几处必须遵守的两条硬约束（踩过的坑）**：
+
+1. **combine 的输入尾部必须是零**。combine 核会读整块 `[NvS,H]`，而 MLP 输出在
+   `sum(group_list)` 之后是**未初始化内存**、权重 chunk 未用行是陈旧内存 —— 不清理就会
+   *静默算错*（dp2ep2 下首 token 从全 315 变成十几个不同值，tp2 测不出来因为 tp2 每步
+   T==capacity、pad 路径不激活）。清零要用设备侧 `where(row_ids < sum(group_list))`，
+   不能用乘法（`NaN × 0 = NaN` 会漏）。
+2. 1-D mask 广播到 `[NvS,H]` 必须 `.unsqueeze(-1)`，否则广播对齐到最后一维 →
+   `size of tensor a (8192) must match b (2048)`，引擎挂到超时。
+3. 计时口径：`MOONEP_TIME_STATS=1` 会打印 `[moonep-tstats]`（MoonEP 各子段）与
+   `[tstats-baseline]`（MC2 融合算子）；MC2 是 host 入队时间（异步），MoonEP 含 kernel/同步，
+   两者只能同侧比较。prefill/decode 拆分用 GEN=1 与 GEN=128 两条腿相减。
+
 ## 关键配置/环境开关
 
 | 开关 | 作用 |
@@ -110,6 +142,12 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
+| `MOONEP_POOL=0` | 关闭步长自适应容量池（退回固定 `max_num_batched_tokens` 容量） |
+| `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（默认 pow2 阶梯，≥128） |
+| `MOONEP_NO_SYNC=1` | 零同步 dispatch（实验；需配合 combine 侧设备 mask，默认关） |
+| `MOONEP_REUSE_OUT=1` | 库内 dispatch 输出复用（实验；默认关） |
+| `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
+| `MOONEP_CAP_TRACE=1` | 打印每步选中的 dispatch 容量 |
 
 ## 限制与已知问题（重要）
 
@@ -138,8 +176,18 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
    计划中增加 `plan.remote_stats` 保护（越界自动回退原生 comm）。
 5. 仅 bf16 无量化、无 dynamic EPLB/mix、tp=1..N 均可（EP 跨 TP 组）；需 `--enforce-eager`
    （MoonEP 集体内核不能进 CUDA 图）。
-6. 当前引擎性能低于原生 MC2（MTE 兼容路径 + 无异步/流水）；性能目标依赖
-   HDK 升级后的 UDMA 快路径与后续重叠优化。
+6. **性能仍低于原生 MC2**（dp2ep2 下 MTE 约为 MC2 的 0.69，URMA 约 0.52；两者相对差距
+   与 tp2 拓扑一致，说明瓶颈是每层 dispatch 的 host 段 + 无重叠，与拓扑无关）。已削掉的
+   host 段见上文"性能优化点"；剩余大头是逐层 `.item()` 同步 + planning/dispatch 核的设备
+   时间（`disp_post` ≈0.33ms）与库内 per-call host 开销（`disp_lib` ≈0.17ms）。下一步方向：
+   库内输出复用/planning 输出表静态化、把 histogram 挪进 planning 核、planning 与 dispatch
+   合核（省一次 launch + 一次全 rank 栅栏），以及分块双缓冲做真重叠。
+7. **DP 拓扑下的 MoonEP 需要每个 rank 进程看到全部参与设备**（vLLM DP 默认会把
+   `ASCEND_RT_VISIBLE_DEVICES` 收窄成单卡，MoonEP 的 VMM/shmem 初始化在收窄进程里会踩
+   CANN 的 device id 语义问题：`aclrtMemSetAccess` 要物理号、`aclrtMallocPhysical` 要逻辑号）。
+   库侧已修 `memSetAccess` 一半（见 `ascend_moonep/buffer_c.py: acl_vmm_access_device_id`）；
+   实测 dp2ep2 需要保留全量可见 + 给 vllm-ascend 0.23.0 的 worker 补 DP 偏移（测试用
+   shim：`/home/tmp/dpshim/sitecustomize.py`，`MOONEP_DP_FULL_VISIBLE=1`）。
 
 ## 代码结构
 
