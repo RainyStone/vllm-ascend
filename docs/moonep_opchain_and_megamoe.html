@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoonEP 算子链路与 Megas MoE 融合可行性分析</title>
+<style>
+  :root{
+    --surface-0:#f4f4f2; --surface-1:#fcfcfb; --surface-2:#ececea;
+    --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#86847e;
+    --border:#d9d9d5; --grid:#e6e6e2;
+    --series-1:#2a78d6;  /* blue   - MoonEP / dispatch 侧 */
+    --series-2:#eb6834;  /* orange - MC2 基线 */
+    --series-3:#1baf7a;  /* aqua   - combine 侧 */
+    --series-4:#eda100;  /* yellow - 计算 */
+  }
+  @media (prefers-color-scheme: dark){
+    :root:where(:not([data-theme="light"])){
+      --surface-0:#121211; --surface-1:#1a1a19; --surface-2:#242423;
+      --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8f8e86;
+      --border:#3a3a37; --grid:#2c2c2a;
+      --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:32px 20px 64px;
+    background:var(--surface-0); color:var(--text-primary);
+    font:15px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  .wrap{max-width:1040px;margin:0 auto}
+  header h1{font-size:25px;line-height:1.3;margin:0 0 6px}
+  .meta{color:var(--text-muted);font-size:13px;margin-bottom:26px}
+  .card{
+    background:var(--surface-1); border:1px solid var(--border); border-radius:10px;
+    padding:20px 22px; margin:16px 0;
+  }
+  h2{font-size:18px;margin:30px 0 10px}
+  h3{font-size:15px;margin:20px 0 8px}
+  p{margin:8px 0}
+  ul{margin:8px 0 8px 20px;padding:0}
+  li{margin:4px 0}
+  code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:13px}
+  .tl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .tl .tile{background:var(--surface-2);border-radius:8px;padding:12px 14px}
+  .tl .n{font-size:22px;font-weight:600;line-height:1.2}
+  .tl .l{font-size:12.5px;color:var(--text-secondary);margin-top:4px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:10px 0}
+  th,td{border-bottom:1px solid var(--grid);padding:7px 9px;text-align:left;vertical-align:top}
+  th{color:var(--text-secondary);font-weight:600;background:transparent}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .chip{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:20px;border:1px solid var(--border);color:var(--text-secondary)}
+  .flow{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:16px 0}
+  .step{
+    flex:1 1 132px;min-width:132px;border-radius:9px;padding:10px 11px;
+    border:1px solid var(--border);background:var(--surface-2);position:relative;
+  }
+  .step .k{font-size:11px;color:var(--text-muted);letter-spacing:.04em}
+  .step .t{font-size:13.5px;font-weight:600;margin:2px 0 3px}
+  .step .d{font-size:11.5px;color:var(--text-secondary);line-height:1.45}
+  .step.s-disp{border-left:3px solid var(--series-1)}
+  .step.s-comp{border-left:3px solid var(--series-3)}
+  .step.s-calc{border-left:3px solid var(--series-4)}
+  .arrow{align-self:center;color:var(--text-muted);font-size:15px}
+  .chart{margin:6px 0 2px}
+  .chart .row{display:grid;grid-template-columns:190px 1fr 74px;gap:10px;align-items:center;margin:5px 0}
+  .chart .lab{font-size:13px;color:var(--text-secondary);text-align:right}
+  .chart .track{position:relative;height:16px;background:transparent}
+  .chart .bar{height:16px;border-radius:0 4px 4px 0;position:relative;cursor:default}
+  .chart .val{font-size:12.5px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary);margin:10px 0 2px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
+  .tier{border-left:3px solid var(--series-1);padding-left:14px;margin:18px 0}
+  .tier.t2{border-left-color:var(--series-2)}
+  .tier.t3{border-left-color:var(--series-3)}
+  .tier h3{margin-top:0}
+  .verdict{font-size:12.5px;color:var(--text-secondary)}
+  footer{color:var(--text-muted);font-size:12.5px;margin-top:28px}
+  .chart-tip{
+    position:fixed;pointer-events:none;background:var(--surface-1);color:var(--text-primary);
+    border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:12.5px;
+    box-shadow:0 3px 10px rgba(0,0,0,.14);opacity:0;transition:opacity .1s;z-index:9;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>MoonEP 算子链路与 Megas MoE 融合可行性分析</h1>
+  <div class="meta">
+    Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0 · Qwen3-30B-A3B (E=128, K=8, H=2048) ·
+    dp2ep2 (2×NPU, EP=2, TP=1) · 1024 seq × 256 prompt · 数据窗口 2026-09-10/11
+  </div>
+</header>
+
+<div class="card">
+  <h2 style="margin-top:0">结论摘要</h2>
+  <div class="tl">
+    <div class="tile"><div class="n">6 个设备核</div><div class="l">MoonEP 单层:planning、dispatch、gmm×2、swiglu、combine,另有 12~15 个 elementwise/copy</div></div>
+    <div class="tile"><div class="n">0.202 ms</div><div class="l">MoonEP 通信段合计 / 层 / 卡(decode),MC2 融合算子同样口径为 0.157 ms</div></div>
+    <div class="tile"><div class="n">+10~15%</div><div class="l">全部融合(含 launch/同步/边界拷贝)对 decode 的理论上限</div></div>
+    <div class="tile"><div class="n">最后一档才值钱</div><div class="l">通信与 GEMM 融合(MC2 式)需要自写 AscendC 分组 GEMM,属产品级投入</div></div>
+  </div>
+</div>
+
+<h2>1. 背景:两条路线</h2>
+
+<div class="card">
+  <h3>① MC2 —— Ascend 原生融合路线(基线)</h3>
+  <p>
+    MoE 的 expert-parallel token 交换由两个 <b>aclnn 融合大算子</b>完成:
+    <code>torch_npu.npu_moe_distribute_dispatch_v2</code> 与
+    <code>torch_npu.npu_moe_distribute_combine_v2</code>。名字里的
+    <b>MC2 = Matmul-Communication ×2</b>:dispatch/combine 与前后 GEMM 在算子内部
+    流水,通信等待被 cube 计算覆盖;底层通信用 HCCL(all2all)。对上层只暴露
+    「一次调用」,没有 plan 表、没有跨层状态。
+  </p>
+  <p class="verdict">
+    实测(本机 dp2ep2):decode 每层 dispatch 0.093 ms + combine 0.064 ms = <b>0.157 ms</b>;
+    总吞吐 <b>7719 tok/s</b>(基线 1.00)。它在 2 卡、E=128、均匀路由下已接近最优。
+  </p>
+
+  <h3>② MoonEP —— 对称内存单边路线(本研究)</h3>
+  <p>
+    token 行按「专家属主」经 CANN SHMEM 对称内存做单边 RMA,替换 HCCL 的 all2all:
+    planning 核算出「谁发给谁」的 plan,dispatch 核把行写进各 rank 的对称 chunk,
+    combine 核把对端算好的行取回并按 K 求和。两个引擎变体:
+    <b>MTE</b>(<code>MOONEP_DISABLE_UDMA=1</code>,走 MTE 搬运)与
+    <b>URMA</b>(带 URMA 上下文,走 UDMA 快路径)。对上层是三个独立核 + plan 状态,
+    因此 host 侧与同步开销天然比 MC2 高——这正是本报告后半段要分析的部分。
+  </p>
+
+  <div class="legend">
+    <span><i style="background:var(--series-2)"></i>MC2 基线</span>
+    <span><i style="background:var(--series-1)"></i>MoonEP-MTE / URMA</span>
+  </div>
+  <div class="chart" id="chart-throughput"></div>
+
+  <table>
+    <thead><tr>
+      <th>路线</th><th class="num">prefill tok/s</th><th class="num">decode tok/s</th>
+      <th class="num">总 tok/s</th><th class="num">vs MC2</th>
+      <th class="num">单层 dispatch+combine (decode)</th>
+    </tr></thead>
+    <tbody>
+      <tr><td>MC2 基线</td><td class="num">50 675</td><td class="num">11 014</td><td class="num"><b>7 719</b></td><td class="num">1.00</td><td class="num">0.157 ms</td></tr>
+      <tr><td>MoonEP-MTE</td><td class="num">44 110</td><td class="num">8 785</td><td class="num"><b>6 318</b></td><td class="num">0.82</td><td class="num">0.202 ms</td></tr>
+      <tr><td>MoonEP-URMA</td><td class="num">35 900</td><td class="num">8 749</td><td class="num"><b>5 913</b></td><td class="num">0.77</td><td class="num">0.169 ms</td></tr>
+    </tbody>
+  </table>
+  <p class="verdict">
+    正确性口径:三条路线每条序列的首 token 完全一致(=315)。同窗口测量;本机跨窗口绝对吞吐会漂移约 8%,故所有对比均同窗口背靠背。
+    每卡负载(owner 模式):每层承担 (token, expert) 条目 3175 vs 3155(<b>差 0.63%</b>,为路由统计涨落),其中 padding 条目 149/层(4.7%)。
+  </p>
+</div>
+
+<h2>2. MoonEP 单层算子链(按执行顺序)</h2>
+
+<div class="card">
+  <div class="flow">
+    <div class="step s-disp"><div class="k">A · 集成侧</div><div class="t">pad 预处理</div>
+      <div class="d"><code>zero_/fill_/copy_</code> ×3~5<br>0.035 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-disp"><div class="k">A · 集成侧</div><div class="t">tpe 直方图</div>
+      <div class="d"><code>histc</code>+<code>to(i32)</code><br>0.022 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-disp"><div class="k">B · AscendC 核</div><div class="t">planning</div>
+      <div class="d">直方图/前缀/排序 → plan、dst、去重表;含全 rank 栅栏<br>0.068 ms(0.26 prefill)</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-disp"><div class="k">B · AscendC 核</div><div class="t">dispatch</div>
+      <div class="d">按 plan 把行 RMA 写入各 rank 对称 chunk<br>0.017 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-disp"><div class="k">B · copy</div><div class="t">边界拷贝 ×2</div>
+      <div class="d">对称 chunk → 调用方 buffer(hidden/weights)<br>0.018 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-calc"><div class="k">C · vllm-ascend</div><div class="t">MLP</div>
+      <div class="d"><code>npu_grouped_matmul</code>(w13) → <code>npu_swiglu</code> → <code>npu_grouped_matmul</code>(w2)<br>≈0.23 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-comp"><div class="k">D · 集成侧</div><div class="t">加权 + 尾部 mask</div>
+      <div class="d"><code>mul</code>+<code>to(bf16)</code>(+<code>where</code>)<br>0.044 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-comp"><div class="k">D · AscendC 核</div><div class="t">combine</div>
+      <div class="d">本卡行写入对称 chunk → RMA-GET 对端行 → K 路求和<br>0.055 ms</div></div>
+  </div>
+
+  <div class="legend">
+    <span><i style="background:var(--series-1)"></i>dispatch 侧(通信)</span>
+    <span><i style="background:var(--series-4)"></i>计算(现成算子)</span>
+    <span><i style="background:var(--series-3)"></i>combine 侧(通信)</span>
+    <span style="color:var(--text-muted)">虚线 = MC2 同样口径的融合算子耗时</span>
+  </div>
+  <div class="chart" id="chart-segments"></div>
+
+  <table>
+    <thead><tr><th>#</th><th>算子</th><th>类别</th><th>作用</th><th class="num">每层每卡 (decode)</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>zero_</code>/<code>fill_</code>/<code>copy_</code> ×3~5</td><td><span class="chip">elementwise/copy</span></td><td>pad 缓冲(尾部惰性写)</td><td class="num">0.035 ms</td></tr>
+      <tr><td>2</td><td><code>torch.histc</code> + <code>.to(int32)</code></td><td><span class="chip">reduce</span></td><td>每专家 token 数(tpe)</td><td class="num">0.022 ms</td></tr>
+      <tr><td>3</td><td><b><code>moonEP_planning</code></b></td><td><span class="chip">AscendC</span></td><td>直方图/前缀/稳定排序 → plan、dst、去重表(含全 rank 栅栏)</td><td class="num">0.068 ms</td></tr>
+      <tr><td>4</td><td><b><code>moonEP_dispatch</code></b></td><td><span class="chip">AscendC</span></td><td>按 plan 把行 RMA 写入各 rank 的对称 chunk(MTE/UDMA)</td><td class="num">0.017 ms</td></tr>
+      <tr><td>5</td><td><code>copy_</code> ×2</td><td><span class="chip">copy</span></td><td>边界拷贝:对称 chunk → 调用方 buffer</td><td class="num">0.018 ms</td></tr>
+      <tr><td>6</td><td><code>npu_grouped_matmul</code>(w13)</td><td><span class="chip">AscendC</span></td><td>gate_up 分组 GEMM</td><td class="num" rowspan="3">≈0.23 ms(合计)</td></tr>
+      <tr><td>7</td><td><code>npu_swiglu</code></td><td><span class="chip">AscendC</span></td><td>激活</td></tr>
+      <tr><td>8</td><td><code>npu_grouped_matmul</code>(w2)</td><td><span class="chip">AscendC</span></td><td>down 分组 GEMM</td></tr>
+      <tr><td>9</td><td><code>mul</code> + <code>.to(bf16)</code>(+<code>where</code>)</td><td><span class="chip">elementwise</span></td><td>路由权重加权 + 尾部清零(零同步路径)</td><td class="num">0.044 ms</td></tr>
+      <tr><td>10</td><td><code>zeros</code>/<code>copy_</code></td><td><span class="chip">alloc+copy</span></td><td>staging(零同步路径可省)</td><td class="num">—</td></tr>
+      <tr><td>11</td><td><b><code>moonEP_combine</code></b></td><td><span class="chip">AscendC</span></td><td>本卡行写入对称 chunk → RMA-GET 对端行 → K 路求和</td><td class="num">0.055 ms</td></tr>
+      <tr><td>12</td><td><code>view</code>/slice</td><td><span class="chip">view</span></td><td>取 <code>out[:T]</code></td><td class="num">免费</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>3. 什么是 Megas MoE(融合大算子)</h2>
+<div class="card">
+  <p>
+    「Megas MoE / Mega MoE kernel」指把 MoE 一层里的多个阶段——<b>token 交换(dispatch)、
+    分组 GEMM、激活、加权归约(combine)</b>——塞进<b>同一个设备核</b>,用核内
+    grid sync / 多流水(cube 与 vector、搬运与计算)把通信等待藏在计算后面。
+    业界三条已知路线:
+  </p>
+  <ul>
+    <li><b>MC2(本机基线)</b>:dispatch/combine 与 GEMM 在算子内流水,是 Ascend 上最接近
+      「mega MoE」的现成实现;缺点是通信底层绑定 HCCL(all2all),通信域随 EP 规模变贵。</li>
+    <li><b>MoE 的 fused-kernel 流派</b>(如 DeepSeek 系、DeepGEMM 风格):单核内完成
+      分组 GEMM + 激活 + 归约,靠持久化线程块与流水隐藏搬运。</li>
+    <li><b>MoonEP 的对称内存流派</b>:把「谁发给谁」显式化(plan),通信走单边 RMA,
+      天然适合跨节点与大规模 EP——但目前通信与计算是两个阶段,没有流水。</li>
+  </ul>
+  <p class="verdict">
+    共同点:融合的本质收益不是「少写代码」,而是<b>让通信与计算重叠</b>,其次才是省
+    kernel launch 与中间张量往返。
+  </p>
+</div>
+
+<h2>4. 三档融合分析</h2>
+
+<div class="tier t1">
+  <h3>第一档:planning + dispatch 合核 ✅ 建议做</h3>
+  <table>
+    <tr><th style="width:86px">做法</th><td>AscendC 内两阶段 + 一次 <code>SyncAll</code>(仓内已有跨 rank 栅栏原语);plan 表只在本卡 device 内被消费,合核后省一次 launch、一次全 rank 栅栏与中间状态往返。</td></tr>
+    <tr><th>收益</th><td>每层省 0.05~0.08 ms(launch ~17-20 µs + 栅栏 + plan 表读写)⇒ <b>decode 约 +3~5%</b>;prefill 的 planning 核 0.26 ms 是设备时间,只能省它的 launch 部分。</td></tr>
+    <tr><th>风险</th><td>低-中:不碰 GEMM、不改数据布局、不动权重。</td></tr>
+  </table>
+</div>
+
+<div class="tier t2">
+  <h3>第二档:dispatch + gmm1 融合(MC2 式通信+计算融合)⚠️ 产品级决策</h3>
+  <table>
+    <tr><th style="width:86px">做法</th><td>在核内实现「收行 → 立即参与分组 GEMM」的 cube/vector 流水 + RMA 流水,把通信等待藏进计算——即重写一遍 MoE 前向。</td></tr>
+    <tr><th>收益</th><td>理论最大:吃掉当前 decode 差距(0.82× vs MC2)的大部分。</td></tr>
+    <tr><th>风险</th><td>高:等于重新实现 vendor 已有的 MC2 融合算子,而 MC2 走 HCCL。<b>MoonEP 做这一档的唯一理由是把它建在 shmem/RDMA 上</b>(大 R、跨节点、HCCL 通信域成本高的场景)。</td></tr>
+  </table>
+</div>
+
+<div class="tier t3">
+  <h3>第三档:gmm1 + swiglu + gmm2 三合一</h3>
+  <table>
+    <tr><th style="width:86px">做法</th><td>vllm-ascend 已有 <code>grouped_matmul_swiglu_quant</code> 这类融合(量化路径),bf16 下需新写或换用融合算子。</td></tr>
+    <tr><th>收益</th><td>省 2 次 launch + 激活中间张量的读写 ⇒ <b>约 +2~4%</b>。</td></tr>
+    <tr><th>风险</th><td>高:GMM 最吃性能,手写 tiling 很可能打不过现成库。</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>收益上限与建议路径</h3>
+  <ul>
+    <li><b>上限</b>:decode 每层 0.202 ms 通信段里,launch/同步/边界拷贝约占 0.1 ms ⇒ 全部融合的理论上限约 <b>decode +10~15%</b>(把当前 18% 差距的 2/3 吃回来)。</li>
+    <li><b>但大头是通信等待的隐藏</b>,只有第二档(自写 GEMM)能吃 —— 那是「要不要把 MoonEP 做成产品级内核」的取舍,不是纯优化。</li>
+    <li><b>路径</b>:① 先做第一档(低成本、可量化、不碰 GEMM);② 第二档先回答目标场景是否为大 R / 跨节点——若只是 2 卡 E=128,本机数据表明 MC2 已接近最优,MoonEP 的结构优势发挥不出来;③ 第三档交给 GMM/算子团队或用 vendor 融合算子。</li>
+  </ul>
+</div>
+
+<footer>
+  数据来源:本机 dp2ep2 引擎实测(1024 seq × 256 prompt,MBT=1024,GEN=1/128 两相位相减拆分 prefill/decode)。
+  组件计时由 <code>MOONEP_TIME_STATS=1</code>(集成侧)与 <code>ASCEND_MOONEP_TIME_STATS=1</code>(库内分段)采集;
+  三路线报告脚本 <code>report3.py</code>。测量纪律:同码跨窗口漂移 ±8%,所有对比同为窗口背靠背。
+</footer>
+</div>
+
+<div class="chart-tip" id="tip"></div>
+<script>
+const BLUE = getComputedStyle(document.documentElement).getPropertyValue('--series-1').trim();
+const ORANGE = getComputedStyle(document.documentElement).getPropertyValue('--series-2').trim();
+const tip = document.getElementById('tip');
+function showTip(e, text){
+  tip.textContent = text; tip.style.opacity = 1;
+  tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 220) + 'px';
+  tip.style.top = (e.clientY - 34) + 'px';
+}
+function hideTip(){ tip.style.opacity = 0; }
+
+function bars(el, rows, max, unit){
+  const host = document.getElementById(el);
+  host.innerHTML = '';
+  for (const r of rows){
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('div'); lab.className = 'lab'; lab.textContent = r.label;
+    const track = document.createElement('div'); track.className = 'track';
+    const bar = document.createElement('div'); bar.className = 'bar';
+    bar.style.width = Math.max(2, r.value / max * 100) + '%';
+    bar.style.background = r.color;
+    bar.addEventListener('mousemove', e => showTip(e, r.tip));
+    bar.addEventListener('mouseleave', hideTip);
+    track.appendChild(bar);
+    if (r.ref !== undefined){
+      const rf = document.createElement('div'); rf.className = 'ref';
+      rf.style.left = (r.ref / max * 100) + '%';
+      rf.innerHTML = '<span>' + (r.refLabel || '') + '</span>';
+      track.appendChild(rf);
+    }
+    const val = document.createElement('div'); val.className = 'val'; val.textContent = r.value.toFixed(r.dp === 0 ? 0 : r.dp ?? 3) + unit;
+    row.append(lab, track, val); host.appendChild(row);
+  }
+}
+
+bars('chart-throughput', [
+  {label:'MC2 基线', value:7719, color:ORANGE, dp:0, tip:'MC2:7719 tok/s(0.157 ms/层 通信)'},
+  {label:'MoonEP-MTE', value:6318, color:BLUE, dp:0, tip:'MoonEP-MTE:6318 tok/s = MC2 的 0.82×'},
+  {label:'MoonEP-URMA', value:5913, color:BLUE, dp:0, tip:'MoonEP-URMA:5913 tok/s = MC2 的 0.77×'},
+], 8000, ' tok/s');
+
+bars('chart-segments', [
+  {label:'pad 预处理', value:0.035, color:BLUE, tip:'pad 缓冲写入(尾部惰性写),0.035 ms'},
+  {label:'tpe 直方图', value:0.022, color:BLUE, tip:'histc + 类型转换,0.022 ms'},
+  {label:'planning 核', value:0.068, color:BLUE, tip:'planning 核(设备时间),0.068 ms;prefill 0.26 ms'},
+  {label:'dispatch 核', value:0.017, color:BLUE, tip:'RMA 行分发核,0.017 ms'},
+  {label:'边界拷贝 ×2', value:0.018, color:BLUE, tip:'对称 chunk → 调用方 buffer,0.018 ms'},
+  {label:'加权 + 尾部 mask', value:0.044, color:BLUE, tip:'mul + to(bf16) + where,0.044 ms'},
+  {label:'combine 核', value:0.055, color:BLUE, tip:'RMA 取回 + K 路求和,0.055 ms'},
+  {label:'MoonEP 通信段合计', value:0.202, color:BLUE, tip:'MC2 同样口径 0.157 ms + pad/tpe 0.057 → 0.214 ms'},
+  {label:'MC2 dispatch+combine', value:0.157, color:ORANGE, tip:'MC2 融合算子(host 入队口径,异步;仅作参考)'},
+], 0.22, ' ms');
+</script>
+</body>
+</html>
