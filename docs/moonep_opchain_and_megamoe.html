@@ -59,6 +59,7 @@
   .step.s-disp{border-left:3px solid var(--series-1)}
   .step.s-comp{border-left:3px solid var(--series-3)}
   .step.s-calc{border-left:3px solid var(--series-4)}
+  .step.s-slot{border-left:3px solid var(--series-1);border-style:dashed;}
   .arrow{align-self:center;color:var(--text-muted);font-size:15px}
   .chart{margin:6px 0 2px}
   .chart .row{display:grid;grid-template-columns:196px 1fr 78px;gap:10px;align-items:center;margin:5px 0}
@@ -180,18 +181,24 @@
     <div class="step s-disp"><div class="k">④ copy</div><div class="t">边界拷贝</div>
       <div class="d">对称 chunk → 调用方 buffer(行 + 权重)<br>0.018 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-calc"><div class="k">⑤ vllm-ascend</div><div class="t">专家 MLP</div>
-      <div class="d">grouped GEMM(w13)→ swiglu → grouped GEMM(w2),按 group_list 只算真实行<br>≈0.23 ms</div></div>
+    <div class="step s-slot"><div class="k">⑤ AscendC 核 · 仅 slot 模式</div><div class="t">prefetch 权重</div>
+      <div class="d">按 <code>plan.experts_to_copy[R,B]</code> 把热门<b>远程专家的权重</b>
+        <code>mte_get_nbi</code> 进本地槽 + <code>aclshmem_quiet()</code><br>未测(每远程专家 ≈9.4MB)</div></div>
     <div class="arrow">→</div>
-    <div class="step s-comp"><div class="k">⑥ 集成侧</div><div class="t">加权 + 尾部清零</div>
+    <div class="step s-calc"><div class="k">⑥ vllm-ascend</div><div class="t">专家 MLP</div>
+      <div class="d">grouped GEMM(w13)→ swiglu → grouped GEMM(w2),按 group_list 只算真实行
+        (含槽内专家,走 [epn+B] 别名权重)<br>≈0.23 ms</div></div>
+    <div class="arrow">→</div>
+    <div class="step s-comp"><div class="k">⑦ 集成侧</div><div class="t">加权 + 尾部清零</div>
       <div class="d">乘路由权重 → bf16;尾部 <code>where</code> 清零(combine 核会读整块)<br>0.044 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-comp"><div class="k">⑦ AscendC 核 · <b>GET</b></div><div class="t">combine prologue + 求和</div>
+    <div class="step s-comp"><div class="k">⑧ AscendC 核 · <b>GET</b></div><div class="t">combine prologue + 求和</div>
       <div class="d">本卡行写回对称 chunk → 栅栏 → <code>mte_get_nbi</code> 取对端行 → K 路求和<br>0.055 ms</div></div>
   </div>
   <p class="verdict">
-    ⑤⑥ 之间在 slot 模式下还插一段 <b>prefetch</b>(见第 6 节)。整层 = <b>3 个通信核</b>(planning/dispatch/combine)
-    + <b>3 个计算核</b>(GMM×2、swiglu)+ 12~15 个 elementwise/copy。
+    整层 = <b>3 个通信核</b>(planning / dispatch / combine)+ <b>3 个计算核</b>(GMM×2、swiglu)
+    + 12~15 个 elementwise/copy;<b>slot 模式下在 MLP 之前多一个 prefetch 核</b>(第 ⑤ 步,搬权重不搬 token,
+    见第 6 节)。下面这条耗时轴是 owner 模式(默认)的,prefetch 不计入。
   </p>
   <div class="legend">
     <span><i style="background:var(--series-1)"></i>dispatch 侧(含通信)</span>
@@ -212,7 +219,8 @@
       <tr><td>8</td><td><code>npu_grouped_matmul</code>(w2)</td><td><span class="chip calc">AscendC</span></td><td>否</td><td>down</td></tr>
       <tr><td>9</td><td><code>mul</code> + <code>to(bf16)</code>(+<code>where</code>)</td><td><span class="chip">elementwise</span></td><td>否</td><td>路由权重在此应用(Ascend combine 核不做加权,只做 K 求和)</td><td class="num">0.044 ms</td></tr>
       <tr><td>10</td><td><code>zeros</code>/<code>copy_</code></td><td><span class="chip">alloc+copy</span></td><td>否</td><td>staging;零同步路径已省</td><td class="num">—</td></tr>
-      <tr><td>11</td><td><b><code>moonEP_combine</code></b></td><td><span class="chip comm">AscendC</span></td><td><b>是(GET)</b></td><td>prologue 写回本卡行 → 栅栏 → <code>mte_get_nbi</code> 取对端行 → fp32 累加 → bf16</td><td class="num">0.055 ms</td></tr>
+      <tr><td>11</td><td><b><code>moonEP_prefetch</code></b><br><span class="chip">仅 slot 模式</span></td><td><span class="chip comm">AscendC</span></td><td><b>是(GET)</b></td><td>把 <code>experts_to_copy</code> 指定的远程专家权重(w13/w2,每个专家 ≈9.4MB)GET 进本地 B 个槽 + <code>aclshmem_quiet()</code>;之后这些专家的行留本地算</td><td class="num">未测</td></tr>
+      <tr><td>12</td><td><b><code>moonEP_combine</code></b></td><td><span class="chip comm">AscendC</span></td><td><b>是(GET)</b></td><td>prologue 写回本卡行 → 栅栏 → <code>mte_get_nbi</code> 取对端行 → fp32 累加 → bf16</td><td class="num">0.055 ms</td></tr>
     </tbody>
   </table>
 </div>
