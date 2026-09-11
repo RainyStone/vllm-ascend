@@ -101,6 +101,7 @@
     <div class="tile"><div class="n">planning 里有通信</div><div class="l">各 rank 发布计数/前缀到对端 inbox、owner 端 reduce、payload-done 旗标同步 + 收尾栅栏</div></div>
     <div class="tile"><div class="n">dispatch = PUT,combine = GET</div><div class="l">都对「对称内存」寻址:发送方主动 put 到对端缓冲,combine 时按需 get 回来</div></div>
     <div class="tile"><div class="n">plan 表最大收益 = 去重</div><div class="l">同一 token 到同一目标卡只搬一次,网络搬运量按「不同目标卡数」而非 K 计</div></div>
+    <div class="tile"><div class="n">6(+1)个设备核</div><div class="l">单层 = planning、dispatch、GMM×2、swiglu、combine;slot 模式在 MLP 前多一个 prefetch 核,另有 12~15 个 elementwise/copy</div></div>
     <div class="tile"><div class="n">与 Megas MoE 亲和</div><div class="l">静态寻址 + 单边语义 + 无 HCCL 依赖,天然适合进融合核;冲突点是 planning 的跨 rank 栅栏</div></div>
   </div>
 </div>
