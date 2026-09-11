@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MoonEP 算子链路与 Megas MoE 融合可行性分析</title>
+<title>MoonEP 算子链详解 与 MoonEP × Megas MoE 融合可行性分析</title>
 <style>
   :root{
-    --surface-0:#f4f4f2; --surface-1:#fcfcfb; --surface-2:#ececea;
+    --surface-0:#f4f4f2; --surface-1:#fcfcfb; --surface-2:#ececea; --surface-3:#e3e3e0;
     --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#86847e;
     --border:#d9d9d5; --grid:#e6e6e2;
     --series-1:#2a78d6;  /* blue   - MoonEP / dispatch 侧 */
@@ -16,7 +16,7 @@
   }
   @media (prefers-color-scheme: dark){
     :root:where(:not([data-theme="light"])){
-      --surface-0:#121211; --surface-1:#1a1a19; --surface-2:#242423;
+      --surface-0:#121211; --surface-1:#1a1a19; --surface-2:#242423; --surface-3:#2e2e2c;
       --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8f8e86;
       --border:#3a3a37; --grid:#2c2c2a;
       --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500;
@@ -28,33 +28,31 @@
     background:var(--surface-0); color:var(--text-primary);
     font:15px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
   }
-  .wrap{max-width:1040px;margin:0 auto}
+  .wrap{max-width:1060px;margin:0 auto}
   header h1{font-size:25px;line-height:1.3;margin:0 0 6px}
   .meta{color:var(--text-muted);font-size:13px;margin-bottom:26px}
-  .card{
-    background:var(--surface-1); border:1px solid var(--border); border-radius:10px;
-    padding:20px 22px; margin:16px 0;
-  }
+  .card{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:20px 22px;margin:16px 0}
   h2{font-size:18px;margin:30px 0 10px}
   h3{font-size:15px;margin:20px 0 8px}
+  h4{font-size:13.5px;margin:14px 0 6px;color:var(--text-secondary)}
   p{margin:8px 0}
   ul{margin:8px 0 8px 20px;padding:0}
   li{margin:4px 0}
   code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:13px}
-  .tl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .tl{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px}
   .tl .tile{background:var(--surface-2);border-radius:8px;padding:12px 14px}
-  .tl .n{font-size:22px;font-weight:600;line-height:1.2}
+  .tl .n{font-size:21px;font-weight:600;line-height:1.2}
   .tl .l{font-size:12.5px;color:var(--text-secondary);margin-top:4px}
   table{border-collapse:collapse;width:100%;font-size:13.5px;margin:10px 0}
   th,td{border-bottom:1px solid var(--grid);padding:7px 9px;text-align:left;vertical-align:top}
-  th{color:var(--text-secondary);font-weight:600;background:transparent}
+  th{color:var(--text-secondary);font-weight:600}
   td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-  .chip{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:20px;border:1px solid var(--border);color:var(--text-secondary)}
-  .flow{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:16px 0}
-  .step{
-    flex:1 1 132px;min-width:132px;border-radius:9px;padding:10px 11px;
-    border:1px solid var(--border);background:var(--surface-2);position:relative;
-  }
+  .chip{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:20px;border:1px solid var(--border);color:var(--text-secondary);white-space:nowrap}
+  .chip.comm{border-color:var(--series-1);color:var(--series-1)}
+  .chip.calc{border-color:var(--series-4);color:var(--series-4)}
+  .chip.mix{border-color:var(--series-3);color:var(--series-3)}
+  .flow{display:flex;flex-wrap:wrap;gap:9px;align-items:stretch;margin:16px 0}
+  .step{flex:1 1 126px;min-width:126px;border-radius:9px;padding:10px 11px;border:1px solid var(--border);background:var(--surface-2)}
   .step .k{font-size:11px;color:var(--text-muted);letter-spacing:.04em}
   .step .t{font-size:13.5px;font-weight:600;margin:2px 0 3px}
   .step .d{font-size:11.5px;color:var(--text-secondary);line-height:1.45}
@@ -63,10 +61,10 @@
   .step.s-calc{border-left:3px solid var(--series-4)}
   .arrow{align-self:center;color:var(--text-muted);font-size:15px}
   .chart{margin:6px 0 2px}
-  .chart .row{display:grid;grid-template-columns:190px 1fr 74px;gap:10px;align-items:center;margin:5px 0}
+  .chart .row{display:grid;grid-template-columns:196px 1fr 78px;gap:10px;align-items:center;margin:5px 0}
   .chart .lab{font-size:13px;color:var(--text-secondary);text-align:right}
-  .chart .track{position:relative;height:16px;background:transparent}
-  .chart .bar{height:16px;border-radius:0 4px 4px 0;position:relative;cursor:default}
+  .chart .track{position:relative;height:16px}
+  .chart .bar{height:16px;border-radius:0 4px 4px 0;cursor:default}
   .chart .val{font-size:12.5px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary);margin:10px 0 2px}
   .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
@@ -75,223 +73,446 @@
   .tier.t3{border-left-color:var(--series-3)}
   .tier h3{margin-top:0}
   .verdict{font-size:12.5px;color:var(--text-secondary)}
+  figure{margin:16px 0}
+  figure svg{width:100%;height:auto;display:block;background:var(--surface-2);border:1px solid var(--border);border-radius:9px}
+  figcaption{font-size:12.5px;color:var(--text-muted);margin-top:6px}
+  .ok{color:var(--series-3);font-weight:600}
+  .warn{color:var(--series-2);font-weight:600}
   footer{color:var(--text-muted);font-size:12.5px;margin-top:28px}
-  .chart-tip{
-    position:fixed;pointer-events:none;background:var(--surface-1);color:var(--text-primary);
+  .chart-tip{position:fixed;pointer-events:none;background:var(--surface-1);color:var(--text-primary);
     border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:12.5px;
-    box-shadow:0 3px 10px rgba(0,0,0,.14);opacity:0;transition:opacity .1s;z-index:9;
-  }
+    box-shadow:0 3px 10px rgba(0,0,0,.14);opacity:0;transition:opacity .1s;z-index:9}
 </style>
 </head>
 <body>
 <div class="wrap">
 <header>
-  <h1>MoonEP 算子链路与 Megas MoE 融合可行性分析</h1>
+  <h1>MoonEP 算子链详解 与 MoonEP × Megas MoE 融合可行性分析</h1>
   <div class="meta">
     Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0 · Qwen3-30B-A3B (E=128, K=8, H=2048) ·
-    dp2ep2 (2×NPU, EP=2, TP=1) · 1024 seq × 256 prompt · 数据窗口 2026-09-10/11
+    dp2ep2 实测 + 4-NPU 逻辑示意 · 数据窗口 2026-09-10/11
   </div>
 </header>
 
 <div class="card">
   <h2 style="margin-top:0">结论摘要</h2>
   <div class="tl">
-    <div class="tile"><div class="n">6 个设备核</div><div class="l">MoonEP 单层:planning、dispatch、gmm×2、swiglu、combine,另有 12~15 个 elementwise/copy</div></div>
-    <div class="tile"><div class="n">0.202 ms</div><div class="l">MoonEP 通信段合计 / 层 / 卡(decode),MC2 融合算子同样口径为 0.157 ms</div></div>
-    <div class="tile"><div class="n">+10~15%</div><div class="l">全部融合(含 launch/同步/边界拷贝)对 decode 的理论上限</div></div>
-    <div class="tile"><div class="n">最后一档才值钱</div><div class="l">通信与 GEMM 融合(MC2 式)需要自写 AscendC 分组 GEMM,属产品级投入</div></div>
+    <div class="tile"><div class="n">planning 里有通信</div><div class="l">各 rank 发布计数/前缀到对端 inbox、owner 端 reduce、payload-done 旗标同步 + 收尾栅栏</div></div>
+    <div class="tile"><div class="n">dispatch = PUT,combine = GET</div><div class="l">都对「对称内存」寻址:发送方主动 put 到对端缓冲,combine 时按需 get 回来</div></div>
+    <div class="tile"><div class="n">plan 表最大收益 = 去重</div><div class="l">同一 token 到同一目标卡只搬一次,网络搬运量按「不同目标卡数」而非 K 计</div></div>
+    <div class="tile"><div class="n">与 Megas MoE 亲和</div><div class="l">静态寻址 + 单边语义 + 无 HCCL 依赖,天然适合进融合核;冲突点是 planning 的跨 rank 栅栏</div></div>
   </div>
 </div>
 
 <h2>1. 背景:两条路线</h2>
-
 <div class="card">
   <h3>① MC2 —— Ascend 原生融合路线(基线)</h3>
   <p>
-    MoE 的 expert-parallel token 交换由两个 <b>aclnn 融合大算子</b>完成:
-    <code>torch_npu.npu_moe_distribute_dispatch_v2</code> 与
-    <code>torch_npu.npu_moe_distribute_combine_v2</code>。名字里的
-    <b>MC2 = Matmul-Communication ×2</b>:dispatch/combine 与前后 GEMM 在算子内部
-    流水,通信等待被 cube 计算覆盖;底层通信用 HCCL(all2all)。对上层只暴露
-    「一次调用」,没有 plan 表、没有跨层状态。
+    expert-parallel 的 token 交换由两个 aclnn 融合大算子完成:
+    <code>npu_moe_distribute_dispatch_v2</code> / <code>combine_v2</code>。
+    <b>MC2 = Matmul-Communication ×2</b>:dispatch/combine 与前后 GEMM 在算子内部流水,
+    通信等待被 cube 计算覆盖;底层是 HCCL(all2all)。对上层只暴露一次调用,没有 plan 表与跨层状态。
   </p>
-  <p class="verdict">
-    实测(本机 dp2ep2):decode 每层 dispatch 0.093 ms + combine 0.064 ms = <b>0.157 ms</b>;
-    总吞吐 <b>7719 tok/s</b>(基线 1.00)。它在 2 卡、E=128、均匀路由下已接近最优。
-  </p>
-
   <h3>② MoonEP —— 对称内存单边路线(本研究)</h3>
   <p>
-    token 行按「专家属主」经 CANN SHMEM 对称内存做单边 RMA,替换 HCCL 的 all2all:
-    planning 核算出「谁发给谁」的 plan,dispatch 核把行写进各 rank 的对称 chunk,
-    combine 核把对端算好的行取回并按 K 求和。两个引擎变体:
-    <b>MTE</b>(<code>MOONEP_DISABLE_UDMA=1</code>,走 MTE 搬运)与
-    <b>URMA</b>(带 URMA 上下文,走 UDMA 快路径)。对上层是三个独立核 + plan 状态,
-    因此 host 侧与同步开销天然比 MC2 高——这正是本报告后半段要分析的部分。
+    token 行按「专家属主」经 CANN SHMEM 对称内存做单边搬运,替换 HCCL all2all。
+    与 MC2 最本质的区别:<b>通信目标地址在 planning 阶段就完全确定</b>(显式 plan 表),
+    因此收发双方不需要握手协议,搬运可以当作纯数据搬移来做——这也是后文判断"能否融进大算子"的关键。
   </p>
-
   <div class="legend">
     <span><i style="background:var(--series-2)"></i>MC2 基线</span>
     <span><i style="background:var(--series-1)"></i>MoonEP-MTE / URMA</span>
   </div>
   <div class="chart" id="chart-throughput"></div>
-
   <table>
-    <thead><tr>
-      <th>路线</th><th class="num">prefill tok/s</th><th class="num">decode tok/s</th>
-      <th class="num">总 tok/s</th><th class="num">vs MC2</th>
-      <th class="num">单层 dispatch+combine (decode)</th>
-    </tr></thead>
+    <thead><tr><th>路线</th><th class="num">prefill tok/s</th><th class="num">decode tok/s</th>
+      <th class="num">总 tok/s</th><th class="num">vs MC2</th><th class="num">单层 dispatch+combine (decode)</th></tr></thead>
     <tbody>
       <tr><td>MC2 基线</td><td class="num">50 675</td><td class="num">11 014</td><td class="num"><b>7 719</b></td><td class="num">1.00</td><td class="num">0.157 ms</td></tr>
       <tr><td>MoonEP-MTE</td><td class="num">44 110</td><td class="num">8 785</td><td class="num"><b>6 318</b></td><td class="num">0.82</td><td class="num">0.202 ms</td></tr>
       <tr><td>MoonEP-URMA</td><td class="num">35 900</td><td class="num">8 749</td><td class="num"><b>5 913</b></td><td class="num">0.77</td><td class="num">0.169 ms</td></tr>
     </tbody>
   </table>
+  <p class="verdict">正确性口径:三条路线每条序列首 token 完全一致(=315);同窗口测量(本机跨窗口漂移 ±8%)。
+    每卡负载(owner 模式):3175 vs 3155 条目/层(差 0.63%,路由统计涨落),padding 149 条目/层(4.7%)。</p>
+</div>
+
+<h2>2. 对称内存:是什么、里面装了什么</h2>
+<div class="card">
+  <p>
+    <b>对称内存(SHMEM)</b>:每个 rank 在<b>自己显存</b>里申请一块缓冲,并把它的物理句柄
+    (Fabric V2 / shareable handle)注册给 SHMEM 运行时;运行时保证<b>每张卡上这块缓冲的虚拟地址相同</b>。
+    于是「rank r 的第 X 字节」可以用一个地址表达:<code>aclshmem_ptr(base_va, pe=r)</code>,
+    任意卡都能直接读写,不需要对方参与 —— 这就是「单边(one-sided)」。
+    Ascend 上要求接收侧显式 <code>aclrtMemSetAccess</code>(我们在 DP 场景还修了它的逻辑/物理 device id 问题)。
+  </p>
+  <h4>一个 Buffer(每 (E,K,H) 形状一个)的对称内存里放什么</h4>
+  <table>
+    <thead><tr><th>区域</th><th>形状</th><th>用途</th><th>谁写</th></tr></thead>
+    <tbody>
+      <tr><td><code>hidden_buf</code></td><td>[NvS, H] bf16(NvS = S·K)</td><td><b>行缓冲</b>:本卡收到的待计算行 / 本卡算完的待取回行</td><td>对端 dispatch(PUT)、本卡 combine prologue</td></tr>
+      <tr><td><code>weights_buf</code></td><td>[NvS] fp32(i32 视图)</td><td>每行的路由权重,与行同序搬运</td><td>同 hidden_buf</td></tr>
+      <tr><td><code>barrier_buf</code></td><td>[BARRIER_SLOTS] i32</td><td>跨 rank 栅栏/代际计数</td><td>各 rank 自增</td></tr>
+      <tr><td><code>combine_sync_buffer</code></td><td>[R × 2 cachelines] u8</td><td>combine 的 grant/done 旗标池</td><td>收发双方</td></tr>
+      <tr><td><code>dispatch_sync_buffer</code></td><td>[R·16·6·512 + …] u8</td><td>dispatch 的每 token AIV 四轮本地同步区</td><td>本卡</td></tr>
+      <tr><td>op workspace</td><td>每核一段</td><td>各 AscendC 核的临时区(planning/combine/…)</td><td>各核</td></tr>
+      <tr><td>planning inbox / flags</td><td>按 R 布局</td><td>planning 阶段各 source rank <b>发布</b>计数/前缀与 payload-done 旗标</td><td>对端 planning 核</td></tr>
+    </tbody>
+  </table>
   <p class="verdict">
-    正确性口径:三条路线每条序列的首 token 完全一致(=315)。同窗口测量;本机跨窗口绝对吞吐会漂移约 8%,故所有对比均同窗口背靠背。
-    每卡负载(owner 模式):每层承担 (token, expert) 条目 3175 vs 3155(<b>差 0.63%</b>,为路由统计涨落),其中 padding 条目 149/层(4.7%)。
+    注意:<b>planning 的表本身(dst、dup 表、cu_seqlens)在本地显存</b>,不进对称内存;对称内存里放的是
+    「要被别人读写的通信数据」与「同步旗标」。我们的 pad 缓冲、combine staging 也是本地张量。
   </p>
 </div>
 
-<h2>2. MoonEP 单层算子链(按执行顺序)</h2>
-
+<h2>3. MoonEP 单层算子链(详解,含通信点)</h2>
 <div class="card">
   <div class="flow">
-    <div class="step s-disp"><div class="k">A · 集成侧</div><div class="t">pad 预处理</div>
-      <div class="d"><code>zero_/fill_/copy_</code> ×3~5<br>0.035 ms</div></div>
+    <div class="step s-disp"><div class="k">① 集成侧</div><div class="t">pad + tpe</div>
+      <div class="d">行补到本步容量、零权重零 hidden;histc 统计每专家 token 数<br>0.057 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-disp"><div class="k">A · 集成侧</div><div class="t">tpe 直方图</div>
-      <div class="d"><code>histc</code>+<code>to(i32)</code><br>0.022 ms</div></div>
+    <div class="step s-disp"><div class="k">② AscendC 核 · 有通信</div><div class="t">planning</div>
+      <div class="d">本地直方图 → 跨 rank 汇总 → 分配/去重 → 产出 dst 表、dup 表、cu_seqlens、预取表<br>0.068 ms(0.26 prefill)</div></div>
     <div class="arrow">→</div>
-    <div class="step s-disp"><div class="k">B · AscendC 核</div><div class="t">planning</div>
-      <div class="d">直方图/前缀/排序 → plan、dst、去重表;含全 rank 栅栏<br>0.068 ms(0.26 prefill)</div></div>
+    <div class="step s-disp"><div class="k">③ AscendC 核 · <b>PUT</b></div><div class="t">dispatch</div>
+      <div class="d">按 dst 表把行 <code>mte_put_nbi</code> 到对端 hidden_buf 的既定偏移;去重行本地复制;收尾全 rank 栅栏<br>0.017 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-disp"><div class="k">B · AscendC 核</div><div class="t">dispatch</div>
-      <div class="d">按 plan 把行 RMA 写入各 rank 对称 chunk<br>0.017 ms</div></div>
+    <div class="step s-disp"><div class="k">④ copy</div><div class="t">边界拷贝</div>
+      <div class="d">对称 chunk → 调用方 buffer(行 + 权重)<br>0.018 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-disp"><div class="k">B · copy</div><div class="t">边界拷贝 ×2</div>
-      <div class="d">对称 chunk → 调用方 buffer(hidden/weights)<br>0.018 ms</div></div>
+    <div class="step s-calc"><div class="k">⑤ vllm-ascend</div><div class="t">专家 MLP</div>
+      <div class="d">grouped GEMM(w13)→ swiglu → grouped GEMM(w2),按 group_list 只算真实行<br>≈0.23 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-calc"><div class="k">C · vllm-ascend</div><div class="t">MLP</div>
-      <div class="d"><code>npu_grouped_matmul</code>(w13) → <code>npu_swiglu</code> → <code>npu_grouped_matmul</code>(w2)<br>≈0.23 ms</div></div>
+    <div class="step s-comp"><div class="k">⑥ 集成侧</div><div class="t">加权 + 尾部清零</div>
+      <div class="d">乘路由权重 → bf16;尾部 <code>where</code> 清零(combine 核会读整块)<br>0.044 ms</div></div>
     <div class="arrow">→</div>
-    <div class="step s-comp"><div class="k">D · 集成侧</div><div class="t">加权 + 尾部 mask</div>
-      <div class="d"><code>mul</code>+<code>to(bf16)</code>(+<code>where</code>)<br>0.044 ms</div></div>
-    <div class="arrow">→</div>
-    <div class="step s-comp"><div class="k">D · AscendC 核</div><div class="t">combine</div>
-      <div class="d">本卡行写入对称 chunk → RMA-GET 对端行 → K 路求和<br>0.055 ms</div></div>
+    <div class="step s-comp"><div class="k">⑦ AscendC 核 · <b>GET</b></div><div class="t">combine prologue + 求和</div>
+      <div class="d">本卡行写回对称 chunk → 栅栏 → <code>mte_get_nbi</code> 取对端行 → K 路求和<br>0.055 ms</div></div>
   </div>
-
+  <p class="verdict">
+    ⑤⑥ 之间在 slot 模式下还插一段 <b>prefetch</b>(见第 6 节)。整层 = <b>3 个通信核</b>(planning/dispatch/combine)
+    + <b>3 个计算核</b>(GMM×2、swiglu)+ 12~15 个 elementwise/copy。
+  </p>
   <div class="legend">
-    <span><i style="background:var(--series-1)"></i>dispatch 侧(通信)</span>
+    <span><i style="background:var(--series-1)"></i>dispatch 侧(含通信)</span>
     <span><i style="background:var(--series-4)"></i>计算(现成算子)</span>
-    <span><i style="background:var(--series-3)"></i>combine 侧(通信)</span>
-    <span style="color:var(--text-muted)">虚线 = MC2 同样口径的融合算子耗时</span>
+    <span><i style="background:var(--series-3)"></i>combine 侧(含通信)</span>
   </div>
   <div class="chart" id="chart-segments"></div>
-
   <table>
-    <thead><tr><th>#</th><th>算子</th><th>类别</th><th>作用</th><th class="num">每层每卡 (decode)</th></tr></thead>
+    <thead><tr><th>#</th><th>算子</th><th>类别</th><th>有通信?</th><th>作用 / 关键细节</th><th class="num">每层每卡 (decode)</th></tr></thead>
     <tbody>
-      <tr><td>1</td><td><code>zero_</code>/<code>fill_</code>/<code>copy_</code> ×3~5</td><td><span class="chip">elementwise/copy</span></td><td>pad 缓冲(尾部惰性写)</td><td class="num">0.035 ms</td></tr>
-      <tr><td>2</td><td><code>torch.histc</code> + <code>.to(int32)</code></td><td><span class="chip">reduce</span></td><td>每专家 token 数(tpe)</td><td class="num">0.022 ms</td></tr>
-      <tr><td>3</td><td><b><code>moonEP_planning</code></b></td><td><span class="chip">AscendC</span></td><td>直方图/前缀/稳定排序 → plan、dst、去重表(含全 rank 栅栏)</td><td class="num">0.068 ms</td></tr>
-      <tr><td>4</td><td><b><code>moonEP_dispatch</code></b></td><td><span class="chip">AscendC</span></td><td>按 plan 把行 RMA 写入各 rank 的对称 chunk(MTE/UDMA)</td><td class="num">0.017 ms</td></tr>
-      <tr><td>5</td><td><code>copy_</code> ×2</td><td><span class="chip">copy</span></td><td>边界拷贝:对称 chunk → 调用方 buffer</td><td class="num">0.018 ms</td></tr>
-      <tr><td>6</td><td><code>npu_grouped_matmul</code>(w13)</td><td><span class="chip">AscendC</span></td><td>gate_up 分组 GEMM</td><td class="num" rowspan="3">≈0.23 ms(合计)</td></tr>
-      <tr><td>7</td><td><code>npu_swiglu</code></td><td><span class="chip">AscendC</span></td><td>激活</td></tr>
-      <tr><td>8</td><td><code>npu_grouped_matmul</code>(w2)</td><td><span class="chip">AscendC</span></td><td>down 分组 GEMM</td></tr>
-      <tr><td>9</td><td><code>mul</code> + <code>.to(bf16)</code>(+<code>where</code>)</td><td><span class="chip">elementwise</span></td><td>路由权重加权 + 尾部清零(零同步路径)</td><td class="num">0.044 ms</td></tr>
-      <tr><td>10</td><td><code>zeros</code>/<code>copy_</code></td><td><span class="chip">alloc+copy</span></td><td>staging(零同步路径可省)</td><td class="num">—</td></tr>
-      <tr><td>11</td><td><b><code>moonEP_combine</code></b></td><td><span class="chip">AscendC</span></td><td>本卡行写入对称 chunk → RMA-GET 对端行 → K 路求和</td><td class="num">0.055 ms</td></tr>
-      <tr><td>12</td><td><code>view</code>/slice</td><td><span class="chip">view</span></td><td>取 <code>out[:T]</code></td><td class="num">免费</td></tr>
+      <tr><td>1</td><td><code>zero_/fill_/copy_</code> ×3~5</td><td><span class="chip">elementwise/copy</span></td><td>否</td><td>pad 缓冲:行补到容量,补的行使零权重、路由到自己第一个专家(避免把 pad 全压到某一张卡)</td><td class="num">0.035 ms</td></tr>
+      <tr><td>2</td><td><code>histc</code> + <code>to(i32)</code></td><td><span class="chip">reduce</span></td><td>否</td><td>每专家 token 数 tpe;换掉 bincount 后从 0.30 → 0.022 ms</td><td class="num">0.022 ms</td></tr>
+      <tr><td>3</td><td><b><code>moonEP_planning</code></b></td><td><span class="chip comm">AscendC</span></td><td><b>是</b></td><td>直方图 → 跨 rank 汇总/分配 → 产出 5 张表(见第 4 节)</td><td class="num">0.068 ms</td></tr>
+      <tr><td>4</td><td><b><code>moonEP_dispatch</code></b></td><td><span class="chip comm">AscendC</span></td><td><b>是(PUT)</b></td><td>每行 <code>mte_put_nbi</code> 到对端 hidden_buf 的既定偏移(UDMA 变体走多 QP put)</td><td class="num">0.017 ms</td></tr>
+      <tr><td>5</td><td><code>copy_</code> ×2</td><td><span class="chip">copy</span></td><td>否</td><td>对称 chunk → 调用方 buffer;可被 zero_copy 省掉(但尾部必须清零,见附录)</td><td class="num">0.018 ms</td></tr>
+      <tr><td>6</td><td><code>npu_grouped_matmul</code>(w13)</td><td><span class="chip calc">AscendC</span></td><td>否</td><td>gate_up;按 <code>group_list</code> 只算真实行(尾部不计算)</td><td class="num" rowspan="3">≈0.23 ms<br>(合计)</td></tr>
+      <tr><td>7</td><td><code>npu_swiglu</code></td><td><span class="chip calc">AscendC</span></td><td>否</td><td>激活</td></tr>
+      <tr><td>8</td><td><code>npu_grouped_matmul</code>(w2)</td><td><span class="chip calc">AscendC</span></td><td>否</td><td>down</td></tr>
+      <tr><td>9</td><td><code>mul</code> + <code>to(bf16)</code>(+<code>where</code>)</td><td><span class="chip">elementwise</span></td><td>否</td><td>路由权重在此应用(Ascend combine 核不做加权,只做 K 求和)</td><td class="num">0.044 ms</td></tr>
+      <tr><td>10</td><td><code>zeros</code>/<code>copy_</code></td><td><span class="chip">alloc+copy</span></td><td>否</td><td>staging;零同步路径已省</td><td class="num">—</td></tr>
+      <tr><td>11</td><td><b><code>moonEP_combine</code></b></td><td><span class="chip comm">AscendC</span></td><td><b>是(GET)</b></td><td>prologue 写回本卡行 → 栅栏 → <code>mte_get_nbi</code> 取对端行 → fp32 累加 → bf16</td><td class="num">0.055 ms</td></tr>
     </tbody>
   </table>
 </div>
 
-<h2>3. 什么是 Megas MoE(融合大算子)</h2>
+<h2>4. planning 内部:它有通信吗?产出的表有什么用?</h2>
 <div class="card">
-  <p>
-    「Megas MoE / Mega MoE kernel」指把 MoE 一层里的多个阶段——<b>token 交换(dispatch)、
-    分组 GEMM、激活、加权归约(combine)</b>——塞进<b>同一个设备核</b>,用核内
-    grid sync / 多流水(cube 与 vector、搬运与计算)把通信等待藏在计算后面。
-    业界三条已知路线:
-  </p>
+  <h3>4.1 有,而且是跨 rank 协作核</h3>
+  <p>planning 不是纯本地计算。核内节奏(函数名取自 <code>kernels/planning.cpp</code>):</p>
   <ul>
-    <li><b>MC2(本机基线)</b>:dispatch/combine 与 GEMM 在算子内流水,是 Ascend 上最接近
-      「mega MoE」的现成实现;缺点是通信底层绑定 HCCL(all2all),通信域随 EP 规模变贵。</li>
-    <li><b>MoE 的 fused-kernel 流派</b>(如 DeepSeek 系、DeepGEMM 风格):单核内完成
-      分组 GEMM + 激活 + 归约,靠持久化线程块与流水隐藏搬运。</li>
-    <li><b>MoonEP 的对称内存流派</b>:把「谁发给谁」显式化(plan),通信走单边 RMA,
-      天然适合跨节点与大规模 EP——但目前通信与计算是两个阶段,没有流水。</li>
+    <li><b>本地直方图</b>:各 rank 先算自己的 per-expert 计数(向量 reduce,<code>ReduceTpeRowsReg</code> 系列);</li>
+    <li><b>跨 rank 汇总</b>:把计数/归属行发布到对端对称内存的 inbox(<code>PublishSourceDupCounts</code> /
+      <code>PublishSourceDupPrefixes</code>),对端 <code>WaitForSourceDupInbox</code> 等待,
+      owner 端做 reduce 得到<b>全局每专家负载</b>;</li>
+    <li><b>完成同步</b>:用 payload-done 旗标(<code>PublishSourceDupPayloadDoneFlags</code> /
+      <code>WaitForSourceDupPayloadDoneFlags</code>,写对端 <code>aclshmem_ptr(base, dest)</code> 的既定偏移)对齐各 rank;</li>
+    <li><b>生成输出</b>:<code>BuildSourceDupDestinationPrefixes</code> →
+      <code>MaterializeSourceDupOutputs</code> 落表;<b>核尾一次全 rank 栅栏</b>。</li>
   </ul>
   <p class="verdict">
-    共同点:融合的本质收益不是「少写代码」,而是<b>让通信与计算重叠</b>,其次才是省
-    kernel launch 与中间张量往返。
+    也就是说:planning 的通信量很小(计数/前缀 + 旗标,不是 token 数据),但<b>同步面很宽</b>——它必须在所有 rank
+    都到齐后才有全局视图。这决定了后面融合判断:planning 是「全局耦合」的阶段,而 dispatch/combine 是「点对点」的阶段。
   </p>
-</div>
 
-<h2>4. 三档融合分析</h2>
-
-<div class="tier t1">
-  <h3>第一档:planning + dispatch 合核 ✅ 建议做</h3>
+  <h3>4.2 产出的 5 张表与它们的收益</h3>
   <table>
-    <tr><th style="width:86px">做法</th><td>AscendC 内两阶段 + 一次 <code>SyncAll</code>(仓内已有跨 rank 栅栏原语);plan 表只在本卡 device 内被消费,合核后省一次 launch、一次全 rank 栅栏与中间状态往返。</td></tr>
-    <tr><th>收益</th><td>每层省 0.05~0.08 ms(launch ~17-20 µs + 栅栏 + plan 表读写)⇒ <b>decode 约 +3~5%</b>;prefill 的 planning 核 0.26 ms 是设备时间,只能省它的 launch 部分。</td></tr>
-    <tr><th>风险</th><td>低-中:不碰 GEMM、不改数据布局、不动权重。</td></tr>
+    <thead><tr><th>表</th><th>内容</th><th>收益</th></tr></thead>
+    <tbody>
+      <tr><td><code>dst[N]</code></td><td>每个 (token, expert) 条目的目的地编码 <code>dest_rank·NvS + loff</code></td>
+        <td><b>静态寻址</b>:接收偏移预先确定 ⇒ 接收侧不需要原子分配、收发不需要握手;搬运退化为纯数据搬移</td></tr>
+      <tr><td><code>dup_groups/loffs/counts</code></td><td>去重映射:同一 token 发往同一目标卡的多个专家条目</td>
+        <td><b>网络搬运量按「不同目标卡数」计,而不是按 K 计</b>:K=8、R=2 时从 8 份降到约 2 份(≈4×);
+            接收侧在本地把它复制进各专家段(不走网络)</td></tr>
+      <tr><td><code>cu_seqlens[E+B]</code></td><td>本卡 shard 里每组的累计行数</td>
+        <td>直接当 grouped GEMM 的 <code>group_list</code> 用 ⇒ 计算与通信的布局对齐,无重排</td></tr>
+      <tr><td><code>experts_to_copy[R,B]</code></td><td>每个目标卡该把哪些远程专家搬进本地槽</td>
+        <td><b>预取决策</b>(slot 模式):把「热门远程专家的权重」提前搬到本地,使这些行本地可算</td></tr>
+      <tr><td><code>zero_fill_ranges</code> / <code>remote_stats</code></td><td>补零区间 / 对端统计</td>
+        <td>省去每步扫描;提供容量包络保护(越界可回退)</td></tr>
+    </tbody>
   </table>
 </div>
 
-<div class="tier t2">
-  <h3>第二档:dispatch + gmm1 融合(MC2 式通信+计算融合)⚠️ 产品级决策</h3>
-  <table>
-    <tr><th style="width:86px">做法</th><td>在核内实现「收行 → 立即参与分组 GEMM」的 cube/vector 流水 + RMA 流水,把通信等待藏进计算——即重写一遍 MoE 前向。</td></tr>
-    <tr><th>收益</th><td>理论最大:吃掉当前 decode 差距(0.82× vs MC2)的大部分。</td></tr>
-    <tr><th>风险</th><td>高:等于重新实现 vendor 已有的 MC2 融合算子,而 MC2 走 HCCL。<b>MoonEP 做这一档的唯一理由是把它建在 shmem/RDMA 上</b>(大 R、跨节点、HCCL 通信域成本高的场景)。</td></tr>
-  </table>
-</div>
-
-<div class="tier t3">
-  <h3>第三档:gmm1 + swiglu + gmm2 三合一</h3>
-  <table>
-    <tr><th style="width:86px">做法</th><td>vllm-ascend 已有 <code>grouped_matmul_swiglu_quant</code> 这类融合(量化路径),bf16 下需新写或换用融合算子。</td></tr>
-    <tr><th>收益</th><td>省 2 次 launch + 激活中间张量的读写 ⇒ <b>约 +2~4%</b>。</td></tr>
-    <tr><th>风险</th><td>高:GMM 最吃性能,手写 tiling 很可能打不过现成库。</td></tr>
-  </table>
-</div>
-
+<h2>5. dispatch / combine 的通信到底怎么做(4-NPU 示意)</h2>
 <div class="card">
-  <h3>收益上限与建议路径</h3>
+  <p>
+    用 R=4、E=8(每卡 2 个专家)、K=2 举例:rank r 拥有专家 <code>[2r, 2r+2)</code>。
+    每张卡的对称内存里都有同样的 <code>hidden_buf[NvS,H]</code> 与旗标区,且<b>虚拟地址相同</b>。
+  </p>
+  <figure>
+    <svg viewBox="0 0 1000 360" role="img" aria-label="4 卡 MoonEP dispatch/combine 数据流">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--series-1)"/>
+        </marker>
+        <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--series-3)"/>
+        </marker>
+      </defs>
+      <!-- rank boxes -->
+      <g font-family="inherit" font-size="12">
+        <g>
+          <rect x="20"  y="40" width="210" height="150" rx="10" fill="var(--surface-1)" stroke="var(--border)"/>
+          <text x="32" y="62" font-size="13" font-weight="600" fill="var(--text-primary)">rank 0  · 专家 e0,e1</text>
+          <rect x="32" y="74" width="186" height="52" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+          <text x="42" y="92" fill="var(--text-secondary)">hidden_buf[NvS,H]</text>
+          <text x="42" y="110" fill="var(--text-muted)" font-size="11">段: [e0][e1] ← 行按专家分段落位</text>
+          <rect x="32" y="132" width="186" height="20" rx="5" fill="var(--surface-2)" stroke="var(--border)"/>
+          <text x="42" y="146" fill="var(--text-muted)" font-size="11">weights_buf / 旗标区 / 栅栏</text>
+          <text x="32" y="172" fill="var(--text-muted)" font-size="11">本卡 token A→{e1,e6}  B→{e3,e7}  C→{e2,e3}</text>
+        </g>
+        <g>
+          <rect x="270" y="40" width="210" height="150" rx="10" fill="var(--surface-1)" stroke="var(--border)"/>
+          <text x="282" y="62" font-size="13" font-weight="600" fill="var(--text-primary)">rank 1 · 专家 e2,e3</text>
+          <rect x="282" y="74" width="186" height="52" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+          <text x="292" y="92" fill="var(--text-secondary)">hidden_buf[NvS,H]</text>
+          <text x="292" y="110" fill="var(--text-muted)" font-size="11">段: [e2][e3]</text>
+          <rect x="282" y="132" width="186" height="20" rx="5" fill="var(--surface-2)" stroke="var(--border)"/>
+          <text x="292" y="146" fill="var(--text-muted)" font-size="11">weights_buf / 旗标区 / 栅栏</text>
+        </g>
+        <g>
+          <rect x="520" y="40" width="210" height="150" rx="10" fill="var(--surface-1)" stroke="var(--border)"/>
+          <text x="532" y="62" font-size="13" font-weight="600" fill="var(--text-primary)">rank 2 · 专家 e4,e5</text>
+          <rect x="532" y="74" width="186" height="52" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+          <text x="542" y="92" fill="var(--text-secondary)">hidden_buf[NvS,H]</text>
+          <text x="542" y="110" fill="var(--text-muted)" font-size="11">段: [e4][e5]</text>
+          <rect x="532" y="132" width="186" height="20" rx="5" fill="var(--surface-2)" stroke="var(--border)"/>
+          <text x="542" y="146" fill="var(--text-muted)" font-size="11">weights_buf / 旗标区 / 栅栏</text>
+        </g>
+        <g>
+          <rect x="770" y="40" width="210" height="150" rx="10" fill="var(--surface-1)" stroke="var(--border)"/>
+          <text x="782" y="62" font-size="13" font-weight="600" fill="var(--text-primary)">rank 3 · 专家 e6,e7</text>
+          <rect x="782" y="74" width="186" height="52" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+          <text x="792" y="92" fill="var(--text-secondary)">hidden_buf[NvS,H]</text>
+          <text x="792" y="110" fill="var(--text-muted)" font-size="11">段: [e6][e7]</text>
+          <rect x="782" y="132" width="186" height="20" rx="5" fill="var(--surface-2)" stroke="var(--border)"/>
+          <text x="792" y="146" fill="var(--text-muted)" font-size="11">weights_buf / 旗标区 / 栅栏</text>
+        </g>
+      </g>
+      <!-- dispatch PUT arrows (down phase) -->
+      <g stroke="var(--series-1)" stroke-width="1.8" fill="none" marker-end="url(#ah)">
+        <path d="M120,196 C120,232 375,232 375,196"/>            <!-- A: e1 local + e6 -> r3 -->
+        <path d="M150,196 C150,270 875,270 875,196"/>
+        <path d="M180,196 C180,246 585,246 585,196"/>            <!-- C: e2,e3 -> r1 (一次) -->
+      </g>
+      <g font-size="11.5" fill="var(--series-1)" font-family="inherit">
+        <text x="330" y="246">A→rank3:e6 (1 行)</text>
+        <text x="700" y="284">A→rank3 … B→rank1:e3,rank3:e7</text>
+        <text x="560" y="228">C→rank1 只搬 1 行(e2,e3 同卡)</text>
+      </g>
+      <!-- combine GET arrows (up phase) -->
+      <g stroke="var(--series-3)" stroke-width="1.8" fill="none" marker-end="url(#ah2)" stroke-dasharray="5 4">
+        <path d="M875,300 C875,332 150,332 150,300"/>
+        <path d="M375,300 C375,344 130,344 130,300"/>
+      </g>
+      <g font-size="11.5" fill="var(--series-3)" font-family="inherit">
+        <text x="330" y="352">combine:各卡 GET 自己需要的行(对端已算完)→ 本地 K 路求和</text>
+      </g>
+      <g font-size="11.5" fill="var(--text-muted)" font-family="inherit">
+        <text x="20" y="24">实线 = dispatch(PUT,发送方主动写对端缓冲,地址由 dst 表预先确定)</text>
+        <text x="20" y="300" opacity="0">.</text>
+      </g>
+    </svg>
+    <figcaption>
+      4 卡示意(token 与专家为教学简化)。dispatch 阶段:每条去重后的行 PUT 到目标卡 hidden_buf 的既定偏移;
+      combine 阶段:各卡按 plan 从对端 GET 自己需要的算完行。两阶段都以一次全 rank 栅栏收尾/开头。
+    </figcaption>
+  </figure>
+  <table>
+    <thead><tr><th>阶段</th><th>原语</th><th>为什么这么选</th></tr></thead>
+    <tbody>
+      <tr><td>dispatch</td><td><code>aclshmemx_mte_put_nbi</code>(MTE)<br>或 <code>aclshmemx_udma_qp_put_nbi</code>(URMA,多 QP + 对端信用)</td>
+        <td>写对端缓冲:发送方最清楚「哪些行、多少量」,一次性推过去;nbi = 非阻塞,可与其他搬运并行</td></tr>
+      <tr><td>同步</td><td>核尾 <code>aclshmemx_barrier_all_vec()</code>(全 rank 栅栏)</td>
+        <td>接收侧无需逐行握手(dst 表已确定偏移),只需知道「所有发送方都发完了」</td></tr>
+      <tr><td>combine</td><td>prologue 写回本卡行 → 栅栏 → <code>aclshmemx_mte_get_nbi</code>(按需 GET)+ fp32 累加</td>
+        <td>拉取侧驱动:只取自己需要的行;GET 与本地计算可流水(ping-pong)</td></tr>
+      <tr><td>prefetch(slot)</td><td><code>aclshmemx_mte_get_nbi</code> + <code>aclshmem_quiet()</code></td>
+        <td>搬的是<b>权重</b>(几 MB/专家)而不是 token,GET 到本地槽后本地 GEMM 直接可用</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>6. prefetch 在哪个阶段</h2>
+<div class="card">
+  <p>
+    prefetch <b>不在</b>默认(owner)路径上,只在 <code>MOONEP_SLOT_MODE=1</code>(冗余专家平衡模式)里出现,位置是
+    <b>dispatch 之后、专家 GEMM 之前</b>:
+    <code>token_dispatch → prefetch_projections(plan.experts_to_copy) → grouped GEMM → token_combine</code>。
+  </p>
   <ul>
-    <li><b>上限</b>:decode 每层 0.202 ms 通信段里,launch/同步/边界拷贝约占 0.1 ms ⇒ 全部融合的理论上限约 <b>decode +10~15%</b>(把当前 18% 差距的 2/3 吃回来)。</li>
-    <li><b>但大头是通信等待的隐藏</b>,只有第二档(自写 GEMM)能吃 —— 那是「要不要把 MoonEP 做成产品级内核」的取舍,不是纯优化。</li>
-    <li><b>路径</b>:① 先做第一档(低成本、可量化、不碰 GEMM);② 第二档先回答目标场景是否为大 R / 跨节点——若只是 2 卡 E=128,本机数据表明 MC2 已接近最优,MoonEP 的结构优势发挥不出来;③ 第三档交给 GMM/算子团队或用 vendor 融合算子。</li>
+    <li><b>搬什么</b>:被选中的「远程专家」的权重行(w13/w2),从对端对称权重区 GET 到本卡的 B 个槽 chunk;</li>
+    <li><b>为什么</b>:这些专家的 token 就不必发到对端了 —— 行留在本地,用槽里的权重本地算;</li>
+    <li><b>代价</b>:每层一次权重搬运(几 MB)+ 本地多算这些行 + 槽显存;所以只有在路由倾斜严重时才划算
+      (本机 2 卡 E=128 均匀路由下不均衡仅 0.63%,开着反而亏)。</li>
   </ul>
+</div>
+
+<h2>7. 什么是 Megas MoE(融合大算子)</h2>
+<div class="card">
+  <p>把 MoE 一层里的多个阶段 —— <b>token 交换(dispatch)、分组 GEMM、激活、加权归约(combine)</b> —— 收进
+    <b>同一个设备核</b>,用核内栅栏 / 多流水(cube 与 vector、搬运与计算)把通信等待藏到计算后面。业界三条路线:</p>
+  <ul>
+    <li><b>MC2(本机基线)</b>:dispatch/combine 与 GEMM 在算子内流水,是 Ascend 上现成的 mega-MoE 形态;通信底层绑定 HCCL。</li>
+    <li><b>fused-kernel 流派</b>(DeepGEMM 风格):单核内完成分组 GEMM + 激活 + 归约,靠持久化线程块与流水隐藏搬运。</li>
+    <li><b>MoonEP 的对称内存流派</b>:显式 plan + 单边 RMA,通信与计算目前是两个阶段(尚未流水)。</li>
+  </ul>
+  <p class="verdict">融合的本质收益是<b>让通信与计算重叠</b>,其次才是省 launch 与中间张量往返。</p>
+</div>
+
+<h2>8. 重点:把 MoonEP 融进 Megas MoE —— 亲和还是冲突?</h2>
+<div class="card">
+  <p>逐维度对照 MoonEP 的设计与「单核多阶段流水」的需求:</p>
+  <table>
+    <thead><tr><th>维度</th><th>MoonEP 的做法</th><th>对融合核的影响</th><th style="width:74px">判定</th></tr></thead>
+    <tbody>
+      <tr><td>寻址方式</td><td>plan 表预先给出「第 i 行写到对端哪个偏移」</td>
+        <td>核内搬迁无需原子分配、无握手协议,可静态划分搬运任务到各 AIV/搬运队列</td>
+        <td class="ok">亲和</td></tr>
+      <tr><td>通信语义</td><td>单边 PUT / GET(不需要对端参与)</td>
+        <td>可以与 cube 计算并行发起,不占用对方的执行资源;天然适合「搬运引擎 + 计算引擎」双流水</td>
+        <td class="ok">亲和</td></tr>
+      <tr><td>通信底层</td><td>SHMEM 对称内存,无 HCCL 通信域/流依赖</td>
+        <td>自研融合核可以直接用;MC2 的融合算子却是 vendor 闭源、无法改造</td>
+        <td class="ok">亲和</td></tr>
+      <tr><td>数据布局</td><td>shard 按专家分段落位,<code>cu_seqlens</code> 直接就是 group_list</td>
+        <td>GEMM 的 tiling 与通信的目标布局一致,核内无需重排(gather/scatter 都可省)</td>
+        <td class="ok">亲和</td></tr>
+      <tr><td>去重表</td><td>同 token 到同卡只搬一行,接收侧本地复制</td>
+        <td>网络量降到「不同目标卡数」;核内多一段本地复制,但搬运压力显著下降</td>
+        <td class="ok">亲和</td></tr>
+      <tr><td>零同步 host 路径</td><td>已改成全设备侧推进(行计数不再回 host)</td>
+        <td>融合核要求 host 不进关键路径 —— 这一步已经做过,是融合的前置条件</td>
+        <td class="ok">亲和</td></tr>
+      <tr><td><b>planning 的跨 rank 栅栏</b></td><td>全局汇总 + payload-done 旗标 + 核尾全 rank 栅栏</td>
+        <td><b>冲突</b>:一个阶段的自旋等待会阻塞整个核的流水(核内没有别的活可干);planning 必须所有 rank 到齐才有全局视图</td>
+        <td class="warn">冲突</td></tr>
+      <tr><td>动态 shape</td><td>每步 T、每层路由都不同,plan 表每层重算</td>
+        <td>融合核的循环边界变成数据驱动(读 plan 表),tiling 效率与寄存器/UB 预算都更难静态化</td>
+        <td class="warn">冲突</td></tr>
+      <tr><td>容量补齐(pad)</td><td>补到步长容量,尾部行使零权重</td>
+        <td>融合后 pad 行使 GEMM 与 combine 都白跑一段(可用 real-T 路径缓解)</td>
+        <td class="warn">冲突</td></tr>
+      <tr><td>slot prefetch(权重搬运)</td><td>GEMM 前必须等权重 GET 完成</td>
+        <td>会插入一次核内等待;本场景收益为负,融合时可先不做</td>
+        <td class="warn">冲突(可裁剪)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>推荐形态:融合边界画在哪</h3>
+  <figure>
+    <svg viewBox="0 0 1000 250" role="img" aria-label="融合边界建议">
+      <g font-family="inherit" font-size="12">
+        <rect x="20" y="46" width="150" height="150" rx="10" fill="var(--surface-2)" stroke="var(--border)"/>
+        <text x="34" y="70" font-size="13" font-weight="600" fill="var(--text-primary)">核外 · 保持独立</text>
+        <text x="34" y="92" fill="var(--text-secondary)">planning 核</text>
+        <text x="34" y="110" fill="var(--text-muted)" font-size="11">跨 rank 汇总/栅栏</text>
+        <text x="34" y="128" fill="var(--text-muted)" font-size="11">产出 dst/dup/cu 表</text>
+        <text x="34" y="152" fill="var(--text-muted)" font-size="11">0.068 ms(decode)</text>
+        <text x="34" y="170" fill="var(--text-muted)" font-size="11">可尝试与上一层重叠</text>
+
+        <rect x="200" y="30" width="700" height="186" rx="12" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-dasharray="7 5"/>
+        <text x="216" y="22" font-size="13" font-weight="600" fill="var(--series-1)">Megas MoE 融合核(每层)</text>
+
+        <rect x="222" y="46" width="150" height="150" rx="9" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="236" y="68" font-size="12.5" font-weight="600" fill="var(--text-primary)">dispatch</text>
+        <text x="236" y="88" fill="var(--text-secondary)">按 dst 表 PUT</text>
+        <text x="236" y="106" fill="var(--text-secondary)">去重行本地复制</text>
+        <text x="236" y="130" fill="var(--text-muted)" font-size="11">由搬运引擎驱动,</text>
+        <text x="236" y="146" fill="var(--text-muted)" font-size="11">与 cube 阶段并行</text>
+
+        <rect x="392" y="46" width="180" height="150" rx="9" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="406" y="68" font-size="12.5" font-weight="600" fill="var(--text-primary)">GMM1 + swiglu</text>
+        <text x="406" y="88" fill="var(--text-secondary)">按 group_list 只算真实行</text>
+        <text x="406" y="112" fill="var(--text-muted)" font-size="11">核内栅栏:等本卡收到的行齐</text>
+        <text x="406" y="128" fill="var(--text-muted)" font-size="11">(全 rank 栅栏仍然需要)</text>
+
+        <rect x="592" y="46" width="140" height="150" rx="9" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="606" y="68" font-size="12.5" font-weight="600" fill="var(--text-primary)">GMM2</text>
+        <text x="606" y="88" fill="var(--text-secondary)">down proj</text>
+        <text x="606" y="112" fill="var(--text-muted)" font-size="11">输出直接落 shard,</text>
+        <text x="606" y="128" fill="var(--text-muted)" font-size="11">省一次边界拷贝</text>
+
+        <rect x="752" y="46" width="130" height="150" rx="9" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="766" y="68" font-size="12.5" font-weight="600" fill="var(--text-primary)">combine</text>
+        <text x="766" y="88" fill="var(--text-secondary)">GET 对端行</text>
+        <text x="766" y="106" fill="var(--text-secondary)">K 路求和</text>
+        <text x="766" y="130" fill="var(--text-muted)" font-size="11">结果直接写回</text>
+        <text x="766" y="146" fill="var(--text-muted)" font-size="11">hidden_states</text>
+      </g>
+    </svg>
+    <figcaption>
+      建议:planning 留在核外(它的全局耦合会破坏核内流水);dispatch、GMM1、激活、GMM2、combine 进同一个核,
+      用「搬运引擎做 PUT / 计算引擎做 GEMM」的双流水把通信藏起来。权重 prefetch 在有收益的场景再叠加。
+    </figcaption>
+  </figure>
+
+  <h3>收益与风险</h3>
+  <table>
+    <thead><tr><th>项</th><th>估算</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>省 launch / 边界拷贝</td><td>+3~5%(decode)</td><td>6 个核 → 3 个核;省掉 2 份 32MB 级边界拷贝与中间张量往返</td></tr>
+      <tr><td>通信与计算重叠</td><td>+5~10%(decode)</td><td>dispatch 的 PUT 与 GMM1 的 cube 计算并行;combine 的 GET 与 GMM2 重叠 —— 这正是 MC2 目前领先的部分(每层 0.157 ms vs 0.202 ms)</td></tr>
+      <tr><td>去重带来的搬运下降</td><td>已有,不改</td><td>融合前后都受益,不是融合的增量</td></tr>
+      <tr><td>风险:planning 栅栏</td><td>—</td><td>若把 planning 也塞进核,最慢阶段会阻塞流水,得不偿失 ⇒ <b>核外保留</b></td></tr>
+      <tr><td>风险:自写 GMM</td><td>—</td><td>要在核内做 GEMM 才能重叠,意味着放弃现成高性能 GMM;tiling 不如库是最大不确定性</td></tr>
+      <tr><td>收益前提</td><td>—</td><td>本场景(2 卡、E=128、均匀路由)MC2 已接近最优;MoonEP 的结构优势在大 R / 跨节点 / 路由倾斜时才明显</td></tr>
+    </tbody>
+  </table>
+  <p class="verdict">
+    <b>结论</b>:MoonEP 的「显式 plan + 单边对称内存」与 Mega-MoE 是<b>亲和</b>的——静态寻址、单边 put/get、
+    无 HCCL 依赖,恰好是融合核需要的性质(MC2 的融合算子反而因为是 vendor 闭源而无法改造)。
+    唯一结构性冲突是 <b>planning 的全局耦合</b>,所以推荐<b>「核外 planning + 核内 dispatch/GEMM/combine」</b>的边界。
+    建议先做低成本的第一步(planning 保持独立、把 dispatch 与 GEMM1 合核验证重叠收益),再评估是否值得自写 GEMM。
+  </p>
 </div>
 
 <footer>
-  数据来源:本机 dp2ep2 引擎实测(1024 seq × 256 prompt,MBT=1024,GEN=1/128 两相位相减拆分 prefill/decode)。
-  组件计时由 <code>MOONEP_TIME_STATS=1</code>(集成侧)与 <code>ASCEND_MOONEP_TIME_STATS=1</code>(库内分段)采集;
-  三路线报告脚本 <code>report3.py</code>。测量纪律:同码跨窗口漂移 ±8%,所有对比同为窗口背靠背。
+  数据来源:本机 dp2ep2 引擎实测(1024 seq × 256 prompt,MBT=1024,GEN=1/128 两相位相减拆分 prefill/decode);
+  算子内部机制来自 <code>kernels/planning.cpp</code>、<code>moonep_dispatch.cpp</code>、<code>moonep_combine.cpp</code>、
+  <code>prefetch.cpp</code> 与 <code>ascend_moonep/api.py</code>。
+  组件计时:<code>MOONEP_TIME_STATS=1</code>(集成侧)+ <code>ASCEND_MOONEP_TIME_STATS=1</code>(库内分段);报告脚本 <code>report3.py</code>。
+  测量纪律:同码跨窗口漂移 ±8%,所有对比同窗口背靠背。附录(踩坑):combine 核会读整块 <code>[NvS,H]</code>,
+  因此 MLP 输出在 <code>sum(group_list)</code> 之后必须是零(用 <code>where</code> 清零,不能用乘法,NaN 会漏)。
 </footer>
 </div>
 
 <div class="chart-tip" id="tip"></div>
 <script>
-const BLUE = getComputedStyle(document.documentElement).getPropertyValue('--series-1').trim();
-const ORANGE = getComputedStyle(document.documentElement).getPropertyValue('--series-2').trim();
+const CSSV = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+const BLUE = CSSV('--series-1'), ORANGE = CSSV('--series-2');
 const tip = document.getElementById('tip');
 function showTip(e, text){
   tip.textContent = text; tip.style.opacity = 1;
-  tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 220) + 'px';
+  tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 240) + 'px';
   tip.style.top = (e.clientY - 34) + 'px';
 }
-function hideTip(){ tip.style.opacity = 0; }
+const hideTip = () => tip.style.opacity = 0;
 
 function bars(el, rows, max, unit){
-  const host = document.getElementById(el);
-  host.innerHTML = '';
+  const host = document.getElementById(el); host.innerHTML = '';
   for (const r of rows){
     const row = document.createElement('div'); row.className = 'row';
     const lab = document.createElement('div'); lab.className = 'lab'; lab.textContent = r.label;
@@ -302,32 +523,26 @@ function bars(el, rows, max, unit){
     bar.addEventListener('mousemove', e => showTip(e, r.tip));
     bar.addEventListener('mouseleave', hideTip);
     track.appendChild(bar);
-    if (r.ref !== undefined){
-      const rf = document.createElement('div'); rf.className = 'ref';
-      rf.style.left = (r.ref / max * 100) + '%';
-      rf.innerHTML = '<span>' + (r.refLabel || '') + '</span>';
-      track.appendChild(rf);
-    }
-    const val = document.createElement('div'); val.className = 'val'; val.textContent = r.value.toFixed(r.dp === 0 ? 0 : r.dp ?? 3) + unit;
+    const val = document.createElement('div'); val.className = 'val';
+    val.textContent = r.value.toFixed(r.dp === 0 ? 0 : (r.dp ?? 3)) + unit;
     row.append(lab, track, val); host.appendChild(row);
   }
 }
 
 bars('chart-throughput', [
-  {label:'MC2 基线', value:7719, color:ORANGE, dp:0, tip:'MC2:7719 tok/s(0.157 ms/层 通信)'},
+  {label:'MC2 基线', value:7719, color:ORANGE, dp:0, tip:'MC2:7719 tok/s · 0.157 ms/层通信'},
   {label:'MoonEP-MTE', value:6318, color:BLUE, dp:0, tip:'MoonEP-MTE:6318 tok/s = MC2 的 0.82×'},
   {label:'MoonEP-URMA', value:5913, color:BLUE, dp:0, tip:'MoonEP-URMA:5913 tok/s = MC2 的 0.77×'},
 ], 8000, ' tok/s');
 
 bars('chart-segments', [
-  {label:'pad 预处理', value:0.035, color:BLUE, tip:'pad 缓冲写入(尾部惰性写),0.035 ms'},
-  {label:'tpe 直方图', value:0.022, color:BLUE, tip:'histc + 类型转换,0.022 ms'},
-  {label:'planning 核', value:0.068, color:BLUE, tip:'planning 核(设备时间),0.068 ms;prefill 0.26 ms'},
-  {label:'dispatch 核', value:0.017, color:BLUE, tip:'RMA 行分发核,0.017 ms'},
-  {label:'边界拷贝 ×2', value:0.018, color:BLUE, tip:'对称 chunk → 调用方 buffer,0.018 ms'},
-  {label:'加权 + 尾部 mask', value:0.044, color:BLUE, tip:'mul + to(bf16) + where,0.044 ms'},
-  {label:'combine 核', value:0.055, color:BLUE, tip:'RMA 取回 + K 路求和,0.055 ms'},
-  {label:'MoonEP 通信段合计', value:0.202, color:BLUE, tip:'MC2 同样口径 0.157 ms + pad/tpe 0.057 → 0.214 ms'},
+  {label:'pad + tpe', value:0.057, color:BLUE, tip:'pad 缓冲 0.035 + histc 0.022 ms'},
+  {label:'planning 核(有通信)', value:0.068, color:BLUE, tip:'直方图 + 跨 rank 汇总/去重 + 栅栏;prefill 0.26 ms'},
+  {label:'dispatch 核(PUT)', value:0.017, color:BLUE, tip:'按 dst 表 mte_put_nbi 到对端缓冲'},
+  {label:'边界拷贝 ×2', value:0.018, color:BLUE, tip:'对称 chunk → 调用方 buffer'},
+  {label:'加权 + 尾部清零', value:0.044, color:BLUE, tip:'mul + to(bf16) + where'},
+  {label:'combine 核(GET)', value:0.055, color:BLUE, tip:'写回 → 栅栏 → mte_get_nbi → K 路求和'},
+  {label:'MoonEP 通信段合计', value:0.202, color:BLUE, tip:'同口径 MC2 = 0.157 ms'},
   {label:'MC2 dispatch+combine', value:0.157, color:ORANGE, tip:'MC2 融合算子(host 入队口径,异步;仅作参考)'},
 ], 0.22, ' ms');
 </script>
