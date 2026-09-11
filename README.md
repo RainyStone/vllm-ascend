@@ -97,36 +97,60 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
 
 `MOONEP_SLOT_STATS=1` 会在进程退出时打印：dispatch 总次数、发生槽平衡的次数、槽内行数、预取的远程专家槽数。
 
-## 性能优化点（dispatch/combine host 段，2026-09-10）
+## 性能优化点与收益（dispatch/combine host 段，2026-09-10/11）
 
-引擎内 MoonEP 单层开销的大头在 host 段：每层十几到二十个小算子（本机单个 elementwise
-op ≈ 4-5µs host / ≈22µs 延迟，`int(x.sum().item())` ≈ 49/65µs），且逐层 `.item()` 同步把
-host 时间钉在关键路径上。已做的优化（单位：每层每 rank，dp2ep2 / MTE / 1024 seq×256 prompt）：
+**一句话**：dp2ep2（1024 seq × 256 prompt、MTE）从 **4684 → ~6300–6800 tok/s**（同窗口 A/B **+45%**），
+相对原生 MC2 从 **0.59 → 0.82**；URMA 从 3809 → ~5900（0.48 → **0.77**）。所有数字都以"每条序列的
+首 token 与 MC2 一致（=315）"作为正确性口径。
 
-| 优化 | 默认 | 实测 |
+原来的大头在 host 段：每层十几到二十个小算子（本机单个 elementwise op ≈ 4-5µs host / ≈22µs 延迟，
+`int(x.sum().item())` ≈ 49/65µs），且**逐层 `.item()` 同步**把 host 时间钉在关键路径上。
+
+### 逐项优化（问题 → 做法 → 收益；单位：每层每 rank）
+
+| # | 问题 | 做法 | 收益 |
+|---|---|---|---|
+| 1 | `torch.bincount` 统计每专家 token 数需 host 往返（输出长度动态） | 换 `torch.histc`（定长输出；计数 ≤ S·K=8192 在 fp32 精确） | disp_tpe 0.30 → **0.02ms** |
+| 2 | 每层无条件清空整块 pad 缓冲（hidden 16MB+） | 尾部惰性写：只在 (T, 容量, pad 专家) 变化时写 `[T:]`；`copy_` 每次覆盖 `[0:T]` | 每层省 3 次 launch，disp_pad ≈0.03ms |
+| 3 | hot path 每层造 `.to()` 临时张量 | 直接 `copy_`（自带类型转换） | — |
+| 4 | 固定按 `max_num_batched_tokens` 分派，短步长白跑 | **步长自适应容量池**（借鉴上游 vLLM `MoonEPBufferPool`）：init 预建 128/256/…/S_max 的 pow2 容量 Buffer，每步按 rank 对称步长（`forward_context.max_tokens_across_dp`）选最小容量 | 同码 A/B **+1.7%**，disp_buf 0.53→0.47ms |
+| 5 | 库内每层重新分配 32MB `empty_like` + 7 张 planning 输出表 | `Buffer.dispatch(reuse_outputs=True)`：在 Buffer 上缓存（契约：仅本次到下次 dispatch 之间有效，尾部是陈旧数据，消费方只看 `group_list` 覆盖的行） | **+3.4%**，disp_lib 0.16 → **0.082ms** |
+| 6 | 逐层 `.item()` 读回 `rows_total` 再切片，host 被同步钉死 | **零同步 dispatch**：MLP 直接吃完整 `[NvS,H]` + count-mode `group_list`（grouped matmul 只走 `sum(group_list)` 行），combine 输入尾部用设备侧 `where(row_ids < sum)` 清零 | **+20.5%**，dispatch 0.475→**0.30ms**，disp_post 0.33→**≈0** |
+| 7 | 每次 dispatch/combine 都查 `torch_npu.npu.current_stream()`（barrier 是 no-op，不需要流） | 惰性查询（仅 trace 时取） | barrier 段 0.14 → **0.001ms** |
+
+累计（dp2ep2 MTE G128，同窗口 A/B）：**5511 → 5698（+reuse）→ 6639（+no-sync）→ 6744 tok/s
+（两个都开，+22.4%）**，相对当日基线 4684 为 **+44%**。
+
+### 组件对照（MTE decode，每层每 rank，ms）
+
+| 阶段 | 优化前 | 现在 |
 |---|---|---|
-| `torch.bincount` → `torch.histc`：bincount 输出长度动态、需要 host 往返 | 开 | disp_tpe 0.30 → **0.02ms** |
-| pad 尾部惰性写：只在 (T, 容量, pad 专家) 变化时写尾部 `[T:]`（`copy_` 每次覆盖 `[0:T]`） | 开 | disp_pad ≈0.03ms，每层省 3 次 launch |
-| hot path 去掉 `.to()` 临时张量（`copy_` 自带类型转换） | 开 | — |
-| **步长自适应容量池**（借鉴上游 vLLM `MoonEPBufferPool`）：init 预建 128/256/512/…/S_max 的 pow2 容量 Buffer，每步按 rank 对称步长（`forward_context.max_tokens_across_dp`）选最小容量 | 开 | 同码 A/B **+1.7%**，disp_buf 0.53→0.47ms |
-| 库内输出复用 `reuse_outputs`：缓存每层的 32MB `empty_like` + planning 输出表 | 开 | **+3.4%**，disp_lib 0.16 → **0.12ms** |
-| 零同步 dispatch：不再读回 rows_total，MLP 直接吃完整 `[NvS,H]` + count-mode group_list，combine 输入尾部由设备侧 `where` mask 清零 | 开 | **+20.5%**，dispatch 0.475→**0.30ms**、disp_post →**≈0** |
+| dispatch 合计 | 0.77 | **0.20** |
+| ├ disp_pre（pad + tpe） | 0.35 | 0.064 |
+| ├ disp_lib（库内 host） | 0.16 | 0.082 |
+| └ disp_post（逐层同步） | 0.33 | 0.056 |
+| combine（含尾部 mask） | 0.09 | 0.107 |
+| **通信占 rank 时间** | 71% | **45%** |
 
-累计（已验证口径：首 token 与 MC2 全一致 = 315，dp2ep2 MTE G128 同会话 A/B）：
-**5511 → 5698（+reuse）→ 6639（+no-sync）→ 6744 tok/s（两个都开，+22.4%）**；
-相对已提交基线 4684 tok/s 累计 **+44%**。
-
-三路线最终结果（同上配置，全部首 token 与 MC2 一致）：
+### 三路线结果（同窗口，全部首 token 与 MC2 一致）
 
 | 路线 | prefill tok/s | decode tok/s | 总 tok/s | vs MC2 | 单层 dispatch/combine (decode) |
 |---|---|---|---|---|---|
-| MC2 基线 | 54409 | 10832 | 7791 | 1.00 | 0.094 / 0.065 |
-| MoonEP-MTE | 44274 | 9732 | **6797** | **0.87** | 0.188 / 0.108 |
-| MoonEP-URMA | 36379 | 8459 | **5805** | **0.75** | 0.171 / 0.164 |
+| MC2 基线 | 50 675 | 11 014 | 7 719 | 1.00 | 0.093 / 0.064 |
+| MoonEP-MTE | 44 110 | 8 785 | **6 318** | **0.82** | 0.204 / 0.107 |
+| MoonEP-URMA | 35 900 | 8 749 | **5 913** | 0.77 | 0.169 / 0.158 |
 
-**测量纪律（本机实测）**：同一份代码 40 分钟内的绝对吞吐会漂移 ~8%（6797 → 6131 tok/s，设备空闲、无租户），所以单次跑数不能跨窗口比较，A/B 必须同窗口背靠背；本文所有 Δ 均为同窗口 A/B。
+**怎么复现**：`MOONEP_TIME_STATS=1` 跑 GEN=1 与 GEN=128 两条腿（prefill/decode 靠相减拆分），
+用 `report3.py`（`/home/tmp/report3.py`）汇总三路线 × 相位的 dispatch/combine/compute 与吞吐。
 
-剩余瓶颈已从"逐层同步"转到 **prefill 的库内 planning**（`disp_lib` prefill 0.32/0.57ms，随 N*K 行数线性）与 URMA 上下文自身开销；prefill 通信占比 MTE 82% / URMA 99%。
+**测量纪律（本机实测）**：同一份代码 40 分钟内的绝对吞吐会漂移 ~8%（6797 → 6131 tok/s，设备空闲、无租户；
+用 `git stash` 回到旧提交对照确认不是代码回归），所以单次跑数不能跨窗口比较，A/B 必须同窗口背靠背；
+本文所有 Δ 均为同窗口 A/B，小于 ~5% 的差异要在噪声里打折看。
+
+**剩余瓶颈**：已经从"逐层同步"转到 **prefill 的 planning 核**（`disp_lib` prefill 0.31ms 基本是
+launch 后等 planning 核跑完的设备时间，随 N·K 行数线性；dispatch 核 0.02ms、边界拷贝 0.02ms）与
+URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下要么把 planning 与 dispatch 合核、
+要么把 histogram 挪进核 —— 都要改 AscendC 内核（item 2 单独做只值 ~0.02ms/层，约 1%）。
 
 **改这几处必须遵守的两条硬约束（踩过的坑）**：
 
