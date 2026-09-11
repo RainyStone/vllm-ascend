@@ -121,6 +121,28 @@ _SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
 # optional per-step slot statistics (MOONEP_SLOT_STATS=1, dumped at process exit)
 _SLOT_STATS = {"calls": 0, "with_slots": 0, "slot_rows": 0, "prefetch_experts": 0}
 
+# optional per-rank MoE load accounting (MOONEP_BALANCE_STATS=1)
+_BALANCE_STATS_ON = os.environ.get("MOONEP_BALANCE_STATS", "0") == "1"
+_BALANCE_STATS = {"calls": 0, "tokens": 0, "local_rows": 0, "all_rows": 0, "pad_rows": 0}
+
+
+def _dump_balance_stats():
+    if not _BALANCE_STATS_ON:
+        return
+    s = _BALANCE_STATS
+    rank = s.get("rank", "?")
+    calls = max(s["calls"], 1)
+    print(
+        f"[moonep-balance r{rank}] layers={s['calls']} tokens={s['tokens']} "
+        f"rows_local={s['local_rows']} ({s['local_rows'] / calls:.0f}/layer) "
+        f"rows_all={s['all_rows']} ({s['all_rows'] / calls:.0f}/layer) "
+        f"pad_rows={s['pad_rows']}",
+        flush=True,
+    )
+
+
+atexit.register(_dump_balance_stats)
+
 # MOONEP_TIME_STATS=1: per-phase wall totals [total_s, calls]
 _TSTATS_ENABLED = os.environ.get("MOONEP_TIME_STATS", "0") == "1"
 _MOONEP_TSTATS = {"dispatch": [0.0, 0], "disp_pre": [0.0, 0], "disp_pad": [0.0, 0],
@@ -595,6 +617,16 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # load-balance path: rows for prefetched (slot) experts stay local
             slot_counts = counts[E:].contiguous()
             local_counts = torch.cat((local_counts, slot_counts))
+        if _BALANCE_STATS_ON:
+            # per-rank (token, expert) entries: what this rank computes vs the
+            # full step. Opt-in: reading the counts back costs a host sync.
+            stat = _BALANCE_STATS
+            stat["rank"] = get_ep_group().rank_in_group
+            stat["calls"] += 1
+            stat["tokens"] += T
+            stat["local_rows"] += int(local_counts.sum().item())
+            stat["all_rows"] += int(counts[:E].sum().item())
+            stat["pad_rows"] += (capacity - T) * K
         if os.environ.get("MOONEP_SLOT_STATS", "0") == "1" and slot_counts is not None:
             # debug only: this host read re-introduces the per-layer sync
             s = _SLOT_STATS

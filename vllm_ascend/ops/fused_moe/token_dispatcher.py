@@ -52,6 +52,27 @@ def _base_ts_dump():
 
 atexit.register(_base_ts_dump)
 
+# MC2/all2all 基线侧的每 rank 负载统计（MOONEP_BALANCE_STATS=1 时打印）：
+# output_splits[r] = 本 rank 需要计算的 (token, expert) 条目数（按专家属主接收）
+_BASE_BALANCE_ENABLED = os.environ.get("MOONEP_BALANCE_STATS", "0") == "1"
+_BASE_BALANCE = {"calls": 0, "tokens": 0, "recv_rows": 0}
+
+
+def _base_balance_dump():
+    if not _BASE_BALANCE_ENABLED or not _BASE_BALANCE["calls"]:
+        return
+    b = _BASE_BALANCE
+    calls = max(b["calls"], 1)
+    print(
+        f"[baseline-balance] layers={b['calls']} tokens={b['tokens']} "
+        f"({b['tokens'] / calls:.0f}/layer) recv_rows={b['recv_rows']} "
+        f"({b['recv_rows'] / calls:.0f}/layer)",
+        flush=True,
+    )
+
+
+atexit.register(_base_balance_dump)
+
 
 def _base_ts(name: str, t0: float) -> None:
     if not _BASE_TSTATS_ENABLED:
@@ -277,6 +298,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
+        if _BASE_BALANCE_ENABLED:
+            # expert_token_nums: per local expert token counts -> its sum is the
+            # number of (token, expert) rows this rank computes (same metric as
+            # MoonEP's rows_local); ep_recv_counts: tokens received per EP rank.
+            b = _BASE_BALANCE
+            b["calls"] += 1
+            b["recv_rows"] += int(expert_token_nums.sum().item())
+            b["tokens"] += int(ep_recv_counts.sum().item())
 
         group_list_type = kwargs_mc2["expert_token_nums_type"]
         _base_ts("dispatch", _t0)
@@ -653,6 +682,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu"), non_blocking=True).numpy()
         )
         num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(axis=0)
+        if _BASE_BALANCE_ENABLED:
+            my_rank = get_ep_group().rank_in_group
+            recv = [int(v) for v in output_splits]
+            b = _BASE_BALANCE
+            b["calls"] += 1
+            b["entries"] += int(num_out_tokens)
+            b["recv_rows"] += recv[my_rank]
+            b["peer_rows"] += sum(recv) - recv[my_rank]
 
         global_input_tokens_local_experts_indices = None
         if self.num_local_experts > 1:
