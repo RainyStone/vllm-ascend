@@ -95,17 +95,6 @@
   </div>
 </header>
 
-<div class="card">
-  <h2 style="margin-top:0">结论摘要</h2>
-  <div class="tl">
-    <div class="tile"><div class="n">planning 里有通信</div><div class="l">各 rank 发布计数/前缀到对端 inbox、owner 端 reduce、payload-done 旗标同步 + 收尾栅栏</div></div>
-    <div class="tile"><div class="n">dispatch = PUT,combine = GET</div><div class="l">都对「对称内存」寻址:发送方主动 put 到对端缓冲,combine 时按需 get 回来</div></div>
-    <div class="tile"><div class="n">plan 表最大收益 = 去重</div><div class="l">同一 token 到同一目标卡只搬一次,网络搬运量按「不同目标卡数」而非 K 计</div></div>
-    <div class="tile"><div class="n">6(+1)个设备核</div><div class="l">单层 = planning、dispatch、GMM×2、swiglu、combine;slot 模式在 MLP 前多一个 prefetch 核,另有 12~15 个 elementwise/copy</div></div>
-    <div class="tile"><div class="n">与 Megas MoE 亲和</div><div class="l">静态寻址 + 单边语义 + 无 HCCL 依赖,天然适合进融合核;冲突点是 planning 的跨 rank 栅栏</div></div>
-  </div>
-</div>
-
 <h2>1. 背景:两条路线</h2>
 <div class="card">
   <h3>① MC2 —— Ascend 原生融合路线(基线)</h3>
@@ -224,6 +213,63 @@
       <tr><td>12</td><td><b><code>moonEP_combine</code></b></td><td><span class="chip comm">AscendC</span></td><td><b>是(GET)</b></td><td>prologue 写回本卡行 → 栅栏 → <code>mte_get_nbi</code> 取对端行 → fp32 累加 → bf16</td><td class="num">0.055 ms</td></tr>
     </tbody>
   </table>
+
+  <h3>3.1 第 ①④⑦ 步到底在干什么?是 SHMEM 带来的 overhead 吗?</h3>
+  <p>这三步不含"通信/计算本体",最容易被看成纯开销。逐项拆:</p>
+  <table>
+    <thead><tr><th>步骤</th><th>作用</th><th>为什么需要</th><th>是 SHMEM 的 overhead?</th><th>能不能省</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>① pad</b><br>0.035 ms</td>
+        <td>把本步 T 行补到容量 C:补的行 hidden 全零、路由权重为 0、专家指向本卡第一个专家</td>
+        <td>对称内存里的 <code>hidden_buf</code> 是 <b>init 时一次性注册的固定形状</b> [NvS,H](NvS = C·K),
+            planning/dispatch 核都按这个尺寸工作,所以每步必须凑满</td>
+        <td><b>部分是</b>:静态容量是「对称内存 + 预注册缓冲」设计的直接结果;但 MC2 也要 pad 到
+            <code>padded_num_tokens</code>(HCCL 集合通信同样要求各 rank 对齐),所以"pad"本身不是 MoonEP 独有</td>
+        <td>走 real-T 路径:容量按步长池化(已做,把平均补零从 (S_max−T)·K 降到 ~19 token)或让核按真实 T 跑(未做)</td>
+      </tr>
+      <tr>
+        <td><b>① tpe</b><br>0.022 ms</td>
+        <td>用 <code>histc</code> 统计每个专家的 token 数</td>
+        <td>planning 要先生成"全局每专家负载"才能算归属、去重、预取决策,而这份计数目前由 host 侧算好喂进核</td>
+        <td><b>不是</b>:它是「显式 plan 表」方案的输入,而不是对称内存的要求。MC2 没有这步,因为它的负载统计在
+            vendor 算子内部完成</td>
+        <td>能:把直方图挪进 planning 核(核里本来就有 topk 数据)。收益仅 ~0.02 ms/层(≈1%),单独做不划算</td>
+      </tr>
+      <tr>
+        <td><b>④ 边界拷贝 ×2</b><br>0.018 ms</td>
+        <td>dispatch 方向:对称 chunk 里的行/权重 → 调用方自己的张量;combine 方向:本卡 MLP 输出 → 写回对称 chunk</td>
+        <td>对称 <code>hidden_buf</code> 是所有层<b>共用且会被对端写</b>的;直接拿它去算 GEMM 会被下一层/对端覆盖,
+            所以先拷进私有张量</td>
+        <td><b>是</b>:这是「单一共享对称缓冲 + 层间复用」的代价,但属于设计选择而非语义必然</td>
+        <td>能:<code>zero_copy=True</code> 直接吃 shard(尾巴必须清零,我们验证过 mask 方案正确)。但我们实测
+            mask 成本 ≈ 拷贝成本,打平 ⇒ 真正解法是让核只搬真实行(库侧改)</td>
+      </tr>
+      <tr>
+        <td><b>⑦ 加权</b><br>(含在 0.044 ms)</td>
+        <td>把每行的路由权重乘到 MLP 输出上(combine 核只做 K 求和,不加权)</td>
+        <td>Ascend 的 combine 核只在 <code>output_sk</code> 非空时使用 <code>weights_buf</code>,而那是训练反向的
+            <b>权重 gather</b>,不是前向加权 ⇒ 前向加权只能在外层做</td>
+        <td><b>不是</b>:与对称内存无关,是「combine 核不支持前向加权」的能力缺口。MC2 的 combine_v2 内部就带权重
+            (<code>expert_scales</code>)</td>
+        <td>能:库侧让 combine 支持 weights,或把加权融进 GMM2 的 epilogue(融合核本来就该做这件事)</td>
+      </tr>
+      <tr>
+        <td><b>⑦ 尾部清零</b><br>(含在 0.044 ms)</td>
+        <td>用 <code>where(row_ids &lt; sum(group_list))</code> 把行数之后的尾部清零</td>
+        <td>combine 核会读<b>整块</b> [NvS,H](prologue 整块拷进对称 chunk),而 MLP 在
+            <code>sum(group_list)</code> 之后根本没写 ⇒ 不清零就会读到未初始化内存,静默算错</td>
+        <td><b>不是</b>:是 combine 核「按容量搬运而不是按真实行数搬运」的实现细节,不是 SHMEM 语义</td>
+        <td>能:库侧让 prologue 只搬 <code>sum(group_list)</code> 行(它已经拿到 group_list)⇒ mask 可以直接删掉,
+            还顺带省掉尾部搬运带宽</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="verdict">
+    <b>小结</b>:三步合计 ≈0.12 ms/层,其中真正由「对称内存 + 静态容量」强制的只有 pad(0.035)+ 边界拷贝(0.018)≈ 0.053 ms;
+    另外 ≈0.066 ms 来自「显式 plan 表把直方图留在 host」「combine 核不支持加权 / 按容量搬运」——这三条都是<b>库侧可改进项</b>,
+    不需要动 SHMEM 设计本身。其中"核按真实行搬运"与"combine 支持加权"值得作为对 ascend-moonep 的改进建议提出。
+  </p>
 </div>
 
 <h2>4. planning 内部:它有通信吗?产出的表有什么用?</h2>
