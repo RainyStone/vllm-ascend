@@ -425,6 +425,100 @@
   </ul>
 </div>
 
+  <h3>6.1 把 prefetch 移出关键路径:提前预测 + 与 attention 并行</h3>
+  <p>
+    今天 prefetch 之所以"亏",本质是它<b>又晚又在关键路径上</b>:`experts_to_copy` 由本层 planning 产出,
+    而 planning 必须等本层 token 的 gate/topk 算完(门控依赖 attention 的输出)⇒ 预取只能插在
+    dispatch 之后、GEMM 之前,GEMM 要等它完成。破解办法就是给它找一个更早的窗口去跑:
+  </p>
+  <figure>
+    <svg viewBox="0 0 1000 210" role="img" aria-label="prefetch 与 attention 并行示意">
+      <g font-family="inherit" font-size="12">
+        <text x="20" y="24" fill="var(--text-muted)">今天:prefetch 在关键路径上</text>
+        <rect x="20" y="34" width="150" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="34" y="54" fill="var(--text-secondary)">attention L</text>
+        <rect x="176" y="34" width="110" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="190" y="54" fill="var(--text-secondary)">gate+planning</text>
+        <rect x="292" y="34" width="90" height="30" rx="6" fill="var(--series-1)" opacity=".25" stroke="var(--series-1)"/>
+        <text x="302" y="54" fill="var(--text-primary)">prefetch</text>
+        <rect x="388" y="34" width="120" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="402" y="54" fill="var(--text-secondary)">专家 GEMM</text>
+        <path d="M292,72 L292,84" stroke="var(--series-2)" stroke-width="2"/>
+        <text x="300" y="96" fill="var(--series-2)" font-size="11.5">GEMM 必须等预取完成 ← 被计入每层耗时</text>
+
+        <text x="20" y="132" fill="var(--text-muted)">预测版:用上一层输出提前跑 gate,预取躲在 attention 后面</text>
+        <rect x="20" y="142" width="60" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="30" y="162" fill="var(--text-secondary)" font-size="11.5">预测 gate</text>
+        <rect x="86" y="142" width="300" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="100" y="162" fill="var(--text-secondary)">attention L(与预取并行)</text>
+        <rect x="86" y="176" width="300" height="26" rx="6" fill="var(--series-1)" opacity=".25" stroke="var(--series-1)"/>
+        <text x="100" y="194" fill="var(--text-primary)" font-size="11.5">prefetch 远程专家权重(≈9.4MB/专家,被掩盖)</text>
+        <rect x="392" y="142" width="110" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="404" y="162" fill="var(--text-secondary)">gate+planning</text>
+        <rect x="508" y="142" width="120" height="30" rx="6" fill="var(--surface-3)" stroke="var(--border)"/>
+        <text x="522" y="162" fill="var(--text-secondary)">专家 GEMM</text>
+        <text x="640" y="162" fill="var(--text-muted)" font-size="11.5">⇒ 权重已就位,GEMM 不再等待</text>
+      </g>
+    </svg>
+    <figcaption>预测版把「预取窗口」从 planning 之后挪到了 attention 之前,整个 attention 都是可用的重叠窗口。</figcaption>
+  </figure>
+
+  <table>
+    <thead><tr><th>方案</th><th>用什么信号</th><th>窗口</th><th>正确性风险</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>(a) 精确版<br>(不提预测)</b></td>
+        <td>本层真实 plan 的 <code>experts_to_copy</code></td>
+        <td>planning 之后 → GEMM 之前(可与 dispatch / 边界拷贝 / 等对端行重叠 ≈0.05 ms)</td>
+        <td>无</td>
+        <td>只把「预取」与「本层其余通信阶段」并行;窗口窄,但已能把 ~1 个专家的 9.4 MB
+            (≈0.05 ms @200GB/s)藏掉。实现上只是把 prefetch 核挪到 dispatch 核之后异步发起</td>
+      </tr>
+      <tr>
+        <td><b>(b) 预测版<br>(你提的方案)</b></td>
+        <td><b>上一层/本 block 输入的 hidden</b>(残差流 h<sub>L-1</sub>)提前跑本层 gate,
+            得到预测 topk</td>
+        <td><b>整个 attention</b>(decode 下 0.2~0.4 ms 量级,prefill 下更大)</td>
+        <td><b>零正确性风险</b>(见右栏)</td>
+        <td>预测只决定"预取哪些权重";真实路由照常:预测命中 ⇒ 权重已在本地,这些专家可本地算或直接省掉一次等待;
+            预测不中 ⇒ 只是白搬了一批权重,<b>结果不受影响</b>(这也是它敢做预测的前提)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h4>为什么这条路走得通</h4>
+  <ul>
+    <li><b>信号够早</b>:残差结构下 block 输入 h<sub>L−1</sub> 在上一层结束时就已可用(早于本层 attention),
+      而 attention 之后 h' = h<sub>L−1</sub> + attn(…) 与 h<sub>L−1</sub> 高度相关 ⇒ 用它跑 gate 的 topk
+      有相当的重合度(需要实测:相邻层/topk 重合率)。</li>
+    <li><b>机制已经现成</b>:MoonEP 的 slot/prefetch 路径本来就是「plan → <code>prefetch_projections</code> →
+      <code>mte_get_nbi</code> + <code>aclshmem_quiet</code>」,把驱动信号从"精确 plan"换成"预测 plan"即可,
+      不需要新硬件语义。</li>
+    <li><b>解开融合的最大冲突</b>:第 8 节列的冲突之一就是"prefetch 在 GEMM 前插入等待,破坏核内流水"。
+      一旦预取移到 attention 期间完成,融合核里这一步就退化成"检查权重是否已就位",<b>不再产生等待</b>。</li>
+  </ul>
+
+  <h4>限制与代价(必须一起说)</h4>
+  <ul>
+    <li><b>只能提前搬权重,不能提前搬 token 行</b>:行落到对端 shard 的<b>偏移由精确 plan 决定</b>,
+      而"发哪些行"还由发送方的 plan 决定 ⇒ 预测错的偏移会把数据写乱,因此 token 侧<b>无法预测</b>。
+      这条方案解决的是"权重搬运"这一半(prefetch),dispatch 的 token 搬运仍在关键路径上。</li>
+    <li><b>预测准确率决定收益</b>:命中率低时白搬的权重会占掉 RMA 带宽与槽位,反而拖慢真实流量。
+      建议只预取<b>高置信度的少数候选</b>(如 top-1/2 个远程专家)或按门控得分阈值裁剪。</li>
+    <li><b>显存与槽位</b>:预取要占 B 个槽 chunk;预测版可能同时保留"预测进来的"与"真实需要的"权重 ⇒
+      需要槽位淘汰策略(或干脆只允许预测集合与真实集合取交集时复用)。</li>
+    <li><b>实现位置</b>:预测 gate 必须跑在 attention 之前 ⇒ 需要框架在 forward 里提供一个"提前 gate"的钩子
+      (vllm-ascend 已有 <code>prefetch_mlp_gate_up_proj</code> 之类的字段,可作为落点),与 MoonEP 库本身解耦。</li>
+  </ul>
+  <p class="verdict">
+    <b>结论</b>:这是把 prefetch「从亏变赚」的正确方向 —— 预测版零正确性风险(预测只影响预取范围),
+    窗口大(整个 attention),而且顺手消掉融合核里最大的一个等待。它的上限是"把权重搬运完全隐藏",
+    即当前 slot 模式下每次 prefetch 的显存带宽与等待(≈0.05 ms/层/专家)可以不再计入关键路径;
+    代价是预测命中的工程质量与带宽竞争。<b>建议的落地顺序</b>:先做 (a) 精确版(无风险、改动小、验证重叠机制),
+    再评估 (b) 预测版需要的 gate 提前钩子与命中率。
+  </p>
+</div>
+
 <h2>7. 什么是 Megas MoE(融合大算子)</h2>
 <div class="card">
   <p>把 MoE 一层里的多个阶段 —— <b>token 交换(dispatch)、分组 GEMM、激活、加权归约(combine)</b> —— 收进
@@ -471,7 +565,7 @@
         <td>融合后 pad 行使 GEMM 与 combine 都白跑一段(可用 real-T 路径缓解)</td>
         <td class="warn">冲突</td></tr>
       <tr><td>slot prefetch(权重搬运)</td><td>GEMM 前必须等权重 GET 完成</td>
-        <td>会插入一次核内等待;本场景收益为负,融合时可先不做</td>
+        <td>会插入一次核内等待;若按 6.1 的「提前预取」移到 attention 期间完成,该等待即消失;本场景收益为负,融合时可先裁剪</td>
         <td class="warn">冲突(可裁剪)</td></tr>
     </tbody>
   </table>
