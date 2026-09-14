@@ -21,6 +21,9 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
 
 ## 已验证（实测）
 
+> 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。
+> 换机器、换驱动版本或换拓扑都需重新测量；跨测量窗口的绝对吞吐会漂移（本机实测约 ±8%），**对比必须在同一窗口内背靠背做**。
+
 - owner & slot 均在 **vLLM 引擎内端到端跑通**（Qwen3-30B-A3B，TP2/EP2，0/1 两卡，MTE 内核），生成结果与原生 MC2 一致（首 token 相同 / 部分输出逐位相同，|Δlogp| ≤ ~0.1，bf16 噪声）。
 - torchrun 数值 harness（E=128/K=8/H=2048/S=512 真实几何）：owner 0.5–0.8%、slot（重倾斜，槽生效）0.72–0.74% 相对误差。
 - slot 30k prefill（2 卡，MTE）：5.49 s / 5465 tok/s；同配置 MC2：2.71 s / 11085 tok/s（正确性一致；性能差来自 MTE 兼容路径 + 无异步，见“限制”）。
@@ -48,6 +51,9 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
   ```
 
 ### 运行必需的环境变量
+
+> 路径说明：本文出现的 `/vllm-workspace/...`、`/home/tmp/...`、`/home/ascend-moonep` 等是**编写机器**上的取值，
+> 换机器请按实际路径替换（尤其 `ASCEND_CUSTOM_OPP_PATH`、vendored 目录、shim 路径）。
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh
@@ -165,6 +171,16 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
    `[tstats-baseline]`（MC2 融合算子）；MC2 是 host 入队时间（异步），MoonEP 含 kernel/同步，
    两者只能同侧比较。prefill/decode 拆分用 GEN=1 与 GEN=128 两条腿相减。
 
+## 排障：报错 → 根因（每条都曾把人带偏）
+
+| 报错 / 现象 | 根因 |
+|---|---|
+| `aclrtMemSetAccess(va=..., size=...) failed with 507899` | 见过两种：① DP 收窄可见设备后**物理 vs 逻辑 device id 混用**（见限制 #7，库侧已修一半）；② `PYTHONPATH` 里 **vendored 目录不在最前**，实际跑到了外部那份**不带修复的旧库** |
+| `aclshmemx_init_attr_with_buffers failed with -100`，日志带 `Unsupported physical allocation properties ... locationId=...` | 同一个 id 空间问题的 **shmem 侧**：VMM 属性里是物理号、`aclrtGetDevice()` 是逻辑号，比较必然失败（修法与 dlsym 陷阱见限制 #7） |
+| `ImportError ... '_build_info'` / 找不到 `vllm_ascend`、`ascend_moonep` | 仓库没装：三个 editable 包（vllm-ascend、本仓库）与 vendored 库路径没都挂上 |
+| OOM / `Failed to apply for memory`，但 `npu-smi` 看着空闲 | ① 别的容器占着卡（`npu-smi` 看不见，只有 ACL 级 `torch.npu.mem_get_info` 才反映）；② 上一次 `kill -9` 的残留进程仍持卡 |
+| `HcclBroadcast ... port 16666` 等 HCCL 建链异常 | **未定根因**（个别机器只出现过一次、未复现）。遇到时先按 HCCL 错误码定位：`19 = HCCL_E_NETWORK`、`4 = 内部错误 / TLS 配置不一致`（曾见 0-3 卡 tls disabled、4-7 enabled 导致 8 卡建链失败） |
+
 ## 关键配置/环境开关
 
 | 开关 | 作用 |
@@ -224,6 +240,14 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
    `ASCEND_RT_VISIBLE_DEVICES` 收窄成单卡，MoonEP 的 VMM/shmem 初始化在收窄进程里会踩
    CANN 的 device id 语义问题：`aclrtMemSetAccess` 要物理号、`aclrtMallocPhysical` 要逻辑号）。
    库侧已修 `memSetAccess` 一半（见 `ascend_moonep/buffer_c.py: acl_vmm_access_device_id`）；
+   **另一半（shmem 侧）未修**：vendored shmem 的 `validate_user_buffer_property` 拿 VMM 句柄的
+   `location.id`（物理号）与 `aclrtGetDevice()`（逻辑号）比较，收窄进程里必然不等 ⇒
+   `aclshmemx_init_attr_with_buffers` 直接返回 `-100 ACLSHMEM_NOT_SUPPORTED`，日志伴随
+   `Unsupported physical allocation properties ... locationId=...`。
+   若要修：把该比较改成物理号，**取物理号必须用
+   `dlsym(RTLD_DEFAULT, "aclrtGetPhyDevIdByUserDevId")`，不要用
+   `DlAclApi::AclrtGetPhyDevIdByUserDevId`** —— 后者的函数指针在 `DlAclApi::LoadLibrary()`
+   之前是空指针，补丁会**静默失效**；而报错行号会随改动位移，很容易误判成"已生效"。
    实测 dp2ep2 需要保留全量可见 + 给 vllm-ascend 0.23.0 的 worker 补 DP 偏移（测试用
    shim：`/home/tmp/dpshim/sitecustomize.py`，`MOONEP_DP_FULL_VISIBLE=1`）。
 
