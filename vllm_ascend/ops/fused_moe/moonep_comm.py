@@ -550,10 +550,25 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # hidden / zero weight, so they contribute exactly zero to the output.
         buffer, capacity = _select_buffer_for_step(E, K, H, T)
         _t0 = time.perf_counter()
+        real_t = os.environ.get("MOONEP_REAL_T", "0") == "1"
+        if real_t:
+            # c-light: tell the library this step is exactly T tokens instead of
+            # padding up to the pool rung. The shard stays allocated at the rung
+            # (symmetric memory is registered once) but the launcher/planning/
+            # dispatch/combine only touch rows [0, T*K), so there are no pad rows
+            # to compute. Env-gated experimental path; needs bit-exact checks.
+            ctx = buffer._require_ctx()
+            if ctx.get("S") != T:
+                ctx["S"] = T
+                ctx["NvS"] = T * K
+                ctx["N"] = T * K
         pads = _pads_for(E, K, H)
-        hidden_c = pads["hidden"][:capacity]
-        route_c = pads["route"][:capacity]
-        topk_c = pads["topk"][:capacity]
+        # real-T: hand the library exactly T rows (its dispatch asserts
+        # topk.numel() == N == S*K), so the window is T rather than the rung.
+        window = T if real_t else capacity
+        hidden_c = pads["hidden"][:window]
+        route_c = pads["route"][:window]
+        topk_c = pads["topk"][:window]
         if hidden_states.dtype != torch.bfloat16:
             hidden_states = hidden_states.to(torch.bfloat16)
         # Pad rows route to this rank's *own* first expert (rank*epn): routing
@@ -572,8 +587,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 ep_group = get_ep_group()
                 pad_expert = ep_group.rank_in_group * (E // ep_group.world_size)
         tail = pads["tail"]
-        if (tail["T"] != T or tail["capacity"] != capacity
-                or tail["pad_expert"] != pad_expert):
+        if not real_t and (tail["T"] != T or tail["capacity"] != capacity
+                           or tail["pad_expert"] != pad_expert):
             hidden_c[T:].zero_()
             route_c[T:].zero_()
             if pad_expert is not None:
@@ -599,7 +614,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         h_nvs, w_nvs, cu, plan = buffer.dispatch(
             hidden_c, route_c, topk_c, tpe,
             zero_copy=False, inter_rank_sync=True,
-            reuse_outputs=os.environ.get("MOONEP_REUSE_OUT", "1") == "1",
+            reuse_outputs=(not real_t) and os.environ.get("MOONEP_REUSE_OUT", "1") == "1",
         )
         _t2 = time.perf_counter()
 
