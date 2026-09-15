@@ -183,7 +183,12 @@ def _dump_slot_stats():
 # full-capacity buffer every step pads to max_num_batched_tokens and the
 # planning/dispatch/combine kernels plus the grouped GEMM run over the full
 # ``S*K`` row space. A pow2 pool lets decode-sized steps use a fraction of it.
-MOONEP_MIN_DISPATCH_TOKENS = 128
+# Smallest rung of the capacity pool. The vLLM-side dispatch never needs
+# more than the step token count, and decode steps are often tiny (32 tokens
+# for 128 seqs on 4 ranks), so the floor is low by default; every padded row
+# inside the MLP's group_list is real (wasted) GEMM work. Raise it (or set
+# MOONEP_POOL_CAPS) if a rank's receive share can exceed S*K.
+MOONEP_MIN_DISPATCH_TOKENS = int(os.environ.get("MOONEP_MIN_CAP", "64"))
 
 
 def _moonep_pool_capacities(s_max: int) -> list[int]:
