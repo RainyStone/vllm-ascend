@@ -42,6 +42,7 @@ Activated with ``MOONEP_SLOT_MODE=1`` (default off: owner-only mode).
 from __future__ import annotations
 
 import os
+import time
 import threading
 
 import torch
@@ -251,10 +252,17 @@ def run_slot_forward(
         capturing = False  # outside an engine forward context (harness use)
     if capturing:
         raise RuntimeError("MoonEP slot mode cannot run inside captured graphs.")
+    _t_pf = time.perf_counter() if os.environ.get("MOONEP_TIME_STATS", "0") == "1" else None
     buffer.prefetch_projections(
         plan=plan,
         projections=[state.full_w13, state.full_w2],
     )
+    if _t_pf is not None:
+        from vllm_ascend.ops.fused_moe.moonep_comm import _MOONEP_TSTATS
+
+        acc = _MOONEP_TSTATS.setdefault("prefetch", [0.0, 0])
+        acc[0] += time.perf_counter() - _t_pf
+        acc[1] += 1
     swiglu_limit = fused_experts_input.swiglu_limit
     rows, _ = unquant_apply_mlp(
         hidden_states=hidden_trim,
