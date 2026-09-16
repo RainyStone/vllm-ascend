@@ -252,8 +252,10 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 `smoke_qwen_geo.py` / `smoke_slots.py`（数值 harness）、`probe_slots_multi.py`（R3 多热专家探针）。
 
 **MoE 负载采集与峰均比报告**：`moe_par_bench.py`（离线驱动：跑数据集，写每 rank 的负载 dump 与
-`bench.json`）、`analyze_moe_par.py`（离线聚合多份 dump，生成中文自包含 HTML 报告：三种口径的
-PAR、token 与专家在 rank 上的分布、逐层/逐 step 曲线、性能面板）。打点实现在
+`bench.json`）、`analyze_moe_par.py`（离线聚合多份 dump，生成中文自包含 HTML 报告：负载口径说明、
+三种口径的 PAR、token 与专家在 rank 上的分布、逐层/逐 step 曲线、性能面板）。打点实现在
 `vllm_ascend/ops/fused_moe/moe_par_stats.py`（只记录本 rank、零集合通信，开关
-`VLLM_ASCEND_MOE_PAR_STATS`）。用法、产出文件的格式与报告读法见
+`VLLM_ASCEND_MOE_PAR_STATS`）。负载口径：**专家负载按逻辑专家记（副本算同一个专家）、
+rank 负载按实际落到它所持专家上的对数记、pad 不计入**（MoonEP 的容量 pad 由发送侧直方图在产生它的
+rank 上扣掉）。有冗余专家时 PAR 是上界。用法、产出文件的格式与报告读法见
 [docs/moe_par.md](docs/moe_par.md)；自测：`pytest -sv tests/ut/ops/test_moe_par_stats.py`。

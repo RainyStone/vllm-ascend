@@ -42,10 +42,38 @@ Dump format, one file per rank named ``moe_par_{TAG}_rank{RANK}.log``::
 
 The ``# meta`` line carries every dimension the analysis needs, so the script stays
 model-agnostic, and ``# layer`` maps local expert slots back to global expert ids.
-At exit a second header line, ``# meta partial_steps=N``, records how many steps
-closed without every known layer running -- those rows hold real zeros for the
-layers that did not run, so the load in them is understated rather than absent.
-A step still in flight at exit is dropped outright when it is incomplete.
+A second header line, ``# meta partial_steps=N pad_pairs_subtracted=...``, records
+how many steps closed without every known layer running -- those rows hold real
+zeros for the layers that did not run, so the load in them is understated rather
+than absent -- plus the MoonEP pad total, which is not per step. It is written at
+the *end* of the file and rewritten after every flush, so it is already there when
+a run is cut short; the exit hook only gets to add the final, in-flight one.
+
+Relying on that hook alone was a mistake worth recording: ``atexit`` does not run
+in a ``fork``ed worker. ``multiprocessing``'s fork child ends in ``os._exit()`` and
+skips the handlers, so the tail of the dump -- up to ``VLLM_ASCEND_MOE_PAR_FLUSH_EVERY``
+steps, and with them every pad number -- went missing on a run started without
+``VLLM_WORKER_MULTIPROC_METHOD=spawn``. ``scripts/moe_par_bench.py`` therefore
+defaults that variable to ``spawn``; the per-flush rewrite below is the belt to
+that pair of braces. A step still in flight at exit is dropped outright when it is
+incomplete.
+
+Two counting scopes are dumped, named by ``counts_scope`` in the header:
+
+``local`` (every method except MoonEP)
+    the row is index by this rank's local expert slot, as the method reports it.
+
+``global`` (MoonEP)
+    the row is index by *global* (logical) expert id and spans every expert of the
+    model, so summing the ranks of one (step, layer) recovers the run's real
+    routing; the analysis then credits each expert's load to the rank that holds
+    it. MoonEP uses this scope because both of its own numbers are unusable for
+    load accounting: the dispatcher's receive-side counts carry the capacity pads,
+    and the pad rows sit in the same slot as real rows of the same expert, so they
+    cannot be told apart offline (and rows the dispatch drops are missing from them
+    entirely). The sending-side histogram the dispatcher hands over through
+    ``note_route_counts()`` is exact by construction -- one histogram per layer,
+    counted before the plan -- and the pads are subtracted where they were counted.
 """
 
 from __future__ import annotations
@@ -54,6 +82,7 @@ import atexit
 import os
 from typing import Any
 
+import numpy as np
 import torch
 from vllm.logger import logger
 
@@ -85,6 +114,10 @@ _methods: list[str] = []  # comm method name per completed step in the window
 
 _out = None
 _meta_written = False
+# Byte offset at which the trailing summary line starts. The rows are appended
+# before it and the summary is rewritten in place, so the file stays line-oriented
+# and the summary is never stale -- see _rewrite_tail.
+_tail_at: int | None = None
 _warned: set[str] = set()
 
 # Steps closed after running fewer layers than are known to exist. Their missing
@@ -92,10 +125,52 @@ _warned: set[str] = set()
 # count goes into the dump header for the analysis script to warn about.
 _partial_steps = 0
 
+# The routing histogram of the layer whose dispatch just finished, announced by the
+# dispatcher through ``note_route_counts()`` and consumed by the ``record()`` that
+# follows it. It replaces the method's own per-expert counts (the receiving side of
+# the dispatch, which carries MoonEP's capacity pads and misses rows the dispatch
+# dropped) and carries the pad block to remove: (histogram, pad_pairs, pad_expert).
+_route_note: tuple[Any, int, int] | None = None
+_pad_pairs_subtracted = 0
+_pad_notes_used = 0
+_pad_notes_misplaced = 0
+_pad_expert_used: int | None = None
+_negative_cells = 0
+
+# ``global`` for a run whose rows are index by global expert id, ``local`` for one
+# index by local slot. A run that used both is recorded as ``mixed``: the analysis
+# would be reading one of the two widths wrong, so it must not guess.
+_scopes: set[str] = set()
+
 
 def enabled() -> bool:
     """Master switch. Callers short-circuit on this so the disabled path is one call."""
     return _ENABLED
+
+
+def note_route_counts(histogram: torch.Tensor, pad_pairs: int, pad_index: int) -> None:
+    """Announce the routing histogram of the layer currently being dispatched.
+
+    ``histogram`` counts this step-layer's (token, expert) pairs by *global*
+    (logical) expert id -- MoonEP's routing space -- with the capacity pads
+    included, and ``pad_pairs`` of those sit in ``pad_index`` and are not real
+    traffic. The recording side subtracts them, so what lands in the dump is the
+    layer's real routing per logical expert: the quantity that stays meaningful
+    when an expert is replicated (MoonEP's prefetch slots, EPLB redundancy) and
+    that sums across ranks into the run's global routing.
+
+    Called on every MoonEP dispatch, so it overwrites rather than accumulates: a
+    dispatch with no padding clears the pad count instead of leaving a stale one
+    behind. The dispatcher and the ``record()`` that consumes this run inside the
+    same layer's forward, in that order.
+    """
+    global _route_note
+    if not _ENABLED:
+        return
+    if histogram is None or histogram.numel() == 0:
+        _route_note = None
+        return
+    _route_note = (histogram, max(0, int(pad_pairs)), int(pad_index))
 
 
 def _in_profile_run() -> bool:
@@ -132,15 +207,70 @@ def _to_counts(expert_tokens: torch.Tensor, group_list_type: int) -> torch.Tenso
     return torch.cat([flat[:1], flat[1:] - flat[:-1]])
 
 
+def _take_route_note() -> tuple[Any, int, int] | None:
+    """Consume the pending routing note, so a note is never applied twice."""
+    global _route_note
+    note, _route_note = _route_note, None
+    return note
+
+
+def _counts_from_route_note(note: tuple[Any, int, int] | None) -> torch.Tensor | None:
+    """The note's histogram with this rank's pad block removed, or None.
+
+    The histogram is this rank's exact sending side, so the pads come off where
+    they were counted and the subtraction can never leave a negative amount of real
+    traffic -- unlike a subtraction against the receiving side, whose pad rows
+    share a slot with real rows of the same expert. One device-side subtraction per
+    layer: no host sync, no collective.
+    """
+    global _pad_pairs_subtracted, _pad_notes_used, _pad_notes_misplaced, _pad_expert_used
+    if note is None:
+        return None
+    histogram, pairs, index = note
+    # ``copy=True`` is load-bearing, not defensive: the dispatcher's histogram is
+    # already int32, and ``to()`` returns the *same* tensor when the dtype matches,
+    # so the subtraction below would otherwise land on the engine's ``tpe``. The
+    # plan does not read it back, but the recorder must not be the thing that finds
+    # out whether that stays true.
+    counts = histogram.reshape(-1).to(torch.int32, copy=True)
+    _pad_notes_used += 1
+    _scopes.add("global")
+    if pairs:
+        if 0 <= index < counts.numel():
+            counts[index] -= pairs
+            _pad_pairs_subtracted += pairs
+            _pad_expert_used = index
+        else:
+            # The dispatcher names the pad expert in the histogram's own space, so
+            # this means the two disagreed about the model's expert count.
+            _pad_notes_misplaced += 1
+    return counts
+
+
 def record(layer: Any, expert_tokens: torch.Tensor | None, group_list_type: int, method_name: str) -> None:
-    """Record this layer's per-local-expert route counts for the step in flight."""
-    if not _ENABLED or expert_tokens is None:
+    """Record this layer's real routing for the step in flight.
+
+    MoonEP announces its sending-side histogram through ``note_route_counts()``;
+    that histogram wins over ``expert_tokens`` because it is the *sending* side of
+    the dispatch, exact by construction. Every other method reports its own real
+    counts here, index by local expert slot.
+    """
+    if not _ENABLED:
+        return
+    # Consumed even on the early returns below: a note must not outlive the layer
+    # that produced it and be applied to an unrelated one.
+    note = _take_route_note()
+    if expert_tokens is None and note is None:
         return
     try:
         if _in_profile_run():
             # Profile and dummy forwards at startup would otherwise pollute the dump.
             return
-        _record(layer, _to_counts(expert_tokens, group_list_type), method_name)
+        counts = _counts_from_route_note(note)
+        if counts is None:
+            counts = _to_counts(expert_tokens, group_list_type)
+            _scopes.add("local")
+        _record(layer, counts, method_name)
     except Exception:
         if "record" not in _warned:
             _warned.add("record")
@@ -201,16 +331,86 @@ def _record(layer: Any, counts: torch.Tensor, method_name: str) -> None:
     _buf[_slot, layer_ord, :] = counts.to(torch.int32)
 
 
+def _clamp_negatives(host: np.ndarray) -> np.ndarray:
+    """Keep impossible counts out of the dump, and count them.
+
+    A (token, expert) pair count cannot be negative. MoonEP's pad subtraction is
+    exact by construction -- the dispatcher subtracts the block it wrote itself,
+    in the histogram's own space -- and every other method reports counts straight
+    from the kernel, so a negative cell means two sides disagreed about a layer.
+    Clamping keeps the dump readable; the tally in the exit header keeps the
+    disagreement visible.
+    """
+    global _negative_cells
+    bad = int(np.count_nonzero(host < 0))
+    if bad:
+        _negative_cells += bad
+        np.clip(host, 0, None, out=host)
+    return host
+
+
+def _summary_line() -> str:
+    """The trailing ``# meta`` line: what is known only once the run has run."""
+    pad = f" pad_pairs_subtracted={_pad_pairs_subtracted}"
+    if _pad_expert_used is not None:
+        pad += f" pad_expert_global={_pad_expert_used}"
+    if _pad_notes_misplaced:
+        pad += f" pad_notes_misplaced={_pad_notes_misplaced}"
+    if _negative_cells:
+        pad += f" negative_cells_clamped={_negative_cells}"
+    return f"# meta partial_steps={_partial_steps}{pad}\n"
+
+
+def _rewrite_tail(out) -> None:
+    """Write the summary line at the end of the dump, replacing the previous one.
+
+    The counters it carries (incomplete steps, subtracted pads) only reach their
+    final value at the end of the run, but the process may never get an exit hook:
+    a ``fork``ed worker leaves through ``os._exit()``, which skips ``atexit``. So
+    the line is refreshed after every flush and the exit path only has to refresh
+    it once more. Rewriting needs a truncate because the line's width grows with
+    its numbers.
+
+    The line must be the last thing in the file when this is called -- the rows of
+    a flush are appended only after :func:`_rewind_tail` has dropped it, and the
+    exit path adds no rows of its own.
+    """
+    global _tail_at
+    if _tail_at is None:
+        # Nothing was written after the rows, so the summary starts here.
+        _tail_at = out.tell()
+    else:
+        out.seek(_tail_at)
+        out.truncate(_tail_at)
+    out.write(_summary_line())
+    out.flush()
+
+
+def _rewind_tail(out) -> None:
+    """Drop the summary line, leaving the file ended by its rows.
+
+    Drops the offset with it: a stale offset would truncate a *new* file, or rows
+    appended since, at a position that has nothing to do with them.
+    """
+    global _tail_at
+    if _tail_at is not None:
+        out.flush()
+        out.seek(_tail_at)
+        out.truncate(_tail_at)
+        _tail_at = None
+
+
 def _flush() -> None:
     """Copy the completed steps to host and append them to this rank's dump."""
     global _slot, _step_base, _meta_written
     if _slot == 0 or _buf is None:
         return
-    host = _buf[:_slot].cpu().numpy()
+    host = _clamp_negatives(_buf[:_slot].cpu().numpy())
     out = _open()
     if not _meta_written:
         _write_meta(out)
         _meta_written = True
+    _rewind_tail(out)
     for i in range(_slot):
         method = _methods[i] if i < len(_methods) else "?"
         step = _step_base + i
@@ -221,15 +421,18 @@ def _flush() -> None:
     _step_base += _slot
     _slot = 0
     _methods.clear()
+    _rewrite_tail(out)
 
 
 def _open():
-    global _out
+    global _out, _tail_at
     if _out is not None:
         return _out
     os.makedirs(_DIR, exist_ok=True)
     path = os.path.join(_DIR, f"moe_par_{_TAG}_rank{_rank_id()}.log")
     _out = open(path, "w")
+    # The file starts empty, so any offset from a previous one is meaningless.
+    _tail_at = None
     logger.info("[moe-par] writing per-rank MoE load dump to %s", path)
     return _out
 
@@ -294,6 +497,13 @@ def _world_size() -> int:
     return -1
 
 
+def _scope_name() -> str:
+    """What this dump's rows are index by: ``global``, ``local`` or ``mixed``."""
+    if len(_scopes) == 1:
+        return next(iter(_scopes))
+    return "mixed" if _scopes else "local"
+
+
 def _write_meta(out) -> None:
     """Emit the self-describing header so the analysis script assumes no dimensions."""
     probe = next(iter(_layers.values()), None)
@@ -309,6 +519,10 @@ def _write_meta(out) -> None:
         "ep_size": _attr(probe, "ep_size", -1),
         "moe_layers": len(_valid),
         "topk": topk,
+        # How many steps one host copy covers. The analysis uses it to size the
+        # shortfall a dump can carry when the process had no exit hook.
+        "flush_every": _FLUSH_EVERY,
+        "counts_scope": _scope_name(),
         "global_experts": _attr(probe, "global_num_experts", -1),
         "local_experts": _attr(probe, "local_num_experts", -1),
         "redundant_experts": _attr(probe, "global_redundant_expert_num", 0),
@@ -335,11 +549,25 @@ def _shutdown() -> None:
         _flush()
         if _out is not None:
             if _meta_written:
-                # A second header line, read by the analysis script: anything already
-                # written above stays valid, this only adds the partial-step tally.
-                _out.write(f"# meta partial_steps={_partial_steps}\n")
-                _out.flush()
+                # One last refresh: this hook does not run in a forked worker, which is
+                # why _flush leaves the line behind as well.
+                _rewrite_tail(_out)
             _out.close()
+        if _pad_notes_misplaced:
+            logger.warning(
+                "[moe-par] %d MoonEP routing note(s) named a pad expert outside the histogram's "
+                "%d experts; those pads were left in the dump. The dispatcher and the recorder "
+                "disagree about the model's expert count.",
+                _pad_notes_misplaced,
+                _buf.shape[2] if _buf is not None else -1,
+            )
+        if _negative_cells:
+            logger.warning(
+                "[moe-par] %d row cell(s) came out negative and were clamped to zero. A (token, "
+                "expert) pair count cannot be negative, so the dispatcher and this recorder "
+                "disagreed about those layers; the dump is readable but those rows are suspect.",
+                _negative_cells,
+            )
         if _partial_steps:
             logger.warning(
                 "[moe-par] %d step(s) ran fewer than the %d known MoE layers and were recorded "

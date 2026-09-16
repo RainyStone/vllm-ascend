@@ -11,17 +11,19 @@
 
 | 问题 | 报告位置 |
 |---|---|
+| **负载口径是什么**——每个量数的是什么、数据从哪来、不含什么 | 报告最上的「口径与统计 · 先读这里」面板 |
 | **峰均比（PAR）** 有多大——最忙的 rank 比平均忙多少 | KPI 卡片、PAR 折线、箱线对比 |
-| **token 在专家上的分布**——哪些专家是热点 | 层 × 专家热力图、专家负载剖面、单步专家剖面 |
+| **token 在专家上的分布**——哪些专家是热点 | 层 × 逻辑专家热力图、专家负载剖面、单步专家剖面 |
 | **token 在 rank 上的分布**——哪张卡扛得多 | 每 rank 负载柱状图、各 rank 负载随步折线 |
-| **专家在 rank 上的分布**——哪个专家住在哪张卡 | rank × 专家热力图、专家放置矩阵 |
+| **专家在 rank 上的分布**——哪个专家住在哪张卡 | rank × 逻辑专家热力图、专家放置矩阵 |
 
 三条硬约束（这是整个设计的前提）：
 
 1. **只打点本 rank 的负载**，不做任何额外的集合通信。PAR 本身是跨 rank 的量，但跨 rank 的聚合放在
    **离线脚本**里做：每个 rank 只写自己的那一份，分析脚本再把它们拼起来。热路径上只有
-   「每 (步, 层) 一次设备内拷贝 + 每 N 步一次 `.cpu()`」。
-2. **不依赖 EPLB**。打点复用的是 EPLB 也用的那份「每本地专家的 token-专家对数」，但开关独立，
+   「每 (步, 层) 一次设备内拷贝 + 每 N 步一次 `.cpu()`」。MoonEP 走的发送侧直方图同样如此：
+   它是设备侧**已有**的一张向量，交给打点器不新增任何通信。
+2. **不依赖 EPLB**。打点复用的就是 EPLB 也用的那份「每专家的 token-专家对数」，但开关独立，
    `dynamic_eplb` 保持关闭也能跑。
 3. **模型可更换**。层数、专家数、topk、rank 数一律从 dump 的元数据里读，脚本不硬编码任何维度。
 
@@ -48,6 +50,7 @@
 | `vllm_ascend/envs.py` | 修改（+4 个变量） | 集中定义 `VLLM_ASCEND_MOE_PAR_*` 开关（AGENTS.md 要求所有环境变量定义在此） |
 | `vllm_ascend/ops/fused_moe/fused_moe_0_23_0.py` | 修改（+调用点） | vllm 0.23.0 实际生效的 `AscendFusedMoE`，在 EPLB 计数点旁挂上打点 |
 | `vllm_ascend/ops/fused_moe/fused_moe.py` | 修改（+调用点） | 其它 vllm 版本的兼容分支，同样挂上打点 |
+| `vllm_ascend/ops/fused_moe/moonep_comm.py` | 修改（+调用点） | MoonEP 调度器把 plan 之前的发送侧直方图 `tpe` 连同 pad 对数/落点交给打点（`note_route_counts`），引擎行为不变 |
 | `scripts/moe_par_bench.py` | **新增** | 驱动：跑数据集 → 写 dump + `bench.json`（含逐请求 TTFT/TPOT 与吞吐） |
 | `scripts/analyze_moe_par.py` | **新增** | 分析器：多份 dump → 三种 PAR + 中文自包含 HTML 报告 |
 | `tests/ut/ops/test_moe_par_stats.py` | **新增** | CPU 可跑的 UT，同时覆盖打点写入与解析读出两侧 |
@@ -68,6 +71,10 @@ if moe_par_stats.enabled():
 五种通信实现（`AllGatherCommImpl` / `MC2CommImpl` / `All2AllCommImpl` / `FusedMC2CommImpl` /
 `MoonEPCommImpl`）都通过同一个字段报数，所以**一套打点覆盖所有通信方式**，换通信方式不用改代码。
 报告里会显示该步实际用的是哪一种（`method=` 列）。
+
+唯一的例外是 MoonEP：它上报的 `expert_tokens` 是**接收侧**的量（含 pad、且可能被配额搬动、
+还可能被静默丢行），不能当作路由账。所以它在 dispatch 之前把**发送侧**直方图也交给打点器，
+打点器优先用后者（`counts_scope=global`）。见 §6「MoonEP 的容量 pad」。
 
 ---
 
@@ -189,6 +196,10 @@ python scripts/moe_par_bench.py --help
 - `MOONEP_SLOT_MODE`、`MOONEP_DISABLE_UDMA` 这类环境开关**不参与 tag 生成**：两次都开 `--moonep`
   但 slot 模式不同的运行，tag 会一样，默认会落到同一个 dump 目录里互相覆盖。要分开就显式 `--tag`
   或 `--dump-dir`。
+- `scripts/moe_par_bench.py` 会把 `VLLM_WORKER_MULTIPROC_METHOD` 默认设成 `spawn`（`setdefault`，
+  调用方环境里写死的值优先）。原因见 §6「收尾与边界情况」：fork 出来的 worker 走 `os._exit()`，
+  不执行 `atexit`，dump 的收尾汇总行和最后不足 `--flush-every` 步的数据都会丢。若环境里是别的值，
+  脚本会在 stderr 打一条警告并说明后果。
 
 ---
 
@@ -216,7 +227,13 @@ python scripts/moe_par_bench.py --help
 - **步边界**：同一步内每层只跑一次，因此「某一层再次出现」即意味着上一步已结束。
 - **开销**：每 (步, 层) 一次设备内拷贝进环形缓冲；每 `FLUSH_EVERY` 步一次 `.cpu()` 落盘；
   退出时 `atexit` 兜底刷一次。**全程无集合通信**。
+  注意 `atexit` 在 fork 出来的 worker 里**不会执行**（`os._exit` 绕过钩子），所以收尾行改为「每次落盘
+  都重写」，不依赖退出钩子——见 §6「收尾与边界情况」。
 - 不同层的 `local_num_experts` 不一致时，会告警一次并跳过该层（不写进 dump）。
+- **MoonEP 走另一条数据来源**：`moonep_comm.py` 在 plan 之前把发送侧直方图
+  `tpe = torch.histc(topk_c, bins=全局专家数)` 交给 `moe_par_stats.note_route_counts(...)`，
+  由它替代方法返回的接收侧 `expert_tokens`，并按全局专家 id 扣掉 pad。这一路径同样**不上通信**：
+  `tpe` 是设备侧已有的一张向量，交接只是把已有张量的引用传过去（记录时才 `.cpu()`）。
 
 ---
 
@@ -228,7 +245,8 @@ python scripts/moe_par_bench.py --help
 
 ```
 # meta model=... tag=tp2-ep-b16-bt512-o256 rank=0 world_size=2 ep_rank=0 ep_size=2 \
-  moe_layers=48 topk=8 global_experts=128 local_experts=64 redundant_experts=0
+  moe_layers=48 topk=8 counts_scope=global global_experts=128 local_experts=64 redundant_experts=0 \
+  flush_every=16
 ```
 
 | 字段 | 含义 |
@@ -239,9 +257,11 @@ python scripts/moe_par_bench.py --help
 | `ep_rank` / `ep_size` | 本 rank 在 EP 组内的序号与 EP 组大小 |
 | `moe_layers` | MoE 层数（本模型 48） |
 | `topk` | 每个 token 每层选几个专家（本模型 8） |
-| `global_experts` | 全局专家数（本模型 128） |
-| `local_experts` | **本 rank 上**的专家数 = `global_experts ÷ ep_size`（本模型 64） |
+| `counts_scope` | **数列的口径**：`global` = 发送侧、按逻辑专家 id、宽 = `global_experts`；`local` = 接收侧、按本地槽位、宽 = `local_experts`。分析器据此分流 |
+| `global_experts` | 全局（= 逻辑）专家数（本模型 128） |
+| `local_experts` | **本 rank 上**的专家槽位数 = `global_experts ÷ ep_size`（本模型 64） |
 | `redundant_experts` | 冗余专家数；本工程不开 EPLB，恒为 0 |
+| `flush_every` | 本次运行的 `VLLM_ASCEND_MOE_PAR_FLUSH_EVERY`（默认 16）。分析器用它算出「进程没跑到退出钩子时，这份 dump 最多可能缺多少步」，见下文 |
 
 分析脚本只用这一行就能确定所有维度，因此换模型不用改脚本。
 
@@ -254,8 +274,10 @@ python scripts/moe_par_bench.py --help
 - `layer_ord`：本 dump 内的层序号（0 起，按首次出现顺序）。
 - `instance_id`：层对象的 `moe_instance_id`（构造顺序的全局唯一计数）。
 - `log2phy`：EPLB 的逻辑→物理专家映射；不开 EPLB 时为 `None`。
-- `expert_map`：长度 = `global_experts` 的数组，`expert_map[本地槽位] = 全局专家 id`，`-1` 表示该槽位
-  在本 rank 上不存在。**「token 在专家上的分布」和「专家在 rank 上的分布」就是靠它把本 rank 的槽位归到全局专家的。**
+- `expert_map`：长度 = `global_experts` 的数组，`expert_map[逻辑专家 id] = 本 rank 上的槽位号`，`-1` 表示该专家
+  不在本 rank 上。两个方向都用得上：`local` 口径靠它把槽位上的计数还原成逻辑专家号；
+  `global` 口径靠它反过来回答「谁持有这个逻辑专家」，把全局路由归属到各 rank。
+  **「token 在专家上的分布」和「专家在 rank 上的分布」都靠它。**
 
 ### 数据行：一个 (步, 层) 一行
 
@@ -268,7 +290,7 @@ step=0 layer=0 method=MC2CommImpl counts=[12,0,45,...]
 | `step` | 服务过程中的第几步（0 起，连续编号；一步 = 引擎的一次 forward） |
 | `layer` | 层序号，对应 `# layer` 里的 `layer_ord` |
 | `method` | 本步实际使用的通信实现类名（见下表） |
-| `counts` | 长度 = `local_experts` 的整数数组：**本 rank 各本地专家收到的 token-专家对数** |
+| `counts` | 整数数组，含义由头部的 `counts_scope` 决定（见上表）：`global` = 本 rank 在 dispatch **之前**按逻辑专家 id 数出的路由直方图，长度 = `global_experts`；`local` = 本 rank 各本地槽位收到的 token-专家对数，长度 = `local_experts` |
 
 `method` 的取值与报告里的显示名：
 
@@ -284,11 +306,112 @@ step=0 layer=0 method=MC2CommImpl counts=[12,0,45,...]
 同一步内所有层共用一个方式。只要开了 `--moonep` 就认为「这次跑的是 MoonEP」是不对的，
 要看 dump 里的 `method=` 或报告里的「通信方式」列。
 
-### 两个统计口径
+### 负载口径：数的是什么
 
-- `counts` 记的是**真实路由对数**，与 EPLB 累加的 `moe_load` 同口径，**不含 pad**。
-- 恒等式：`Σ(所有 rank, 所有步, 所有层) counts` = `Σ步 token 数 × topk × moe_layers`。
+**先把口径定死**，后面所有数字都按它读（报告最上方的「口径与统计」面板会把这三条再讲一遍）：
+
+| 量 | 定义 | 不含 |
+|---|---|---|
+| **专家负载** | **逻辑专家**收到的 token-专家对数。一个 token 在每个 MoE 层被路由 `topk` 次，一对 = 一次专家计算；**副本算同一个专家** | pad 行 |
+| **rank 负载** | **实际落到该 rank 所持专家上**的对数——token 来自所有 rank，落到谁的专家就记谁。**不是「这个 rank 发出了多少」** | pad 行 |
+| **pad 对数** | MoonEP 为对齐池化容量注入的零行 `(capacity − T) × topk`，由打点侧在产生它的 rank 上扣除 | —— |
+
+为什么 rank 负载不能按「本 rank 发出的 token」算：EP 下每个 rank 只持有本步的一部分 token
+（`Σ_r T_r` = 该步 token 数），但 token 会被投递到**别的** rank 的专家上。实测只记「本地口径的
+发送侧切片」会少算约一半、与 bench 对账差 ~2×。
+
+由此得到的恒等式（`global` 口径）：
+
+- `Σ(所有 rank, 所有步, 所有层) counts` = `Σ步 token 数 × topk × moe_layers`，**不含 pad**。
   本模型 `topk × moe_layers = 8 × 48 = 384`。
+- 逐层对数 = 该步 token 数 × `topk`，**与层无关**——这是「层间平坦」自查的依据。
+- `Σ_r rank负载[r,t,l]` 也与层无关；各 rank 之和 = 全部真实路由（每个对恰好归属一个持有者）。
+
+### MoonEP 的容量 pad：为什么 moonep 运行的 counts 会虚高，以及怎么扣干净
+
+这是本工具踩过的最大一个坑，**用 moonep 采集时必须知道**。
+
+MoonEP（`MoonEPCommImpl`，即 `enable_moonep` 且本步 token 数在 SHMEM 容量内）的调度器
+（`moonep_comm.py` 的 `TokenDispatcherWithMoonEP`）**每步先把 MoE 的输入 pad 到池化容量**再通信：
+
+1. 容量取 `MOONEP_MIN_DISPATCH_TOKENS = 128` 起的 2 的幂阶梯（`MOONEP_POOL=1`，默认开），
+   所以 `capacity ≥ 本 rank 本步的 token 数 T`；
+2. pad 出来的行 `hidden` 置零、`topk` 全部写成**本 rank 的第一个本地专家**
+   `pad_expert = rank × local_experts`（`MOONEP_PAD_EXPERT0=1` 时改写成全局 0 号专家）；
+3. pad 行数 = `(capacity − T) × topk`。
+
+**`expert_tokens` / `group_list` 这个量本身就含 pad**——EPLB 累加 `moe_load` 拿到的也是同一个量。
+后果（在没有扣除的 dump 里）：
+
+| 现象 | 原因 |
+|---|---|
+| 每格 (步, rank, 层) 的 `counts` 之和 ≈ `capacity × topk`（本模型 128×8 = 1024），而不是 `T × topk` | pad 把每步的输入撑到容量 |
+| 第一个本地专家那一格常年几百上千，48 层无一例外 | pad 全部落在它头上；**专家分布图上那根突出的柱子是 pad，不是热点** |
+| 「与 bench.json 对账」差出几十倍（实测 878,101 vs 64,877） | 对账用的是 `Σ counts ÷ (topk × 层数)`，pad 计入后推出的是 `Σ capacity` 而不是真实 token 数 |
+| 「逐层自查」仍有几个百分点的层间偏差 | pad 与层无关、各 rank 也一样多，各层之和只剩真实路由的差别；**偏差小不代表数据干净** |
+
+#### 扣在哪里：必须在**发送侧**、按**逻辑专家**扣
+
+**在接收侧扣是错的路子，已被实测证伪。** 之前试过「本 rank 在本地 0 号槽扣掉
+`(capacity − T) × topk`」，结果 45% 的格子算出负数、总量差 −64,634 对、逐层 join 偏差中位
++80~93%。原因有三，缺一不可：
+
+1. `cu` 差分的 `local_counts` 是**接收侧**的量，pad 行和真实行混在一起，本地分不出谁是谁；
+2. 那份计数已经被 plan 按配额搬过（每 rank 的总量被压成 `capacity × topk`），
+   本地槽位上的数与「这个 rank 本步发出/收到多少 pad」没有固定的换算关系；
+3. 接收侧还存在**静默丢行**：派发 kernel 在目标 chunk 越界时会丢掉该行
+   （`moonep_dispatch.cpp` 的 `if (dst_loff >= NvS) continue;`），且没有任何丢行计数
+   （本 build 不写 `plan.remote_stats`）。丢多少离线不可知、也不可还原。
+
+**现在扣在发送侧。** `moonep_comm.py` 里、plan 生成**之前**的那份直方图
+
+```python
+E, K = self.num_experts, self.top_k      # E = 全局（= 逻辑）专家数
+tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计，精确
+```
+
+是**每个 rank 自己发出的真实路由**，它满足 `Σ tpe = T × topk + (capacity − T) × topk`，
+且 pad 全部落在它自己那个 `pad_expert`（全局 id）上。于是：
+
+- 调度器把这张直方图交给打点模块：`note_route_counts(tpe, pad_pairs=(capacity − T) * topk, pad_index=pad_expert)`；
+- 打点模块用它**替代**方法返回的 `expert_tokens`（那是接收侧、含 pad），并在**全局专家空间**里
+  `counts[pad_index] -= pad_pairs`（复制后再减，不改原张量）；实测不会出现负数；
+- 于是每一行数列的含义变成「本 rank 在这一层 dispatch 之前、按逻辑专家 id 数出来的路由」，
+  宽度 = **全部逻辑专家**（本模型 128，是原先本地口径 64 的两倍）。
+
+**引擎侧语义完全不变**：`tpe` 本来就是 plan **不消费**的量（Ascend 路径上 plan 自己从 `topk_idx`
+重建直方图，见 `kernels/planning.cpp`；`ops.py` 也注明 "validated but not consumed"），
+交给打点器不影响任何计算；pad 照旧写、plan 照旧算、EPLB 看到的负载照旧含 pad——只有 dump 变干净。
+这条路径**没有集合通信、没有跨 rank 同步**，网格不变。
+
+#### 分析器怎么用它
+
+各 rank 的发送侧直方图按 `(step, layer)` 相加 = 这一步的**真实全局路由** `c[t,l,e]`，然后：
+
+- 专家负载 = `c` 按逻辑专家求和（副本算同一个专家）；
+- rank 负载 = 把 `c` 按 `expert_map` 归属到「谁持有这个逻辑专家」（`einsum("tle,le->tl", c, mask_r)`）。
+
+每份 dump 的头部会写明数列口径：`counts_scope=global`（发送侧，MoonEP 新 dump）或
+`counts_scope=local`（接收侧，其它 method 与旧 dump）。分析器按这个字段分流，
+旧 dump 仍按本地槽位解读、并用下面的指纹识别告警。
+
+收尾行会带上扣除记录：`# meta partial_steps=0 pad_pairs_subtracted=NNN pad_expert_global=I`
+（每个 rank 只记自己扣掉的那部分；报告 T6 表按 rank 列出，并在报告最上方的「口径与统计」面板里
+给出总量与占比）。
+
+两条边界：
+
+1. **`MOONEP_PAD_EXPERT0=1` 时**pad 全部发给全局 0 号专家，只有 rank 0 收得到；其它 rank 的直方图里
+   没有这一桶，扣除会落到不存在的格子上，打点侧记 `pad_notes_misplaced` 并在报告里告警。
+   要精确计数就用默认的 pad 落点（别设这个变量）。
+2. **冗余专家/预取槽**：真有副本时，副本各自处理多少只在接收侧可见。报告把负载记在一个持有者头上、
+   不去猜分摊，因此此时的 **PAR 是上界**（真实分摊只会让各 rank 更平）。报告会在「口径与统计」面板
+   和每处 PAR 结论标注这一点。
+
+分析器还会对**没有扣除记录的旧 dump**做指纹识别：全部 step 都走 MoonEP、没有任何
+`pad_pairs_subtracted`、且「每行最忙的本地专家占比中位数 > 0.5」同时成立时，报告会明确写出
+「成因是 MoonEP 的容量 pad，不是各 rank 的步没对齐」，并提示用带修正的打点重跑。
+这样的旧 dump 里 pad 占了绝对负载的 90% 上下，真实信号只剩几个百分点，**离线无法挽救**。
 
 ### 收尾与边界情况
 
@@ -296,8 +419,30 @@ step=0 layer=0 method=MC2CommImpl counts=[12,0,45,...]
 - 若某一步确实比已知层数跑得少（例如变长执行路径），该步会以「缺失层 = 0」写入，并在文件末尾补一行
   `# meta partial_steps=N`，说明有 N 步属于这种情况——这些步的负载是**被低估**的。
   分析脚本读到这一行会在报告里给出提示。
+- 同一条收尾行里还会带上 MoonEP 的 pad 扣除记录（`pad_pairs_subtracted` / `pad_expert_global`，
+  必要时还有 `pad_notes_misplaced` / `negative_cells_clamped`），见上一小节。
 - 旧 dump 里若出现 `model=unknown`，说明是「从 layer 读模型名」这个修复之前的产物，**不影响分析**
   （报告不使用该字段）。
+
+#### 收尾行是「每批落盘都重写」的，不是退出时才写的
+
+这一步是为了让 dump 在**进程没有走退出钩子**时也是完整的：`flush_every` 步落一次盘，每次落盘前后
+把文件末尾那行汇总**先删掉、写完数据行、再以最新累计值补回**（`out.seek/_truncate` 到上一行的偏移，
+文本模式下 `tell()` 返回的就是字节偏移，已实测）。所以任何时刻去看 dump，最后一行都是当前的最新账；
+退出钩子只额外补上「还在飞行中的那批」。
+
+**为什么非要这样：`atexit` 在 fork 出来的 worker 里不会执行。** `multiprocessing` 的 fork 子进程
+结束时走 `os._exit()`，绕过所有 atexit 钩子（spawn 子进程会正常执行，已用最小样例实测对照）。
+后果是 dump 会缺两样东西：末行汇总，以及**最后不足 `flush_every` 步的整批数据**——因为那批还没落盘。
+本工程的环境脚本（`init_env.sh` / `start_prefill.sh`）本来就把
+`VLLM_WORKER_MULTIPROC_METHOD=spawn` 写在环境里，`scripts/moe_par_bench.py` 也**默认替调用方设成
+`spawn`**（用 `setdefault`，环境里显式的选择优先）；如果环境里是别的值，脚本会在 stderr 打一条警告，
+说明这份 dump 会缺最后不足 `flush_every` 步、对账自查会报出来。
+
+分析器对一个没有收尾行的 dump 不会把「扣了多少 pad」「有几步不完整」当成 0，而是明确写
+**「不可知」**：T2 的 ③⑤ 两格、以及 T6 表在整个运行上的判定都会变成「不可知（dump 里没有退出汇总行）」，
+`pad` 总数也不显示。对账那一格则给出解释：dump 结束在一个 flush 边界上，缺失的是「未落盘的整批」，
+需要 spawn（或 `--flush-every 1`）重跑。
 
 ---
 
@@ -317,14 +462,26 @@ python scripts/analyze_moe_par.py --run <名字>=<目录> [--run <名字>=<目�
 运行时往 stderr 打一行摘要 + 每条告警，退出码 0（下图是示例，跑完 `--tag mc2` 那一条即可看到自己的版本）：
 
 ```
-[moe-par] mc2: 2 ranks x 1800 steps x 48 layers | PAR per-layer mean 1.140 max 1.282
+[moe-par] mc2: 2 ranks x 1800 steps x 48 layers | counts local (local slots)
+          | PAR per-layer mean 1.140 max 1.282
           | PAR per-step (whole step) mean 1.026 | PAR whole run 1.007
           | cross-rank join flat (spread 0.00e+00)
 [moe-par] wrote moe_par_report.html (2914 KiB)
 ```
 
+- `counts global (logical experts)` / `counts local (local slots)`：这份 dump 的数列口径，
+  取自头部 `counts_scope`。前者是 MoonEP 的发送侧直方图（按逻辑专家 id），后者是各 method
+  上报的接收侧本地计数。
 - `cross-rank join flat / NOT FLAT`：检查每个 (步, 层) 在各 rank 上是否**收齐**了（`flat` = 收齐；
   `NOT FLAT` 说明有 rank 的 dump 缺行，通常是采集没跑完或层宽不一致被跳过）。
+- 结尾的 `| MoonEP pads subtracted N (global ids)` 表示这份 moonep dump 已扣掉 N 个容量 pad
+  （位置是全局/逻辑专家 id）；若显示 `| MoonEP PADS PRESENT (top expert 94% of every row, not subtracted)`，
+  说明这是**修正前**的 dump，报告各项绝对值不可用（见 §6「MoonEP 的容量 pad」）。
+- 若 dump 里**没有**收尾汇总行（末行不是 `# meta partial_steps=…`），摘要会打
+  `| no exit-summary line: pads subtracted and partial steps UNKNOWN`，并在 stderr 给一条警告。
+  此时「扣了多少 pad」和「有几步不完整」**不可知**，报告不会拿 0 冒充：T2 的 ③⑤、T6 表判定都写
+  「不可知」，对账那一格解释成因是「进程没走退出钩子、最后未落盘的整批丢了」，
+  并提示用 `spawn`（或 `--flush-every 1`）重跑（见 §6「收尾与边界情况」）。
 - `PAR` 至少需要两个 rank；只有一个 rank 时显示 `n/a`。
 - 没有 `--check` 之类的开关，校验是自动做的，结论直接打进报告。
 
@@ -341,8 +498,11 @@ python scripts/analyze_moe_par.py --run <名字>=<目录> [--run <名字>=<目�
 | **全程 PAR** | 把每个 rank 在**全部步、全部层**上求和，再 `max_r / mean_r` | 整个服务过程一个数：总账上谁做得多。用于评估放置与容量规划，**预测不了任何一次等待** | KPI 卡片、「整个服务过程」面板 |
 
 三者都在 `[1, rank 数]` 之间：1 = 完全均衡。**口径越大，比值越小**，因为层与层之间、步与步之间的
-倾斜方向不一致，加总时会互相抵消。报告里 KPI 卡片旁边还给出「均衡度 = 1 ÷ PAR」，可读作最忙那张卡
-的利用率上限。
+倾斜方向不一致，加总时会互相抵消。报告里 KPI 卡片、三口径表旁边都给出「均衡度 = 1 ÷ PAR」，
+可读作最忙那张卡的利用率上限。
+
+三者的分子分母都按 §6「负载口径」数：**专家按逻辑专家、rank 按实际落到它所持专家上的对数、不含 pad**。
+有冗余专家（副本）时，副本的分摊在发送侧不可见，报告把负载记在一个持有者头上，此时 **PAR 是上界**。
 
 注意：PAR 是**路由（gate）的性质**，不是通信方式的性质——同一批 token 无论由哪个 all-to-all 承载，
 都会去同一批专家。两次运行之间的 PAR 差异主要来自 batch 组成（每步多少 token），所以报告专门画了
@@ -352,17 +512,18 @@ python scripts/analyze_moe_par.py --run <名字>=<目录> [--run <名字>=<目�
 
 | 图 | 回答什么 |
 |---|---|
+| **口径与统计 · 先读这里** | 报告最上的面板：T1 负载口径表（每个量数的是什么、数据从哪来、不含什么）、运行级口径徽标、冗余边界、T2 统计与自查表、T6 pad 记账表 |
 | KPI 卡片 | 结论速览：逐层/整步/全程 PAR、均衡度、每步 token 数、rank × 专家规模 |
 | 怎么读这份报告 · 术语表 | 报告里出现的**每一个词**的说明，外加「报告地图」——想看什么该看哪张图 |
-| 每个 rank 的负载（跨步均值） | 各 rank 平均扛了多少；虚线是均值，峰值与均值之比就是整步 PAR |
+| 每个 rank 的负载（跨步均值） | 各 rank 平均扛了多少；虚线是均值，峰值与均值之比就是整步 PAR。表里另有「所持逻辑专家」与「相对最忙」两列 |
 | 各 rank 负载随步变化 | 每条线一个 rank；最高线与最低线之差 = 同步屏障要为此付的代价 |
 | 逐层 PAR / 整步 PAR 折线 | PAR 随步的波动；两条线之间的差距就是层间倾斜被抵消掉的部分 |
 | 整个服务过程（全程累计） | 全程总账柱状图 + 三口径并排对照表 |
-| token 去了哪里：rank × 全局专家 | **核心图**：一行一个 rank、一列一个全局专家，格子 = token-专家对数。行和 = 该 rank 的负载，列的深浅 = 专家是否热点 |
-| 层 × 全局专家 | 同样的流量按层拆开：某层的深色带说明它主导了逐层 PAR |
-| 专家负载剖面：单层（可选层） | 单层内按负载降序排列的专家柱状图，颜色按「高于/低于该层均值」发散着色，附带该专家相对均值的倍数 |
+| token 去了哪里：rank × 逻辑专家 | **核心图**：一行一个 rank、一列一个逻辑专家，格子 = token-专家对数。行和 = 该 rank 的负载，列的深浅 = 专家是否热点 |
+| 层 × 逻辑专家 | 同样的流量按层拆开：某层的深色带说明它主导了逐层 PAR |
+| 专家负载剖面：单层（可选层） | 单层内按负载降序排列的专家柱状图，颜色按「高于/低于该层均值」发散着色，表里给出持有 rank、占该层比例与「热点/正常/偏冷」判定 |
 | 专家负载剖面：单步（可选步） | 单步内的同类视图，标题里给出该步 token 数与通信方式 |
-| 每个专家住在哪个 rank | 专家放置矩阵：按负载推断每个（层, 专家）归属哪个 rank。无冗余时这是一个划分，正是 EPLB 会去搬动的形状 |
+| 每个专家住在哪个 rank | 专家放置矩阵：每个（层, 专家）归属哪个 rank。无副本时这是一个划分，正是 EPLB 会去搬动的形状；有副本时报告会标注 PAR 是上界 |
 | 各运行的峰均比 | 多份 dump 的箱线对比（逐层 / 整步）+ 汇总表；结论：PAR 相同时说明差异来自 batch 组成而非通信方式 |
 | 性能：TTFT / TPOT / 吞吐 | 见下节 |
 | 数据 | 逐 step 表（含每步通信方式）、每 rank 表、逐层表——图里画的东西全都能查到原始数字 |
@@ -410,7 +571,7 @@ python scripts/analyze_moe_par.py --run <名字>=<目录> [--run <名字>=<目�
 
 | 文件 | 落点 | 格式 | 量级（本例） | 作用 |
 |---|---|---|---|---|
-| `moe_par_<tag>_rank<N>.log` | `<dump-dir>/` | 文本，见第 6 节 | 15 MB / rank | 该 rank 每 (步, 层) 的各本地专家计数。**分析的原始输入** |
+| `moe_par_<tag>_rank<N>.log` | `<dump-dir>/` | 文本，见第 6 节 | 15 MB / rank（`global` 口径约 ×2） | 该 rank 每 (步, 层) 的计数（含义见 `counts_scope`）。**分析的原始输入** |
 | `bench.json` | `<dump-dir>/`（可用 `--out` 改） | JSON | 14 KB | 本次运行的配置、dump 清单、计时、逐请求时延、性能汇总、出报告命令 |
 | 报告 HTML | `-o` 指定，默认当前目录 | 自包含 HTML | 2–3 MB | 结论与图表；可单文件传阅 |
 | payload JSON | `--json` 指定 | JSON | 2 MB | 报告背后的数据，供二次加工 |
@@ -442,14 +603,26 @@ pytest -sv tests/ut/ops/test_moe_par_stats.py
 ```
 
 UT 的设计意图：打点与分析两侧**一起测**——一侧改了格式，另一侧立刻挂，而不是几周后在报告里发现异常。
+MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间扣 pad → 头部 `counts_scope=global`
+→ 收尾行的 `pad_pairs_subtracted`）也在同一份 UT 里覆盖，包括「note 只用一次」「直方图赢过接收侧计数」
+「note 为 0 时仍然替换计数」「pad 索引越界只记账不扣减」「扣出负数时夹到 0 并计数」几种边界。
+另有一组 4-rank 的合成往返用例：把真实路由拆成各 rank 的发送侧直方图 + pad 后写出，
+再由分析器拼回来，断言 `layer_expert` / `rank_expert` / `pad_subtracted` 全部精确复原。
+还有一组专门盯「没有退出钩子」的用例：只靠一次 flush 就能写出收尾行、重复 flush 是**改写**而非追加、
+改写不会吃掉已写的数据行；分析器一侧则有用例断言「没有收尾行」时报告给的是「不可知」而不是 0。
 
 实跑一次之后，可以从这几处确认采集是干净的：
 
 1. 每份 dump 的行数 ≈ `步数 × moe_layers`（同一步内每层一行）；
-2. `# meta` 里的 `moe_layers` / `global_experts` / `topk` 与模型配置吻合；
-3. 没有 `# meta partial_steps=` 行（或该值为 0），说明没有「层不全的步」；
+2. `# meta` 里的 `moe_layers` / `global_experts` / `topk` / `counts_scope` 与模型配置、通信方式吻合；
+3. 存在 `# meta partial_steps=` 行且值为 0：既说明没有「层不全的步」，也说明进程走到了收尾逻辑
+   （这一行缺失意味着 dump 不完整，见 §6「收尾与边界情况」）；
 4. 报告里没有 `NOT FLAT` 告警，说明各 rank 的步/层收齐了；
-5. 报告的「与 bench.json 对账」一节两边数字相等。
+5. 报告的「与 bench.json 对账」一节两边数字相等；
+6. 走 moonep 的 dump 应是 `counts_scope=global`，收尾行里出现 `pad_pairs_subtracted=`（数值 ≥ 0），
+   且**不应**出现 `pad_notes_misplaced=`；报告最上方的「口径与统计」面板里，T2 的自查 ①②③④ 全绿、
+   T6 表给出每个 rank 的 pad 占比。若报告反而出现「成因是 MoonEP 的容量 pad」那条告警，
+   说明这份 dump 是**修正前**的产物，绝对负载与 PAR 不可用，必须重跑。
 
 ---
 
@@ -461,9 +634,26 @@ UT 的设计意图：打点与分析两侧**一起测**——一侧改了格式�
 3. **`MOONEP_SLOT_MODE` / `MOONEP_DISABLE_UDMA` 不进 tag**：两次都开 `--moonep`、只差 slot 模式的运行
    会得到同样的 tag，从而写进同一个 dump 目录。要么显式 `--tag`，要么给 `--dump-dir`。
 4. **报告体量**：2–3 MB 的内联数据，浏览器打开正常，但不要放进聊天工具里逐条 diff。
-5. **本工具不开启、也不修改 EPLB**。`dynamic_eplb` 保持关闭；如果哪天在 EPLB 打开的情况下采集，
-   打点记录的仍是「本 rank 实际处理的量」，但冗余专家会改变负载的形状，报告的解读方式要相应调整。
-6. 采集期间**不要同时改 `--flush-every` 之外的打点参数**（tag、目录）；它们只在进程启动时生效。
+5. **本工具不开启、也不修改 EPLB**。`dynamic_eplb` 保持关闭。冗余专家（副本）会在**两个**方面影响
+   解读：专家的负载仍按逻辑专家记（副本算同一个专家），但副本**各自**处理了多少只在接收侧可见，
+   报告不去猜分摊、把负载记在一个持有者头上，所以此时的 **PAR 是上界**；报告会在口径面板和
+   相关结论处标注。
+6. **pad 的扣除只发生在 dump 侧**：走 moonep 时 EPLB 看到的 `moe_load` 仍然含容量 pad（
+   见 §6「MoonEP 的容量 pad」）。也就是说报告的绝对负载是真实路由，而 EPLB 优化的是含 pad 的那个量；
+   两边不是同一个数，比较时不要混用。另外打点侧只**读**直方图与计数、不改 `group_list`、
+   不改 plan 的输入（`tpe` 本来就不被 plan 消费），所以 MLP 与调度的计算结果与不开打点完全一致。
+7. **接收侧不适合做负载账**：派发 kernel 在目标 chunk 越界时会静默丢行
+   （`moonep_dispatch.cpp` 的 `if (dst_loff >= NvS) continue;`），本 build 不写 `plan.remote_stats`，
+   丢了多少本地不可知。所以 `local` 口径只用于「实收」的近似观察，`global`（发送侧）才是精确的
+   路由账。本 build 的 plan 也不做跨 rank 搬行（`CAP = NvS`，`balance ≤ 0` 直接 `break`），
+   预取槽 `experts_to_copy ≡ -1`，`cu[E:]` 全 0。
+8. 采集期间**不要同时改 `--flush-every` 之外的打点参数**（tag、目录）；它们只在进程启动时生效。
+9. **fork 出来的 worker 不执行 `atexit`**：`multiprocessing` 的 fork 子进程以 `os._exit()` 结束，
+   绕过所有 atexit 钩子，于是「退出时刷最后一批」不会发生——dump 会缺收尾汇总行和最后不足
+   `flush_every` 步的数据（对账自查会先报出来）。收尾行已改为每次落盘重写，但**未落盘的那批无法找回**，
+   所以要 `VLLM_WORKER_MULTIPROC_METHOD=spawn`（`scripts/moe_par_bench.py` 已默认）或用
+   `--flush-every 1` 把窗口压到最小。这个坑的表现是「dump 看起来正常、数值也自洽，只是总量比 bench 少
+   百分之几」，不查对账不容易发现。
 
 ---
 

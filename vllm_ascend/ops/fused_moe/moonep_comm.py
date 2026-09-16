@@ -48,9 +48,9 @@ Limitations (POC scope, all fail fast):
     (``max_num_batched_tokens``). Steps are dispatched against a pooled
     capacity (pow2 ladder, min 128) chosen from the rank-symmetric step token
     count, so short steps do not pay for the full S*K row space.
-  * Capacity envelope (empirical, this ascend-moonep build): the planning
-    kernel silently drops dispatched rows once a rank's receive share exceeds
-    its S*K symmetric chunk (measured at R=4 with heavy per-expert skew and
+  * Capacity envelope (empirical, this ascend-moonep build): the dispatch
+    kernel silently drops a row once its destination offset exceeds that
+    rank's S*K symmetric chunk (measured at R=4 with heavy per-expert skew and
     with every rank padding to expert 0 — combine then misplaces rows for the
     other ranks). Pad rows therefore route to each rank's own first expert
     (zero-weight; MOONEP_PAD_EXPERT0=1 restores the expert-0 behavior), and
@@ -80,6 +80,7 @@ import atexit
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
+from vllm_ascend.ops.fused_moe.moe_par_stats import note_route_counts as _note_route_counts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
@@ -612,6 +613,29 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # by one for rank 0).
         counts = cu64 - torch.cat((cu64.new_zeros(1), cu64[:-1]))
         local_counts = counts[rank * epn:(rank + 1) * epn].contiguous()
+        # Hand the load recorder the *sending* side of this dispatch: ``tpe`` counts
+        # the (token, expert) pairs by global (logical) expert id, pads included,
+        # exactly as the router chose them. The plan rebuilds its own histogram from
+        # ``topk_c`` and never reads this one (see the ascend-moonep planning kernel),
+        # so passing it on changes nothing about the dispatch, the MLP's group_list
+        # or the load EPLB sees.
+        #
+        # Why the sending side and not the counts above: the pad block is
+        # (capacity - T) * K pairs aimed at this rank's own pad expert, and the
+        # receive side mixes them with real rows and does not report rows the
+        # dispatch dropped (see the module docstring's capacity envelope). Subtracting
+        # them from the histogram instead is exact, and the histogram is per *logical*
+        # expert id, so summing it over the ranks offline recovers the run's real
+        # routing and stays correct when an expert is replicated (MoonEP's prefetch
+        # slots / EPLB redundancy).
+        #
+        # Called on every dispatch -- pad_pairs=0 clears the note -- so a layer
+        # without padding cannot inherit the previous layer's note.
+        _note_route_counts(
+            tpe,
+            pad_pairs=(capacity - T) * K if pad_expert is not None else 0,
+            pad_index=pad_expert if pad_expert is not None else -1,
+        )
         slot_counts = None
         if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
             # load-balance path: rows for prefetched (slot) experts stay local

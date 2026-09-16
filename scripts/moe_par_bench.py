@@ -169,6 +169,18 @@ def apply_stats_env(args, tag, dump_dir):
     os.environ["VLLM_ASCEND_MOE_PAR_STATS_DIR"] = dump_dir
     os.environ["VLLM_ASCEND_MOE_PAR_STATS_TAG"] = tag
     os.environ["VLLM_ASCEND_MOE_PAR_FLUSH_EVERY"] = str(args.flush_every)
+    # Workers must be able to run their exit hooks. A forked worker leaves through
+    # os._exit(), which skips atexit, so the last unflushed steps of the dump -- and
+    # with them the pad accounting, which only the exit hook used to write -- would
+    # be lost. setdefault, not assignment: an explicit choice in the environment wins.
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    if os.environ["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn":
+        print(
+            f"警告：VLLM_WORKER_MULTIPROC_METHOD={os.environ['VLLM_WORKER_MULTIPROC_METHOD']}"
+            f"，worker 退出时不执行 atexit 钩子：dump 会缺最后不足 {args.flush_every} 步"
+            "（对账自查会报出来）。除非确知后果，否则请用 spawn。",
+            file=sys.stderr,
+        )
     if args.moonep:
         # ascend-moonep loads libshmem off this variable; the engine switch is additional_config.
         os.environ["MOONEP"] = "1"
