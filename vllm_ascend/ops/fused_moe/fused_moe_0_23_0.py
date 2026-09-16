@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 
+from vllm_ascend.ops.fused_moe import moe_par_stats
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -565,6 +566,16 @@ class AscendFusedMoE(FusedMoE):
                 self.load_counter.add_(1)
             else:
                 self.moe_load.add_(local_load)
+
+        if moe_par_stats.enabled():
+            # The same per-local-expert counts EPLB accumulates just above, kept per
+            # rank for the offline peak-to-average analysis. Adds no collective.
+            moe_par_stats.record(
+                self,
+                fused_experts_results.expert_tokens,
+                fused_experts_results.group_list_type,
+                type(_EXTRA_CTX.moe_comm_method).__name__,
+            )
 
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,

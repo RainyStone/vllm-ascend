@@ -110,6 +110,20 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Master switch for the per-rank MoE expert-load dump used by
+    # scripts/analyze_moe_par.py to compute the peak-to-average ratio offline.
+    # "1" records, anything else leaves the recorder inert. Independent of
+    # DYNAMIC_EPLB: the dump taps the same per-expert route counts but adds no
+    # collective, so it is useful with EPLB off.
+    "VLLM_ASCEND_MOE_PAR_STATS": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_PAR_STATS", "0"))),
+    # Output directory for the dump; one file per rank is written there.
+    "VLLM_ASCEND_MOE_PAR_STATS_DIR": lambda: os.getenv("VLLM_ASCEND_MOE_PAR_STATS_DIR", "/tmp/moe_par_stats"),
+    # Label for this run, used in the dump filename so several legs (MC2, MoonEP,
+    # all-gather) can be recorded side by side and compared offline.
+    "VLLM_ASCEND_MOE_PAR_STATS_TAG": lambda: os.getenv("VLLM_ASCEND_MOE_PAR_STATS_TAG", "run"),
+    # Steps buffered on device between host copies. Larger means fewer CPU-NPU
+    # syncs and coarser durability. Must be >= 1.
+    "VLLM_ASCEND_MOE_PAR_FLUSH_EVERY": lambda: int(os.getenv("VLLM_ASCEND_MOE_PAR_FLUSH_EVERY", "16")),
 }
 
 # end-env-vars-definition

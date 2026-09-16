@@ -207,8 +207,11 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
      的目的）；如需两全，须由 torch_npu/ascend-moonep 修 URMA 与 expandable
      segments 的 VA/页表兼容（或 HDK ≥ 26.0.RC1）。
 2. **NPU 对称内存可用性**：部分设备（长时间被占/驱动状态损坏的卡）会报
-   `aclrtMemSetAccess ... 507899`（= ACL_ERROR_RT_DRV_INTERNAL_ERROR，驱动内部错误），
-   需要设备 reset 或驱动升级；故障与 MoonEP 代码无关（MTE/UDMA 同样失败）。
+   `aclrtMemSetAccess ... 507899`（= ACL_ERROR_RT_DRV_INTERNAL_ERROR，驱动内部错误）。
+   **早期「需设备 reset / 升级驱动」的判断已被实测推翻**：根因见第 7 条与
+   [docs/cross_repo_fixes.md](docs/cross_repo_fixes.md) 第 3 节——`aclrtMemSetAccess` 的
+   `aclrtMemLocation.id` 要物理号，而 VMM 其余接口要逻辑号，`ASCEND_RT_VISIBLE_DEVICES`
+   是真子集时两者不等，故只在重映射场景出现。
 3. **planning 要求 B == E/R**；GPU 原版“推理用小 B”在 Ascend 移植库上暂不支持。
 4. **超容量/倾斜**：owner 模式在极端路由倾斜下可能丢行（见模块注释的容量包络）；
    计划中增加 `plan.remote_stats` 保护（越界自动回退原生 comm）。
@@ -226,6 +229,9 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
    库侧已修 `memSetAccess` 一半（见 `ascend_moonep/buffer_c.py: acl_vmm_access_device_id`）；
    实测 dp2ep2 需要保留全量可见 + 给 vllm-ascend 0.23.0 的 worker 补 DP 偏移（测试用
    shim：`/home/tmp/dpshim/sitecustomize.py`，`MOONEP_DP_FULL_VISIBLE=1`）。
+   **本仓运行还依赖若干落在其它仓/子模块的修复**（catlass 编译、shmem init `-100`、本例、
+   DeepSeek-V4-Flash 的 moonep 适配），背景/根因/解法与重置后如何重打见
+   [docs/cross_repo_fixes.md](docs/cross_repo_fixes.md)。
 
 ## 代码结构
 
@@ -244,3 +250,10 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 `scripts/`：`moe_ab_test.py`（引擎 A/B）、`bench_long.py`（长 prefill）、
 `smoke_qwen_geo.py` / `smoke_slots.py`（数值 harness）、`probe_slots_multi.py`（R3 多热专家探针）。
+
+**MoE 负载采集与峰均比报告**：`moe_par_bench.py`（离线驱动：跑数据集，写每 rank 的负载 dump 与
+`bench.json`）、`analyze_moe_par.py`（离线聚合多份 dump，生成中文自包含 HTML 报告：三种口径的
+PAR、token 与专家在 rank 上的分布、逐层/逐 step 曲线、性能面板）。打点实现在
+`vllm_ascend/ops/fused_moe/moe_par_stats.py`（只记录本 rank、零集合通信，开关
+`VLLM_ASCEND_MOE_PAR_STATS`）。用法、产出文件的格式与报告读法见
+[docs/moe_par.md](docs/moe_par.md)；自测：`pytest -sv tests/ut/ops/test_moe_par_stats.py`。
