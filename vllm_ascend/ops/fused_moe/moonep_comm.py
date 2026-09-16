@@ -748,6 +748,9 @@ class MoonEPCommImpl(MoECommMethod):
     """Expert-parallel MoE over MoonEP SHMEM dispatch, reusing the all-to-all
     prepare/finalize (TP slicing/unpadding semantics) and the standard MLP."""
 
+    def pad_and_split_input_ids(self, input_ids):
+        return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
+
     def _get_token_dispatcher(self):
         return TokenDispatcherWithMoonEP(
             top_k=self.moe_config.experts_per_token,
