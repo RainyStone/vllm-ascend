@@ -125,6 +125,17 @@ _SLOT_STATS = {"calls": 0, "with_slots": 0, "slot_rows": 0, "prefetch_experts": 
 _BALANCE_STATS_ON = os.environ.get("MOONEP_BALANCE_STATS", "0") == "1"
 _BALANCE_STATS = {"calls": 0, "tokens": 0, "local_rows": 0, "all_rows": 0, "pad_rows": 0}
 
+# MOONEP_PAD_CUT=1: try to leave the pad rows out of the grouped GEMM by
+# trimming the last local expert's group (pads are zero-hidden/zero-weight, and
+# the matmul walks exactly sum(group_list) shard rows). **Off by default: it is
+# WRONG.** The trim assumes the pad rows are the *trailing* rows of that group,
+# but the planning kernel orders rows within a group by its own assignment (k
+# slices), so the tail contains real rows too. Measured on the 4-rank smoke
+# harness (E=8, K=2, S=512, T=384): PAD_CUT=0 -> rel err 0.6-0.8% PASS;
+# PAD_CUT=1 -> rel err 74% FAIL. Keep the knob for experiments only; reducing
+# the pad *volume* with the dense capacity ladder (below) is the safe lever.
+_PAD_CUT = os.environ.get("MOONEP_PAD_CUT", "0") == "1"
+
 
 def _dump_balance_stats():
     if not _BALANCE_STATS_ON:
@@ -188,24 +199,76 @@ def _dump_slot_stats():
 # for 128 seqs on 4 ranks), so the floor is low by default; every padded row
 # inside the MLP's group_list is real (wasted) GEMM work. Raise it (or set
 # MOONEP_POOL_CAPS) if a rank's receive share can exceed S*K.
-MOONEP_MIN_DISPATCH_TOKENS = int(os.environ.get("MOONEP_MIN_CAP", "64"))
+MOONEP_MIN_DISPATCH_TOKENS = int(os.environ.get("MOONEP_MIN_CAP", "16"))
 
 
-def _moonep_pool_capacities(s_max: int) -> list[int]:
-    """Capacity ladder for the buffer pool (MOONEP_POOL_CAPS overrides)."""
+def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[int]:
+    """Capacity ladder for the buffer pool (MOONEP_POOL_CAPS overrides).
+
+    A rung fixes the dispatched row space to S*K, so a step of T tokens pads
+    (S-T)*K zero rows -- pure waste: the grouped GEMM multiplies zeros and the
+    pile lands on the pad expert, which skews that rank's expert groups. The
+    pool is idle memory, so trading pool bytes for smaller pads is a good deal;
+    MOONEP_POOL_BUDGET_MB caps how much we spend on it (default 2 GiB, a small
+    part of what releasing the vllm weight copies frees).
+
+    Layout: dense where decode lives, geometric above it.
+
+        step 8  : MIN .. 128        (decode shapes, cheap)
+        step 32 : 160 .. 512        (big decode / small prefill)
+        ratio r : 512 .. s_max      with r from the budget; a geometric ladder
+                                    of ratio r costs ~s_max*cost*r/(r-1) bytes
+                                    and leaves at most (r-1) relative pad
+
+    ``cost_per_token`` is the hidden chunk's bytes per token of capacity
+    (K*H*2), passed by the caller because the pool is built per (E, K, H).
+    """
     override = os.environ.get("MOONEP_POOL_CAPS")
     if override:
         caps = sorted({int(c) for c in override.split(",") if c.strip()})
         if not caps or caps[-1] != int(s_max):
             caps = sorted(set(caps) | {int(s_max)})
         return [c for c in caps if c <= int(s_max)]
-    capacities = []
-    cap = MOONEP_MIN_DISPATCH_TOKENS
-    while cap < s_max:
-        capacities.append(cap)
-        cap *= 2
-    capacities.append(int(s_max))
-    return capacities
+    s_max = int(s_max)
+    caps: list[int] = []
+
+    def _add(c: int) -> None:
+        c = int(c)
+        if 0 < c <= s_max and c not in caps:
+            caps.append(c)
+
+    # Shape: powers of two up to 512 (decode shapes, where the tail lives),
+    # then a uniform step up to s_max. The waste per step is (S-T)*K rows, so a
+    # uniform step bounds it by step*K rows whatever T is -- a geometric ladder
+    # does not (its absolute waste grows with S, and where the rungs land is
+    # luck: measured at T=4676, ratio 1.22 gave 6416 pad rows vs 688 for 1.35).
+    #
+    # Two caps bind, and the count one dominates: every Buffer also allocates
+    # its op workspaces as separate VMM physical chunks (~10 per buffer, 16 MiB
+    # scale each), and the driver starts failing with
+    # "aclrtMallocPhysical(...) failed with 207001" past a few dozen buffers
+    # (measured: 51 rungs -> pool init dies; 31 rungs -> fine).
+    max_rungs = int(os.environ.get("MOONEP_POOL_MAX_RUNGS", "32"))
+    budget = int(os.environ.get("MOONEP_POOL_BUDGET_MB", "2048")) * 2**20
+    base = [c for c in (16, 32, 64, 128, 256, 512) if c <= s_max]
+    for c in base:
+        _add(c)
+    top = base[-1] if base else s_max
+    if s_max > top:
+        # smallest uniform step that fits both caps
+        step = 128
+        while step < s_max:
+            count = (s_max - top) // step
+            span = (top + s_max) / 2.0 * count * cost_per_token
+            if count + len(base) <= max_rungs and (budget <= 0 or span <= budget):
+                break
+            step *= 2
+        c = top + step
+        while c <= s_max:
+            _add(c)
+            c += step
+    _add(s_max)
+    return sorted(caps)
 
 
 def _step_token_count(tokens: int):
@@ -323,7 +386,7 @@ class _MoonEPRuntime:
             if K * H * capacity >= 2**31:
                 raise ValueError("MoonEP: S*K exceeds the planning int32 range.")
             # B (prefetch slots) must equal epn for the planning kernel.
-            capacities = _moonep_pool_capacities(int(capacity))
+            capacities = _moonep_pool_capacities(int(capacity), cost_per_token=K * H * 2)
             self._buffers[(E, K, H)] = {
                 cap: Buffer(
                     int(cap), H, K, E, R,
@@ -405,6 +468,21 @@ class _MoonEPRuntime:
         if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
             for st in self._states:
                 st.publish()
+            if os.environ.get("MOONEP_RELEASE_WEIGHTS", "1") == "1":
+                # The freed vllm weight blocks sit in torch's cache otherwise, and
+                # the engine sizes its KV cache from driver-level free memory
+                # (torch.npu.mem_get_info), so hand them back before that runs.
+                try:
+                    dev = torch.npu.current_device()
+                    torch.npu.empty_cache()
+                    free_b, total_b = torch.npu.mem_get_info(dev)
+                    print(
+                        f"[moonep-release r{get_ep_group().rank_in_group}] home chunks now back "
+                        f"the layers; free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
+                        flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
@@ -444,13 +522,10 @@ def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
     if step_tokens is None or step_tokens > s_max:
         capacity = s_max
     else:
-        capacity = min(
-            s_max,
-            max(MOONEP_MIN_DISPATCH_TOKENS,
-                1 << max(step_tokens - 1, 0).bit_length()),
-        )
-        while capacity not in pool:
-            capacity = min(s_max, capacity * 2)
+        # smallest rung that still fits the step: with the dense ladder this is
+        # the "S as close to T as the pool allows" choice
+        need = max(int(step_tokens), MOONEP_MIN_DISPATCH_TOKENS)
+        capacity = next((c for c in sorted(pool) if c >= need), s_max)
     if capacity < tokens:
         raise RuntimeError(
             f"MoonEP: step has {tokens} tokens but the selected capacity is "
@@ -580,12 +655,21 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # copy_ always overwrites [0:T] in full and nothing else touches the
         # tail, so unchanged steps skip three launches per layer.
         pad_expert = None
+        pad_is_tail = False
         if T < capacity:
             if os.environ.get("MOONEP_PAD_EXPERT0", "0") == "1":
                 pad_expert = 0
             else:
+                # own LAST expert: pads are then the trailing rows of this
+                # rank's row block, which is what lets the grouped GEMM skip
+                # them wholesale (see the pad cut below). Any expert owned by
+                # this rank works for correctness -- routing every rank's pads
+                # to expert 0 piles them onto one rank, which the planning/
+                # combine kernels misplace for R >= 3.
                 ep_group = get_ep_group()
-                pad_expert = ep_group.rank_in_group * (E // ep_group.world_size)
+                epn = E // ep_group.world_size
+                pad_expert = ep_group.rank_in_group * epn + (epn - 1)
+                pad_is_tail = True
         tail = pads["tail"]
         if not real_t and (tail["T"] != T or tail["capacity"] != capacity
                            or tail["pad_expert"] != pad_expert):
@@ -631,12 +715,35 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # zero term is why this keeps the concat: slicing per rank would be off
         # by one for rank 0).
         counts = cu64 - torch.cat((cu64.new_zeros(1), cu64[:-1]))
-        local_counts = counts[rank * epn:(rank + 1) * epn].contiguous()
+        own_counts = counts[rank * epn:(rank + 1) * epn].contiguous()
         slot_counts = None
         if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
             # load-balance path: rows for prefetched (slot) experts stay local
             slot_counts = counts[E:].contiguous()
-            local_counts = torch.cat((local_counts, slot_counts))
+        if (
+            _PAD_CUT
+            and pad_is_tail
+            and not real_t
+            and T < capacity
+        ):
+            # Drop the pad rows from the grouped GEMM. The grouped matmul walks
+            # exactly sum(group_list) rows of the shard, and the (capacity-T)*K
+            # zero rows are the *tail* of pad_expert's group (pad_expert is this
+            # rank's last expert and pads are the last input rows), so trimming
+            # that group removes them without shifting anything else.
+            # Skipped when slot rows are present: borrowed groups follow the
+            # owned ones in the shard, so shortening the tail would shift them.
+            # Device-side (clamp + where), so no host sync per layer.
+            cut = torch.clamp(own_counts[-1], max=(capacity - T) * K)
+            if slot_counts is not None:
+                cut = torch.where(slot_counts.sum() > 0, torch.zeros_like(cut), cut)
+            own_counts = own_counts.clone()
+            own_counts[-1] = own_counts[-1] - cut
+            if _BALANCE_STATS_ON:
+                _BALANCE_STATS["pad_cut_calls"] = _BALANCE_STATS.get("pad_cut_calls", 0) + 1
+        local_counts = (
+            torch.cat((own_counts, slot_counts)) if slot_counts is not None else own_counts
+        )
         if _BALANCE_STATS_ON:
             # per-rank (token, expert) entries: what this rank computes vs the
             # full step. Opt-in: reading the counts back costs a host sync.

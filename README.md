@@ -179,6 +179,11 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `aclshmemx_init_attr_with_buffers failed with -100`，日志带 `Unsupported physical allocation properties ... locationId=...` | 同一个 id 空间问题的 **shmem 侧**：VMM 属性里是物理号、`aclrtGetDevice()` 是逻辑号，比较必然失败（修法与 dlsym 陷阱见限制 #7） |
 | `ImportError ... '_build_info'` / 找不到 `vllm_ascend`、`ascend_moonep` | 仓库没装：三个 editable 包（vllm-ascend、本仓库）与 vendored 库路径没都挂上 |
 | OOM / `Failed to apply for memory`，但 `npu-smi` 看着空闲 | ① 别的容器占着卡（`npu-smi` 看不见，只有 ACL 级 `torch.npu.mem_get_info` 才反映）；② 上一次 `kill -9` 的残留进程仍持卡 |
+| `aclrtMallocPhysical(16777216, device_id=N) failed with 207001`（池初始化阶段） | **容量池档数过多**：每档除 hidden 块外还要为各算子分配 workspace（~10 个 16 MiB 级 VMM 物理块），几十档就把驱动的物理块吃光。降到 ≤32 档（`MOONEP_POOL_MAX_RUNGS`） |
+| `cannot register a symmetric descriptor after buffer-backed shmem initialization` | 想在 shmem init 之后新建 `Buffer`（"懒建档"）——**库不支持**，对称堆在 init 时一次性定死；复现见 `scripts/moonep_dev/probe_lazy_buffer.py` |
+| 参数改过之后跨路线 token 不再逐条一致 | **预期**：分组长度/tiling 变 ⇒ 数值末位差异 ⇒ 贪心解码分叉。跨实现不该要求 bit-exact，判据用任务准确率（见 `docs/dev_results_2026-09-16.md` §7） |
+| `Free memory ... less than desired GPU memory utilization` | 同卡别的容器中途占回显存（`npu-smi` 之外也要看 ACL 级可用量）；自适应 GMU 会因此在运行中失效 |
+| 崩溃日志是空的（kill 后无 traceback） | 别用 `… \| grep … \| tail -N` 跑长任务：`tail` 会缓冲到 EOF，进程被杀就什么都不落盘 |
 | `HcclBroadcast ... port 16666` 等 HCCL 建链异常 | **未定根因**（个别机器只出现过一次、未复现）。遇到时先按 HCCL 错误码定位：`19 = HCCL_E_NETWORK`、`4 = 内部错误 / TLS 配置不一致`（曾见 0-3 卡 tls disabled、4-7 enabled 导致 8 卡建链失败） |
 
 ## 关键配置/环境开关
@@ -196,12 +201,20 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
 | `MOONEP_POOL=0` | 关闭步长自适应容量池（退回固定 `max_num_batched_tokens` 容量） |
-| `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（默认 pow2 阶梯，≥128） |
+| `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
+| `MOONEP_MIN_CAP=16` | 池最小档（默认 16；改大会抬高每步补零行） |
+| `MOONEP_POOL_BUDGET_MB=2048` | 档位表的内存预算：预算越大档越密、补零行越少（只影响档位密度） |
+| `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
+| `MOONEP_RELEASE_WEIGHTS=0` | 关闭"释放 vllm 原权重"（默认开：home chunk 接管后释放原张量，省 13.8 GB/卡） |
+| `MOONEP_PAD_CUT=1` | 实验性：把补零行踢出 grouped GEMM。**实测错误，默认关**（见排障） |
+| `MOE_ROW_STATS=1` | 逐层记录本卡专家组行数（sum/max/非零组数），导出 `/tmp/moe_rows_<TAG>_rank*.json` |
+| `MOE_ROW_TIMING=1` | 追加逐层"同步"MLP 耗时（仅测量用，会串行化该步） |
 | `MOONEP_NO_SYNC=0` | 关闭零同步 dispatch（默认开；改回逐层 `.item()` + 切片语义） |
 | `MOONEP_REUSE_OUT=0` | 关闭库内 dispatch 输出复用（默认开） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
 | `ASCEND_MOONEP_TIME_STATS=1` | 库内分段计时（barrier/planning 核/dispatch 核/边界拷贝，`[moonep-lib-tstats]`） |
 | `MOONEP_CAP_TRACE=1` | 打印每步选中的 dispatch 容量 |
+| `DUMP_TOKENS=1` | 导出贪心 token ids（`/tmp/bench_tokids_<TAG>_rank*.json`），用于跨路线对拍 |
 
 ## 限制与已知问题（重要）
 
@@ -268,3 +281,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 `scripts/`：`moe_ab_test.py`（引擎 A/B）、`bench_long.py`（长 prefill）、
 `smoke_qwen_geo.py` / `smoke_slots.py`（数值 harness）、`probe_slots_multi.py`（R3 多热专家探针）。
+
+`scripts/moonep_dev/`：dev 分支的负载均衡/容量测量工具集（harness、plan/懒建档探针、
+token 对拍、组不均-耗时相关性分析）——见该目录 `README.md`；
+结果记录见 `docs/dev_results_2026-09-16.md`。

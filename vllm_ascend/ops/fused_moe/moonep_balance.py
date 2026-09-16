@@ -53,6 +53,11 @@ from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEFusedExpertsInput
 
 _slot_mode = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 
+# Release the vllm weight tensors once the home mirror holds them (slot mode
+# computes against the [epn+B] alias, never against the vllm tensor). ~14.5 GB
+# for Qwen3-30B-A3B at EP=4. See _LayerWeightState.publish.
+_RELEASE_WEIGHTS = os.environ.get("MOONEP_RELEASE_WEIGHTS", "1") == "1"
+
 
 def slot_mode_enabled() -> bool:
     return _slot_mode
@@ -152,12 +157,24 @@ class _LayerWeightState:
         self._w13_src = w13
         self._w2_src = w2
         self._published = False
+        self._layer = layer
         self._vmm_tensors = [self.home_w13, self.home_w2]
 
     def publish(self) -> None:
         """One-time mirror of the local vllm weight rows into the home chunks.
 
         Must run after ShmemRuntime init (copies only; no new descriptors).
+
+        With MOONEP_RELEASE_WEIGHTS=1 the originals are then dropped: the home
+        chunks become the layer's weights (in place -- ``.data`` of the same
+        Parameter objects, because the runtime looks layer states up by
+        ``id(w13_weight)``), so the rank keeps *one* copy of its expert weights
+        instead of two. That is ~14.5 GB for Qwen3-30B-A3B at EP=4 (302 MB per
+        layer of w13+w2 x 48 layers).
+
+        Only safe because slot mode computes against the [epn+B] alias, never
+        against the vllm tensor. Do not enable it where the weights are written
+        again after init (weight reload / sleep mode / RL rollouts).
         """
         if self._published:
             return
@@ -165,8 +182,45 @@ class _LayerWeightState:
             self.home_w13.copy_(self._w13_src)
             self.home_w2.copy_(self._w2_src)
         self._published = True
+        if _RELEASE_WEIGHTS:
+            self._release_sources()
+
+    def _release_sources(self) -> None:
+        """Point the layer's weight Parameters at the home chunks (drop the copies)."""
+        released = 0
+        for name, src_attr, home in (("w13_weight", "_w13_src", self.home_w13),
+                                     ("w2_weight", "_w2_src", self.home_w2)):
+            src = getattr(self, src_attr)
+            layer_param = getattr(self._layer, name, None)
+            if layer_param is None:
+                continue
+            if layer_param is not src:
+                # the layer was re-parameterised after the state was built: the
+                # id() lookup would already be broken, so leave it alone
+                continue
+            if tuple(layer_param.shape) != tuple(home.shape) or layer_param.dtype != home.dtype:
+                raise RuntimeError(
+                    f"MoonEP release: {name} shape/dtype changed "
+                    f"({tuple(layer_param.shape)} {layer_param.dtype} vs "
+                    f"{tuple(home.shape)} {home.dtype}); refusing to swap")
+            released += home.numel() * home.element_size()
+            # in-place storage swap: the Parameter object (and therefore the
+            # runtime's id()-keyed state lookup) is preserved
+            layer_param.data = home
+        if released:
+            self._released = True
+            print(
+                f"[moonep-release] {type(self._layer).__name__}: vllm weight copies "
+                f"released, home chunks now back the layer ({released / 2**20:.0f} MB)",
+                flush=True)
 
     def destroy(self):
+        if getattr(self, "_released", False):
+            # after a release the home chunks *are* the layer's weights: freeing
+            # them would leave the layer pointing at unmapped memory
+            raise RuntimeError(
+                "MoonEP: refusing to destroy weight state whose home chunks back "
+                "the layer (MOONEP_RELEASE_WEIGHTS=1).")
         for t in self._vmm_tensors:
             alloc = getattr(t, "_vmm_allocation", None)
             if alloc is not None:

@@ -361,6 +361,228 @@ def quant_apply_mlp(
     return hidden_states, before_gmm2_evt
 
 
+# MOONEP_TIME_STATS=1: time the MoE expert compute itself (grouped GEMMs +
+# activation), separately from attention and from the comm layer. Both the MC2
+# baseline and MoonEP go through these entry points, so the numbers compare.
+# MOONEP_MLP_SYNC=1 adds a device sync inside the timer so the number covers the
+# device work rather than just the host-side launches (it serialises the step,
+# use it only for measurement runs).
+import atexit as _atexit
+import os as _os
+import time as _time
+
+_MOE_TSTATS_ENABLED = _os.environ.get("MOONEP_TIME_STATS", "0") == "1"
+_MOE_TSTATS_SYNC = _os.environ.get("MOONEP_MLP_SYNC", "0") == "1"
+_MOE_TSTATS: dict = {}
+
+
+def _moe_ts(name: str, t0: float) -> None:
+    if not _MOE_TSTATS_ENABLED:
+        return
+    if _MOE_TSTATS_SYNC:
+        import torch  # noqa: PLC0415
+
+        torch.npu.synchronize()
+    acc = _MOE_TSTATS.setdefault(name, [0.0, 0])
+    acc[0] += _time.perf_counter() - t0
+    acc[1] += 1
+
+
+def _moe_group_list(args, kwargs):
+    """(group_list, group_list_type) of either entry point, or (None, None)."""
+    mci = kwargs.get("mlp_compute_input")
+    if mci is not None:
+        return getattr(mci, "group_list", None), getattr(mci, "group_list_type", 1)
+    if "group_list" in kwargs:
+        return kwargs["group_list"], kwargs.get("group_list_type", 1)
+    for a in args:
+        gl = getattr(a, "group_list", None)
+        if gl is not None:
+            return gl, getattr(a, "group_list_type", 1)
+        if isinstance(a, torch.Tensor) and a.dim() == 1 and a.dtype in (torch.int32, torch.int64):
+            return a, 1
+    return None, None
+
+
+def _moe_rows_time(i: int, dt: float) -> None:
+    if not _MOE_ROW_TIMING:
+        return
+    _MOE_ROWS_TIMES.append((i, dt))
+
+
+def _timed_moe(name: str):
+    def deco(fn):
+        def wrapper(*args, **kwargs):
+            if _MOE_ROWS_ENABLED:
+                _gl, _glt = _moe_group_list(args, kwargs)
+                n_before = _MOE_ROWS["i"]
+                _moe_rows(_gl, _glt)
+                if _MOE_ROW_TIMING and _MOE_ROWS["i"] != n_before:
+                    # device-synchronised per-layer timing: only the outer call
+                    # increments the row index (the inner unified->unquant call
+                    # is deduped), so this measures each layer once. Syncing
+                    # serialises the step, so this is a measurement-only mode.
+                    import torch  # noqa: PLC0415
+
+                    torch.npu.synchronize()
+                    _t = _time.perf_counter()
+                    _out = fn(*args, **kwargs)
+                    torch.npu.synchronize()
+                    _moe_rows_time(n_before, _time.perf_counter() - _t)
+                    return _out
+            if not _MOE_TSTATS_ENABLED:
+                return fn(*args, **kwargs)
+            if _MOE_TSTATS_SYNC:
+                # Drain first, otherwise the "after" sync would also wait for work
+                # queued before this call and the number would not be this MLP's.
+                import torch  # noqa: PLC0415
+
+                torch.npu.synchronize()
+            t0 = _time.perf_counter()
+            out = fn(*args, **kwargs)
+            _moe_ts(name, t0)
+            return out
+
+        wrapper.__name__ = getattr(fn, "__name__", name)
+        return wrapper
+
+    return deco
+
+
+# MOE_ROW_STATS=1: record the per-layer local-expert row counts (the MLP's
+# ``group_list``) on device, one entry per layer call, and dump them at exit.
+# This is the load-imbalance signal: cross-rank comparison at a given call index
+# gives max/mean skew, and the within-rank max/mean shows how uneven the local
+# expert groups are. Accumulated with device-side writes only (no host sync per
+# layer), so a measurement run keeps its timing.
+_MOE_ROWS_ENABLED = _os.environ.get("MOE_ROW_STATS", "0") == "1"
+_MOE_ROWS_MAX = int(_os.environ.get("MOE_ROW_STATS_MAX", "60000"))
+_MOE_ROWS: dict = {"i": 0, "buf": None}
+# MOE_ROW_TIMING=1: also record each layer's synchronised MLP wall time
+_MOE_ROW_TIMING = _os.environ.get("MOE_ROW_TIMING", "0") == "1"
+_MOE_ROWS_TIMES: list = []
+
+
+def _moe_rows(group_list, group_list_type=1) -> None:
+    if not _MOE_ROWS_ENABLED or group_list is None:
+        return
+    import torch  # noqa: PLC0415
+
+    gl = group_list
+    if not isinstance(gl, torch.Tensor) or gl.dim() != 1:
+        return
+    if gl.dtype != torch.int64:
+        gl = gl.to(torch.int64)
+    if group_list_type == 0:
+        # cumulative (cu_seqlens, first entry = first expert's count) -> counts
+        if gl.numel() == 0:
+            return
+        gl = torch.cat((gl[:1], torch.diff(gl)))
+    elif group_list_type != 1:
+        if not _MOE_ROWS.get("warned"):
+            _MOE_ROWS["warned"] = True
+            print(f"[moe-rows] unsupported group_list_type={group_list_type}, skipping", flush=True)
+        return
+    _MOE_ROWS["type"] = group_list_type
+    buf = _MOE_ROWS["buf"]
+    if buf is None:
+        import torch_npu  # noqa: PLC0415
+
+        dev = gl.device
+        k = _MOE_ROWS_MAX
+        buf = {
+            "sum": torch.zeros(k, dtype=torch.int32, device=dev),
+            "max": torch.zeros(k, dtype=torch.int32, device=dev),
+            "nz": torch.zeros(k, dtype=torch.int32, device=dev),
+            "n": torch.zeros(k, dtype=torch.int32, device=dev),
+            "device": str(dev),
+        }
+        _MOE_ROWS["buf"] = buf
+    prev = _MOE_ROWS.get("last")
+    if prev is not None and prev is gl:
+        # unified_apply_mlp forwards to unquant_apply_mlp with the same tensor:
+        # count each layer once.
+        return
+    _MOE_ROWS["last"] = gl
+    i = _MOE_ROWS["i"]
+    if i >= _MOE_ROWS_MAX:
+        return
+    buf["sum"][i] = gl.sum()
+    buf["max"][i] = gl.max() if gl.numel() else 0
+    buf["nz"][i] = (gl > 0).sum()
+    buf["n"][i] = gl.numel()
+    _MOE_ROWS["i"] = i + 1
+
+
+def _dump_moe_rows_times() -> None:
+    if not _MOE_ROW_TIMING or not _MOE_ROWS_TIMES:
+        return
+    import json  # noqa: PLC0415
+
+    tag = _os.environ.get("TAG", "row")
+    path = f"/tmp/moe_rowtimes_{tag}.json"
+    with open(path, "w") as fh:
+        json.dump(_MOE_ROWS_TIMES, fh)
+    print(f"[moe-rowtimes] {len(_MOE_ROWS_TIMES)} layers -> {path}", flush=True)
+
+
+_atexit.register(_dump_moe_rows_times)
+
+
+def _dump_moe_rows() -> None:
+    if not _MOE_ROWS_ENABLED or _MOE_ROWS["buf"] is None:
+        return
+    import json  # noqa: PLC0415
+
+    buf = _MOE_ROWS["buf"]
+    n = _MOE_ROWS["i"]
+    # The vLLM worker is not in a torch.distributed group (vllm-ascend makes its
+    # own HCCL groups), so get_rank() returns -1 there and every rank would write
+    # the same file. Derive the rank from the bound device instead.
+    try:
+        import torch  # noqa: PLC0415
+
+        dev_id = int(torch.npu.current_device())
+        rank = dev_id - int(_os.environ.get("MOONEP_DEV_BASE", "0"))
+    except Exception:  # noqa: BLE001
+        rank = -1
+    tag = _os.environ.get("TAG", "row")
+    path = f"/tmp/moe_rows_{tag}_rank{rank}.json"
+    data = {
+        "rank": rank, "calls": n, "device": buf["device"],
+        "group_list_type": _MOE_ROWS.get("type"),
+        "sum": buf["sum"][:n].cpu().tolist(),
+        "max": buf["max"][:n].cpu().tolist(),
+        "nz": buf["nz"][:n].cpu().tolist(),
+        "n": buf["n"].cpu().tolist(),
+    }
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+    print(f"[moe-rows rank={rank}] calls={n} -> {path}", flush=True)
+
+
+_atexit.register(_dump_moe_rows)
+
+
+def _dump_moe_tstats() -> None:
+    if not _MOE_TSTATS_ENABLED or not _MOE_TSTATS:
+        return
+    try:
+        import torch  # noqa: PLC0415
+
+        dev = f"npu:{torch.npu.current_device()}" if torch.npu.is_available() else "?"
+    except Exception:  # noqa: BLE001
+        dev = "?"
+    parts = [f"[moe-compute-stats dev={dev} sync={int(_MOE_TSTATS_SYNC)}]"]
+    for name, (total, calls) in _MOE_TSTATS.items():
+        parts.append(f"{name}: calls={calls} total={total:.3f}s avg={total / max(calls, 1) * 1e3:.3f}ms")
+    print(" ".join(parts), flush=True)
+
+
+_atexit.register(_dump_moe_tstats)
+
+
+@_timed_moe("unquant_apply_mlp")
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -458,6 +680,7 @@ def unquant_apply_mlp(
     return hidden_states, None
 
 
+@_timed_moe("unified_apply_mlp")
 def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.
