@@ -134,3 +134,71 @@ MTE prefetch 需要"源 VA"、GEMM 需要 `[epn+B]` 零拷贝别名）。计算�
    若不吃时间（Ascend grouped matmul 会把大组内部再切给多核），就不该花力气治。
 2. **TPOT +10% 的来源**：拆 prefetch 分段计时，判断是带宽受限还是被串在关键路径上。
 3. **GMU 兑现**：在 `GMU=0.92` 下验证 KV 是否从 353k 涨到 ~400k。
+
+---
+
+# 附录（2026-09-17）：设备侧 profiler 分析 —— "为什么慢"的定论
+
+## 方法
+
+`msprof`（CANN 自带，不依赖 vLLM 的 profiler API）分别采集 **MC2** 与 **MoonEP slot** 两条路线，
+同一负载（N_SEQ=64、每卡 16、PROMPT_LEN=512、GEN=8、DP4=EP4、MBT=2048）。
+原始数据（8 个 rank 的完整 trace + `op_summary` CSV）：
+
+```
+/home/tmp/msprof/msprof_mc2/   2.1G
+/home/tmp/msprof/msprof_slot/  3.3G
+python3 scripts/moonep_dev/analyze_profile.py /home/tmp/msprof/msprof_mc2 /home/tmp/msprof/msprof_slot --top 12
+```
+
+## 设备时间总账
+
+| | MC2 | slot |
+|---|---|---|
+| 总设备时间 | **4.86 s** | **13.68 s**（2.8× ✗）|
+| 通信相关 | `MoeDistributeDispatchV3` 1.041s + `CombineV3` 0.432s = **1.473s（30.3%）** | `planning_kernel` 3.470s + `barrier_on_stream_kernel` 3.403s + `prefetch_weight_kernel` 1.716s + `combine` 1.161s + `dispatch` 0.604s |
+| MoE GEMM | `GroupedMatmulV5` 0.841s | 0.987s（同量级 ✓）|
+| attention 的 matmul | `MatMulV3` 0.639s | 0.664s（同量级 ✓）|
+
+**逐层折算**：MC2 融合通信 ≈ **120 µs/层**（85+35）；MoonEP 的真搬运 ≈ dispatch **48 µs** + combine **93 µs** + prefetch **69 µs** ≈ **210 µs/层**。
+
+## 两个方法论要点（都实测验证过）
+
+1. **含跨 rank 同步的算子，其 `Duration` 是"等到齐"的时间，不是算力成本** ✗。
+   `barrier_on_stream_kernel` 每层 4 次 × 68 µs = 272 µs，但用去栅栏补丁
+   （`ASCEND_MOONEP_PREFETCH_RELAXED=1`）实测：**去掉它反而慢 2.9 ms** ✗ ⇒ 那是
+   **slack**（等最慢 rank），不是可省的时间。`planning_kernel` 的 278 µs 同理含内部
+   `aclshmemx_barrier_all_vec` 的等待。
+2. **host 侧分段计时只能反映"入队"** ✗。我们此前所有 host 计时（`disp_lib` 0.12 ms、
+   `cross_rank_barrier` 1 µs、prefetch 0.49 ms…）都是入队时间；设备上的真实耗时是它们的
+   数倍 → 本轮多次误判都源于此。
+
+## 结论：慢在哪
+
+- **真成本**：MoonEP 的通信工作量约 210 µs/层（≈10 ms/步），MC2 的融合通信约 120 µs/层（≈5.8 ms/步）；
+- **更大的差**：**MC2 的通信与 GEMM 融合、互相掩盖**；MoonEP 是 planning → dispatch → GEMM → combine **串行**、无重叠 ⇒ 通信全部暴露 ⇒ 叠加起来正好是实测的 **+12~13 ms/步**；
+- **额外项**：`planning_kernel` 278 µs/层（跨 rank 直方图交换 + 逐行分配 + dup/槽位规划）在 MC2 路径里根本不存在（其调度在算子之外）。
+
+## 端到端（N_SEQ=256、每卡 64、MBT=8192、DP4=EP4）
+
+| 路线 | step_ms | TPOT | prefill tok/s |
+|---|---|---|---|
+| MC2 | **53.9** | 54.7 | **18,194** |
+| MoonEP owner | 66–67（+23% ✗）| 67.5 | 11,559（−36% ✗）|
+| MoonEP slot | 69.7（+29% ✗）| 70.0 | 12,886 |
+
+## 已被实测排除的方向（不要再走）
+
+| 方向 | 实测 |
+|---|---|
+| host 侧 Python 优化（预分配 scratch、env/几何缓存）| ≈1%（噪声级）✗ |
+| 旁路流并行（投机预取）| 死锁（库栅栏）✗；打补丁后 +23 ms/步 ✗ |
+| 持久化槽缓存 | 68% 命中、跳过 80% 调用，仍 **+9 ms/步** ✗（host 读比省下的 prefetch 贵 3 倍）✗ |
+| 去掉跨 rank 栅栏（relaxed）| **+2.9 ms** ✗ |
+| prefetch 本身 | 不在关键路径 ✗（砍掉 80% 调用 step 无变化）|
+
+## 下一步（按性价比）
+
+1. **`num_sms` / `MOONEP_NUM_SMS_DEDUP` 调参** —— 目标是 278 µs/层的 `planning_kernel`（默认 `num_sms=32`，对 Ascend950 偏少）；纯 env 改动，可能省 5–10 ms/步；
+2. **prefetch 缓存要兑现收益，必须让槽内容在步间持久** ⇒ 按层独立槽 chunk（每层 ~19 MB、48 层 ~900 MB），命中时无需拷贝也无需 host 读；代价是每层一份 `[epn+B]` 别名（+96 VMM 映射）；
+3. **重叠**（真正的大头）需库侧把 dispatch + GEMM + combine 融合，属大改。
