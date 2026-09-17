@@ -801,10 +801,19 @@ def _scratch_for(E: int, K: int, H: int, s_max: int, extra: int, device) -> dict
         return sc
     nvs = int(s_max) * int(K)
     nrows = int(E) + int(extra)
+    # cu_pad[0] is zero for the whole run (nothing ever writes index 0), so the
+    # per-group row counts come out of a single subtract -- counts[i] =
+    # cu_pad[i+1] - cu_pad[i] == cu[i] - cu[i-1] with the implicit cu[-1] = 0.
+    # That replaces the old `counts[0] = cu64[0]` scalar splice, which cost a
+    # kernel launch of its own every layer.
+    cu_pad = torch.zeros(nrows + 1, dtype=torch.int64, device=device)
     sc = {
-        "cu64": torch.empty(nrows, dtype=torch.int64, device=device),
+        "cu_pad": cu_pad,
         "counts": torch.empty(nrows, dtype=torch.int64, device=device),
         "own": torch.empty(int(E), dtype=torch.int64, device=device),
+        # Compatibility-only tokens_per_expert; see the note in token_dispatch.
+        # Zeroed once instead of rebuilt with histc every layer.
+        "tpe": torch.zeros(int(E), dtype=torch.int32, device=device),
         "w": torch.empty(nvs, dtype=torch.float32, device=device),
         "nrows": nrows,
         "nvs": nvs,
@@ -997,11 +1006,16 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         route_c[:T].copy_(topk_weights)
         topk_c[:T].copy_(topk_ids)
         _tp0 = time.perf_counter()
-        # histc instead of bincount: fixed-size output (no dynamic sizing round
-        # trip) -> ~40us vs ~100us of latency per layer. Counts here are
-        # integers <= S*K <= 8192, exact in float32.
-        tpe = torch.histc(
-            topk_c.to(torch.float32), bins=E, min=0, max=E - 1).to(torch.int32)
+        # tokens_per_expert is a compatibility argument, not an input: the
+        # library documents it as "retained for MoonEP API compatibility ... the
+        # kernel computes local expert counts from topk_flat and all-gathers
+        # them before balancing, so the compatibility tensor is validated but
+        # not consumed", and its _collect_inputs only checks shape/dtype. It
+        # used to cost a histc plus two casts every layer (the histc alone was
+        # ~40us of device time); now it is one zeroed buffer built once.
+        _pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
+        sc = _scratch_for(E, K, H, max(_pool), buffer._require_ctx()["B"], topk_c.device)
+        tpe = sc["tpe"]
 
         self._tstats("disp_pad", _t0, _tp0)
         self._tstats("disp_tpe", _tp0)
@@ -1026,14 +1040,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # zero term is why this is shifted: slicing per rank would be off by one
         # for rank 0). All three buffers are pre-allocated scratch: the old
         # cast+cat+sub+contiguous chain allocated four tensors per layer.
-        _pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
-        sc = _scratch_for(E, K, H, max(_pool), buffer._require_ctx()["B"], cu.device)
-        cu64 = sc["cu64"]
         counts = sc["counts"]
-        cu64[:cu.numel()].copy_(cu)
-        counts[0] = cu64[0]
-        if int(counts.numel()) > 1:
-            torch.sub(cu64[1:], cu64[:-1], out=counts[1:])
+        cu_pad = sc["cu_pad"]
+        n_cu = int(cu.numel())
+        cu_pad[1:n_cu + 1].copy_(cu)                 # int32 -> int64 cast
+        torch.sub(cu_pad[1:n_cu + 1], cu_pad[:n_cu], out=counts[:n_cu])
         own_counts = sc["own"]
         own_counts[:epn].copy_(counts[rank * epn:(rank + 1) * epn])
         own_counts = own_counts[:epn]
