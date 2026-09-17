@@ -1327,6 +1327,11 @@ _TEMPLATE = r"""<!DOCTYPE html>
   th, td { border-bottom: 1px solid var(--border); padding: 3px 12px 3px 0; text-align: right; }
   th:first-child, td:first-child { text-align: left; }
   th { color: var(--text-secondary); font-weight: 600; }
+  /* 两行表头的汇总表：第一行是「指标（单位）」分组，居中、字号略小；第二行才是各统计量。
+     列多时整表可以横向滚动，不撑破面板。 */
+  .gt thead tr:first-child th { text-align: center; font-size: 11.5px; }
+  .gt thead tr:first-child th:first-child { text-align: left; }
+  .tw { overflow-x: auto; }
   footer { margin-top: 48px; color: var(--text-muted); font-size: 12px; max-width: 110ch; }
   code { font-size: 12px; padding: 1px 5px; border-radius: 4px; white-space: nowrap;
          background: var(--surface-2, rgba(127,127,127,.12)); }
@@ -2256,11 +2261,13 @@ function renderPerRank(r) {
   const total = r.per_rank_mean.reduce((a, b) => a + (b || 0), 0);
   const busiest = Math.max(...finite(r.per_rank_mean), 1e-9);
   p.appendChild(collapsible("表", table(
-    ["rank", "所持逻辑专家", "步均值", "峰值步", "占全程", "相对最忙"],
+    ["rank", "所持逻辑专家", "步均值（token-专家对/步）", "峰值负载（token-专家对）",
+      "占全程（%）", "相对最忙（×）"],
     r.rank_ids.map((id, i) => [id, held[i], fmt(r.per_rank_mean[i]), fmt(r.per_rank_max[i]),
       (100 * r.per_rank_mean[i] / Math.max(1e-9, total)).toFixed(2) + "%",
       (r.per_rank_mean[i] / busiest).toFixed(3)]))));
   p.appendChild(div("caption",
+    "「峰值负载」= 该 rank 在最忙那一步的对数（不是步号），它 ÷ 步均值就是该 rank 的逐层 PAR 上界。" +
     "「相对最忙」= 该 rank 的步均值 ÷ 最忙 rank 的步均值：1.000 表示它就是瓶颈，" +
     "0.900 表示它比瓶颈少做 10%（这部分就是指望不上的算力）。" +
     (r.duplicated_experts
@@ -2327,6 +2334,28 @@ function richTable(headers, rows) {
   t.innerHTML = "<thead><tr>" + headers.map(h => `<th>${h}</th>`).join("") + "</tr></thead><tbody>" +
     rows.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("") + "</tbody>";
   return t;
+}
+
+/* 带分组的汇总表：第一行表头是「指标（单位）」，横跨该指标下的各统计量列。
+   列数因此可以到十几个而不至于读不出哪一列属于哪个指标——比在每列头上
+   重复写一遍单位更清楚。外面套一层可横向滚动的容器。 */
+function groupedTable(firstCol, groups, stats, rows) {
+  const t = document.createElement("table");
+  t.className = "gt";
+  t.innerHTML =
+    "<thead><tr><th rowspan=\"2\">" + firstCol + "</th>" +
+      groups.map(g => `<th colspan="${stats.length}">${g}</th>`).join("") +
+    "</tr><tr>" + groups.map(() => stats.map(s => `<th>${s}</th>`).join("")).join("") +
+    "</tr></thead><tbody>" +
+    rows.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("") +
+    "</tbody>";
+  return scrollWrap(t);
+}
+
+function scrollWrap(node) {
+  const w = div("tw");
+  w.appendChild(node);
+  return w;
 }
 
 /* 口径徽标：这一份 dump 的计数是按什么口径数的。它决定了后面每张图怎么读，
@@ -2450,7 +2479,7 @@ function renderSemantics(r) {
      ["② bench 对账",
       "<code>Σ对数 ÷ (topk × 层数)</code> 与 <code>Σ(prompt + output − 1)</code> 比" +
       (r.bench ? "：" + fmt(r.bench.actual, 0) + " vs " + fmt(r.bench.expected, 0) : ""),
-      r.bench ? ("差 " + fmt(r.bench.delta, 0)) : "–",
+      r.bench ? ("差 " + fmt(r.bench.delta, 0) + " 对（token-专家对）") : "–",
       benchCell],
      ["③ pad 记账",
       "打点侧在产生 pad 的那个 rank 上扣掉 (capacity − T) × topk，每批落盘后把累计值重写进 dump 末尾的汇总行" +
@@ -2482,7 +2511,7 @@ function renderSemantics(r) {
     if (rows.length > 1)
       rows.push(["<b>合计</b>", "<b>" + fmt(totalPads, 0) + "</b>",
         (totalSent + totalPads) > 0 ? "<b>" + (100 * totalPads / (totalSent + totalPads)).toFixed(2) + "%</b>" : "–"]);
-    p.appendChild(richTable(["rank", "扣除的 pad 对数", "占该 rank 计数的比例"], rows));
+    p.appendChild(richTable(["rank", "扣除的 pad 对数（token-专家对）", "占该 rank 计数（%）"], rows));
     p.appendChild(div("caption",
       "分母 = 该 rank 自己数过的对（已扣 pad 的真实计数 + 扣掉的 pad）。" +
       "pad 与真实 token 同量级时最容易看出：占比越高，说明这份数据里有多少是空转。"));
@@ -2519,6 +2548,9 @@ function renderParScopes(r) {
   p.appendChild(div("caption",
     `${r.name}：同一个负载量的三种加总口径，数值依次变小是正常的——口径越大，` +
     "层与层、步与步之间方向相反的倾斜抵消得越充分。" +
+    "PAR = 最忙 rank ÷ 平均 rank，是<b>比值、无单位</b>（1.000 表示完全均衡，上界 = rank 数）；" +
+    "均衡度 = 1/PAR，同为比值，可读作最忙那张卡的负载占满时的利用率。" +
+    "负载本身（各 rank 的对数）单位是 token-专家对。" +
     (RUNS.length > 1 ? "切换上方的运行按钮，这一块跟着换。" : "")));
   const base = Math.max(1e-9, ...scopes.map(s => (isFinite(s.value) ? s.value : 0)));
   const grid = div("scopes");
@@ -2673,7 +2705,7 @@ function renderExpertProfile(r) {
     /* 专家负载按「逻辑专家」记：副本算同一个专家。这里把持有它的 rank 都列出来，
        读者才能判断这个热点是不是已经摊在多个 rank 上。 */
     tableHost.appendChild(collapsible("表（前 40）", table(
-      ["专家", "持有 rank", "对数", "占该层", "相对均值", "判定"],
+      ["专家", "持有 rank", "对数（token-专家对）", "占该层（%）", "相对均值（×）", "判定"],
       order.slice(0, 40).map(i => {
         const rel = row[i] / Math.max(1e-9, m);
         return [i, holdersOf(i).replace(/^ · /, "") || "—", fmt(row[i]),
@@ -2836,39 +2868,56 @@ function renderPerf() {
   }
   if (has) {
     cards.appendChild(kpiCard(`${cur.name} · TTFT P50`, fmt(q.ttft_ms && q.ttft_ms.p50, 1) + " ms",
-      q.ttft_ms ? `P90 ${fmt(q.ttft_ms.p90, 1)} · 最大 ${fmt(q.ttft_ms.max)}` : "无数据",
+      q.ttft_ms ? `P90 ${fmt(q.ttft_ms.p90, 1)} · P99 ${fmt(q.ttft_ms.p99, 1)} · ` +
+        `均值 ${fmt(q.ttft_ms.mean, 1)} · 最大 ${fmt(q.ttft_ms.max, 1)}` : "无数据",
       "首 token 时延的中位数。它含排队时间：离线整批提交时，排后面的请求还没开始算就得先等。" +
-      "看 P90 而不是均值，才能看出排队把尾巴抬了多少。"));
+      "P90 / P99 / 最大 一起看排队把尾巴抬了多少，均值则被中间那批请求主导——" +
+      "两者差距越大，说明越少数的请求在拖后腿。"));
     cards.appendChild(kpiCard(`${cur.name} · TPOT P50`, q.tpot_ms ? fmt(q.tpot_ms.p50, 2) + " ms" : "–",
-      q.tpot_ms ? `P90 ${fmt(q.tpot_ms.p90, 2)} · 共 ${q.tpot_ms.n} 个请求` : "无数据",
+      q.tpot_ms ? `P90 ${fmt(q.tpot_ms.p90, 2)} · P99 ${fmt(q.tpot_ms.p99, 2)} · ` +
+        `均值 ${fmt(q.tpot_ms.mean, 2)} · 共 ${q.tpot_ms.n} 个请求` : "无数据",
       "每输出 token 时延的中位数，只算 decode 段，与 TTFT 无关。" +
-      "它直接反映 decode 一步一个 token 要多久——MoE 通信方式的好坏主要体现在这个数上。"));
+      "它直接反映 decode 一步一个 token 要多久——MoE 通信方式的好坏主要体现在这个数上。" +
+      "TPOT 各分位通常挨得很近，一旦 P99 明显高出，多半是某几步的 batch 组成变了。"));
     cards.appendChild(kpiCard(`${cur.name} · 端到端 P50`, q.e2e_ms ? fmt(q.e2e_ms.p50, 0) + " ms" : "–",
-      q.e2e_ms ? `P90 ${fmt(q.e2e_ms.p90, 0)} · 平均 ${fmt(q.e2e_ms.mean, 0)}` : "无数据",
+      q.e2e_ms ? `P90 ${fmt(q.e2e_ms.p90, 0)} · P99 ${fmt(q.e2e_ms.p99, 0)} · ` +
+        `均值 ${fmt(q.e2e_ms.mean, 0)}` : "无数据",
       "一个请求从进引擎到吐完最后一个字的总时长 = TTFT + decode 段。" +
       "它受输出长度影响极大（本批每请求 " + count(mean(perf.requests.map(r => r.output_tokens))) +
       " 个 token），所以跨运行比较时 TPOT 比它更干净。"));
   }
   if (perf) p.appendChild(cards);
 
-  // --- 各运行对比：吞吐表 + 时延分布 -------------------------------------- //
+  // --- 各运行对比：吞吐表 + 时延汇总表 + 时延分布 -------------------------- //
   {
-    const rows = runs.map(r => {
-      const rr = r.perf, rq = rr.quantiles;
+    const trows = runs.map(r => {
+      const rr = r.perf;
       return [r.name, count(rr.n_requests),
         fmt(rr.throughput.input_tok_s, 1), fmt(rr.throughput.output_tok_s, 1),
-        fmt(rr.throughput.req_s, 2), fmt(rr.generate_s, 1),
-        fmt(rq.ttft_ms && rq.ttft_ms.p50, 1), fmt(rq.ttft_ms && rq.ttft_ms.p90, 1),
-        fmt(rq.tpot_ms && rq.tpot_ms.p50, 2), fmt(rq.tpot_ms && rq.tpot_ms.p90, 2),
-        fmt(rq.e2e_ms && rq.e2e_ms.p50, 0)];
+        fmt(rr.throughput.req_s, 2), fmt(rr.generate_s, 1)];
     });
-    p.appendChild(collapsible("表：各运行整体对比（吞吐与分位）", table(
-      ["运行", "请求数", "输入 tok/s", "输出 tok/s", "req/s", "生成 s",
-        "TTFT P50", "TTFT P90", "TPOT P50", "TPOT P90", "端到端 P50"], rows), true));
+    p.appendChild(collapsible("表：各运行整体对比（吞吐）", table(
+      ["运行", "请求数（个）", "输入吞吐（tok/s）", "输出吞吐（tok/s）",
+       "请求速率（req/s）", "生成耗时（s）"], trows), true));
+    /* 时延汇总：三个量 × 四个统计量。P99 与均值此前只在逐请求明细里能自己算，
+       现在直接给出。单位写在分组表头里，不在每个数字后面重复。 */
+    const LAT = [["ttft_ms", 1], ["tpot_ms", 2], ["e2e_ms", 0]];
+    const lrows = runs.map(r => {
+      const rq = r.perf.quantiles;
+      return [r.name, ...LAT.flatMap(([key, digits]) => {
+        const s = rq[key];
+        return [fmt(s && s.p50, digits), fmt(s && s.p90, digits),
+          fmt(s && s.p99, digits), fmt(s && s.mean, digits)];
+      })];
+    });
+    p.appendChild(collapsible("表：各运行时延汇总（ms）", groupedTable(
+      "运行", ["TTFT (ms)", "TPOT (ms)", "端到端 (ms)"], ["P50", "P90", "P99", "均值"], lrows), true));
     p.appendChild(div("caption",
-      "换了通信方式只改通信，路由与 batch 组成不变，所以这一表就是性能对比的主表。" +
+      "换了通信方式只改通信，路由与 batch 组成不变，所以这两张表就是性能对比的主表。" +
       "相比吞吐，<b>TPOT</b> 最能分离出通信方式的影响：它只含 decode 段，" +
       "而这正是 MoE all-to-all / MC2 / MoonEP 每一步都要走的那一段。" +
+      "P50 → P99 的抬升幅度看的是尾延迟：离线整批提交时，排后面的请求要等前面算完，" +
+      "所以 TTFT 的尾巴天然比 TPOT 长。每个请求的原始值在下面的箱线图和逐请求明细表里。" +
       "注意各运行的每步 token 数与输出长度必须一致，否则这几列不可比。"));
     if (runs.some(r => r.perf.quantiles.ttft_ms)) {
       const grid = div("grid2");
@@ -2908,7 +2957,8 @@ function renderPerf() {
       "两个序列单位都是毫秒，所以可以放在同一根轴上；TPOT 通常在几十毫秒量级，" +
       "被 TTFT 压扁是正常的，读它的绝对值请用上面的磁贴或表。"));
     p.appendChild(collapsible("表：逐请求明细", table(
-      ["序号", "输入 token", "输出 token", "TTFT ms", "TPOT ms", "端到端 ms", "排队 ms", "prefill ms", "decode ms"],
+      ["序号", "输入 token（个）", "输出 token（个）", "TTFT（ms）", "TPOT（ms）",
+       "端到端（ms）", "排队（ms）", "prefill（ms）", "decode（ms）"],
       perf.requests.map(r => [r.idx, count(r.prompt_tokens), count(r.output_tokens),
         fmt(r.ttft_ms, 1), fmt(r.tpot_ms, 2), fmt(r.e2e_ms, 0),
         fmt(r.queue_ms, 1), fmt(r.prefill_ms, 1), fmt(r.decode_ms, 0)]))));
@@ -2931,13 +2981,16 @@ function renderComparison() {
   }
   p.appendChild(grid);
   p.appendChild(collapsible("表", table(
-    ["运行", "步数", "逐层 PAR 均值", "中位", "最大", "整步 PAR 均值", "最大", "每步 token"],
+    ["运行", "步数", "逐层 PAR 均值（×）", "中位（×）", "最大（×）",
+      "整步 PAR 均值（×）", "最大（×）", "每步 token（个）"],
     RUNS.map(r => {
       const a = quantiles(r.par_by_step), b = quantiles(r.par_agg);
       return [r.name, r.n_steps, fmt(a && mean(r.par_by_step), 3), fmt(a && a.med, 3), fmt(a && a.hi, 3),
         fmt(b && mean(r.par_agg), 3), fmt(b && b.hi, 3), fmt(mean(r.tokens_per_step), 0)];
     })), true));
   p.appendChild(div("caption",
+    "PAR 是「最忙 rank ÷ 平均 rank」，均衡度 = 1/PAR，两者都是比值、<b>没有单位</b>，" +
+    "1.000× 表示完全均衡、上界是 rank 数；表里「每步 token」的单位是个（一个 token 算一个）。" +
     "PAR 是路由的性质，不是集合通信的性质——在每步 token 数相同时，" +
     "各运行应当彼此接近。若差距明显大于此，问题出在 batch 组成上，" +
     "而不是通信方式上。"));
@@ -2945,7 +2998,9 @@ function renderComparison() {
 }
 
 function renderTables() {
-  const p = panel("数据", "图表所画的全部内容，完整列出。");
+  const p = panel("数据", "图表所画的全部内容，完整列出。" +
+    "单位：写着「token-专家对」的列都指同一件事——某个 token 在某一层被路由到某个专家一次" +
+    "（逐步表与每 rank 表的各 rank 列、逐层表的「对数」列都是它）；PAR 与占比是比值，无单位。");
   for (const r of RUNS) {
     const rows = [];
     for (let si = 0; si < r.n_steps; si++) {
@@ -2954,14 +3009,14 @@ function renderTables() {
         ...r.rank_step_load.map(col => fmt(col[si]))]);
     }
     p.appendChild(collapsible(`${r.name} — 逐步`,
-      table(["步", "通信方式", "token", "逐层 PAR", "整步 PAR",
+      table(["步", "通信方式", "token（个）", "逐层 PAR（×）", "整步 PAR（×）",
         ...r.rank_ids.map(id => "rank " + id)], rows)));
   }
   for (const r of RUNS) {
     const totals = r.rank_expert.map(row => row.reduce((a, b) => a + b, 0));
     const grand = totals.reduce((a, b) => a + b, 0);
     p.appendChild(collapsible(`${r.name} — 每 rank`, table(
-      ["rank", "对数", "占比", "步均值", "峰值步"],
+      ["rank", "对数（token-专家对）", "占比（%）", "步均值（token-专家对/步）", "峰值负载（token-专家对）"],
       r.rank_ids.map((id, i) => [id, fmt(totals[i]), (100 * totals[i] / Math.max(1e-9, grand)).toFixed(2) + "%",
         fmt(r.per_rank_mean[i]), fmt(r.per_rank_max[i])]))));
   }
@@ -2975,7 +3030,7 @@ function renderTables() {
         top.map(([v, g]) => `${g} (${(100 * v / Math.max(1e-9, total)).toFixed(1)}%)`).join(", ")]);
     }
     p.appendChild(collapsible(`${r.name} — 逐层`,
-      table(["层", "对数", "逐层 PAR 均值", "最热专家"], rows)));
+      table(["层", "对数（token-专家对）", "逐层 PAR 均值（×）", "最热专家（占比）"], rows)));
   }
   return p;
 }
