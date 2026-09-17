@@ -53,6 +53,88 @@ from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEFusedExpertsInput
 
 _slot_mode = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 
+# Persistent per-layer slot cache (FreeBalance-style "migrate once, reuse"):
+# each layer keeps the weights of its N most recently mirrored remote experts in
+# its own VMM chunk. A later step that mirrors the same expert into the same
+# layer serves it with a *local* copy instead of a remote GET. Measured plan
+# repeats make ~2/3 of the slot uses cacheable (docs/dev_results_2026-09-16.md).
+# Off by default: measured 2026-09-17, the cache reaches a 68% hit rate and
+# skips 80% of the prefetch launches, yet the step gets ~9 ms SLOWER -- the
+# per-layer host read of the plan row costs more than the prefetch it saves
+# (the prefetch is not on the critical path; the earlier 0.49 ms figure was
+# a sync-based measurement that included queue drain).
+MOONEP_SLOT_CACHE = int(os.environ.get("MOONEP_SLOT_CACHE", "0"))
+
+# MOONEP_PF_TIMING=1: device-synchronised timing of prefetch_projections (and of
+# the grouped GEMM that follows), so the speculative-prefetch work has a number
+# to beat. Measurement only: it serialises the step.
+_PF_TIMING: dict = {}
+
+
+def _pf_time(name: str, dt: float) -> None:
+    acc = _PF_TIMING.setdefault(name, [0.0, 0])
+    acc[0] += dt
+    acc[1] += 1
+
+
+def _pf_stats_init(dev):
+    if _PF.get("cnt") is None:
+        _PF["cnt"] = {k: torch.zeros((), dtype=torch.int64, device=dev)
+                      for k in ("layers", "spec_layers", "slots", "matched")}
+
+
+def _dump_early_pf_stats() -> None:
+    cnt = _PF.get("cnt")
+    if cnt is None:
+        return
+    try:
+        v = {k: int(t.item()) for k, t in cnt.items()}
+    except Exception:  # noqa: BLE001
+        return
+    slots = max(v["slots"], 1)
+    print(f"[early-pf-stats] layers={v['layers']} spec_layers={v['spec_layers']} "
+          f"slots={v['slots']} matched={v['matched']} "
+          f"match_rate={v['matched'] / slots:.3f}", flush=True)
+
+
+import atexit as _atexit_epf
+
+_atexit_epf.register(_dump_early_pf_stats)
+
+
+_SLOT_CACHE_STATS: dict = {}
+_PF_SKIPPED = [0]
+
+
+def _dump_slot_cache_stats() -> None:
+    """Sum the per-layer hit/miss counters once, at exit."""
+    if not _SLOT_CACHE_STATS:
+        return
+    hits = sum(v[0] for v in _SLOT_CACHE_STATS.values())
+    misses = sum(v[1] for v in _SLOT_CACHE_STATS.values())
+    tot = max(hits + misses, 1)
+    print(f"[slot-cache] layers={len(_SLOT_CACHE_STATS)} hits={hits} misses={misses} "
+          f"hit_rate={hits / tot:.3f} prefetch_skipped={_PF_SKIPPED[0]}", flush=True)
+
+
+import atexit as _atexit_sc
+
+_atexit_sc.register(_dump_slot_cache_stats)
+
+
+def _dump_pf_timing() -> None:
+    if not _PF_TIMING:
+        return
+    parts = ["[moonep-pf-timing]"]
+    for name, (tot, calls) in _PF_TIMING.items():
+        parts.append(f"{name}: calls={calls} total={tot:.3f}s avg={tot / max(calls, 1) * 1e3:.3f}ms")
+    print(" ".join(parts), flush=True)
+
+
+import atexit as _atexit_pf
+
+_atexit_pf.register(_dump_pf_timing)
+
 # Release the vllm weight tensors once the home mirror holds them (slot mode
 # computes against the [epn+B] alias, never against the vllm tensor). ~14.5 GB
 # for Qwen3-30B-A3B at EP=4. See _LayerWeightState.publish.
@@ -92,9 +174,20 @@ class _SharedSlots:
                     slot, _, _ = create_vmm_physical([B, rows, cols], torch.bfloat16, dev)
                     slot.zero_()
                     slots[name] = slot
+                # per-layer weight cache: one [L, N] chunk per projection, so the
+                # whole cache costs two VMM allocations rather than 2 per layer
+                n_layers = max(1, int(os.environ.get("MOONEP_SLOT_CACHE_LAYERS", "64")))
+                cache = {}
+                if MOONEP_SLOT_CACHE > 0:
+                    for name, (rows, cols) in (("w13", (H, 2 * F)), ("w2", (F, H))):
+                        c, _, _ = create_vmm_physical(
+                            [n_layers, MOONEP_SLOT_CACHE, rows, cols],
+                            torch.bfloat16, dev)
+                        c.zero_()
+                        cache[name] = c
                 # full [E+B] projections need home chunks; built per layer, so
                 # keep slot chunks here and let _LayerState build the fulls.
-                pool = {"slots": slots, "B": B}
+                pool = {"slots": slots, "cache": cache, "B": B}
                 cls._pools[key] = pool
         return pool
 
@@ -158,6 +251,13 @@ class _LayerWeightState:
         self._w2_src = w2
         self._published = False
         self._layer = layer
+        # persistent per-layer expert cache (FreeBalance-style reuse)
+        self.layer_index = 0
+        self.cache_w13 = shared["cache"].get("w13") if shared.get("cache") else None
+        self.cache_w2 = shared["cache"].get("w2") if shared.get("cache") else None
+        self.cache_experts = [-1] * max(MOONEP_SLOT_CACHE, 1)
+        self.cache_next = 0
+        self.cache_stats = [0, 0]      # [hits, misses] over used slots
         self._vmm_tensors = [self.home_w13, self.home_w2]
 
     def publish(self) -> None:
@@ -284,6 +384,187 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int) -> torch.Ten
 
 
 # ---------------------------------------------------------------------------
+# Early (speculative) prefetch: predict layer i's plan before its attention
+# ---------------------------------------------------------------------------
+# Measured (2026-09-16, GSM8K 256x64, EP4): `prefetch_projections` costs
+# 0.49 ms per layer of *device* time -- more than the grouped GEMM that follows
+# it (0.22 ms) -- because the MTE GET blocks its stream. Since a stream executes
+# in order, moving the prefetch earlier on the same stream saves nothing; the
+# transfer only overlaps the attention if it is issued on a *side* stream.
+#
+# The plan, however, is only known after this layer's dispatch... unless we
+# predict it: running this layer's own router on the *pre-attention* residual
+# (the previous layer's output) reproduces the planner's input histogram with
+# cosine 0.986, and feeding that predicted routing through the planning kernel
+# yields a plan whose slot->expert assignment matches the real one 80.5% of the
+# time (vs 69% for simply reusing the previous step's plan). See
+# docs/early_plan_prediction.html.
+#
+# So: in the decoder-layer pre-hook (i.e. while the attention is about to run)
+# we predict the routing, run the planning kernel on it, and issue the prefetch
+# on a side stream. When the real plan arrives after the dispatch, we re-prefetch
+# only the slots that differ (usually none) and the grouped GEMM waits on the
+# side stream's event.
+#
+# MOONEP_EARLY_PREFETCH=1 enables it; MOONEP_EARLY_PF_DEV=0 keeps the
+# speculative issue on the main stream (no overlap, for A/B).
+_EARLY_PF = os.environ.get("MOONEP_EARLY_PREFETCH", "0") == "1"
+_EARLY_PF_DEV = os.environ.get("MOONEP_EARLY_PF_DEV", "1") == "1"
+_PF: dict = {"pred": {}, "stream": None, "ev_spec": None, "ev_main": None, "main": None,
+             "done": False, "fail": 0, "spec": 0, "install_logged": False,
+             # predictor state: the *previous step's* real plan row per layer.
+             # It needs no collective and no router re-run -- measured to match
+             # the current plan 69% of the time (vs 80.5% for the router-based
+             # prediction, which required an extra planning-kernel call and that
+             # call desynchronised the library's cross-rank pacing => hang).
+             "cur_key": None, "last_rows": {}, "shell": {}, "pending": {},
+             "shell_idx": 0, "spec_plan": None,
+             # stats (device-side accumulation, read once at exit)
+             "cnt": None}
+
+
+def note_current_layer(key) -> None:
+    """Tell the runtime which layer is executing (set by the pre-hook)."""
+    if _EARLY_PF:
+        _PF["cur_key"] = key
+
+
+def stash_plan_row(row) -> None:
+    """Remember this layer's real slot->expert row (called from the dispatcher)."""
+    if not _EARLY_PF:
+        return
+    key = _PF.get("cur_key")
+    if key is not None:
+        _PF["last_rows"][key] = row.detach().clone()
+
+
+def _pf_shell_plan(buffer):
+    """A plan-shaped shell whose only meaningful field is experts_to_copy."""
+    cap = int(buffer._require_ctx()["S"])
+    shell = _PF["shell"].get(cap)
+    if shell is not None:
+        return shell
+    from ascend_moonep.planning import allocate_planning_outputs
+
+    plan, _cu = allocate_planning_outputs(buffer._require_ctx())
+    plans = [plan]
+    plan2, _cu2 = allocate_planning_outputs(buffer._require_ctx())
+    plans.append(plan2)
+    _PF["shell"][cap] = plans
+    return plans
+
+
+def take_predicted_plan(key):
+    """Pop the speculative plan stashed for this layer (or None)."""
+    if not _EARLY_PF:
+        return None
+    return _PF["pred"].pop(key, None)
+
+
+def finish_speculative_prefetch():
+    """Make the current stream wait for an in-flight speculative prefetch.
+
+    Must run before anything that touches the slot chunks (the repair prefetch
+    and the grouped GEMM).
+    """
+    if _PF.get("ev_spec") is None:
+        return False
+    import torch_npu
+
+    torch_npu.npu.current_stream().wait_event(_PF["ev_spec"])
+    _PF["ev_spec"] = None
+    return True
+
+
+def _pf_prefetch(buffer, state, plan):
+    buffer.prefetch_projections(plan=plan, projections=[state.full_w13, state.full_w2])
+
+
+def _pf_state_for(key):
+    from vllm_ascend.ops.fused_moe.moonep_comm import _MOONEP_RUNTIME
+
+    return getattr(_MOONEP_RUNTIME, "_state_by_w13", {}).get(key)
+
+
+def maybe_install_early_prefetch(model) -> None:
+    """MOONEP_EARLY_PREFETCH=1: predict the plan in the pre-attention hook and
+    issue the expert-weight prefetch on a side stream, so the 0.49 ms MTE
+    transfer overlaps this layer's attention instead of stalling the stream."""
+    if not _EARLY_PF or _PF["done"]:
+        return
+    try:
+        import torch_npu
+
+        from vllm_ascend.ops.fused_moe import moonep_comm as mc
+
+        layers = mc._early_layers(model)
+        if not layers:
+            print("[early-pf] no decoder layers found; disabled", flush=True)
+            return
+
+        def _hook(blk, args, kwargs):
+            try:
+                h = kwargs.get("hidden_states", args[1] if len(args) > 1 else None)
+                res = kwargs.get("residual", args[2] if len(args) > 2 else None)
+                if h is None:
+                    return None
+                if res is not None:
+                    h = h + res                      # pre-attention residual stream
+                experts = getattr(getattr(blk, "mlp", None), "experts", None)
+                if experts is None:
+                    return None
+                key = id(experts.w13_weight)
+                note_current_layer(key)              # the dispatcher stashes the real row
+                state = _pf_state_for(key)
+                if state is None:
+                    return None
+                row = _PF["last_rows"].get(key)
+                if row is None:                      # first step of this layer
+                    return None
+                from vllm.distributed.parallel_state import get_ep_group
+
+                T = int(h.shape[0])
+                buffer, _cap = mc._select_buffer_for_step(
+                    state.E, int(experts.top_k), state.H, T)
+                shells = _pf_shell_plan(buffer)
+                shell = shells[_PF["shell_idx"]]
+                _PF["shell_idx"] ^= 1                # never rewrite an in-flight plan
+                etc = shell.experts_to_copy
+                etc.fill_(-1)
+                etc[get_ep_group().rank_in_group] = row
+                _PF["spec_plan"] = shell
+                if _PF["main"] is None:
+                    _PF["main"] = torch_npu.npu.current_stream()
+                _PF["ev_main"] = _PF["main"].record_event()   # slots are safe after this
+                if _EARLY_PF_DEV:
+                    if _PF["stream"] is None:
+                        _PF["stream"] = torch_npu.npu.Stream()
+                    stream = _PF["stream"]
+                    stream.wait_event(_PF["ev_main"])
+                    with torch_npu.npu.stream(stream):
+                        _pf_prefetch(buffer, state, shell)
+                    _PF["ev_spec"] = stream.record_event()
+                else:
+                    _pf_prefetch(buffer, state, shell)
+                    _PF["ev_spec"] = None
+                _PF["spec"] += 1
+                _PF["pending"][key] = row
+            except Exception as exc:  # noqa: BLE001 - never break a step
+                _PF["fail"] += 1
+                if _PF["fail"] in (1, 50):
+                    print(f"[early-pf] speculative prefetch failed (#{_PF['fail']}): {exc}", flush=True)
+            return None
+
+        for blk in layers:
+            blk.register_forward_pre_hook(_hook, with_kwargs=True)
+        _PF["done"] = True
+        print(f"[early-pf] enabled on {len(layers)} decoder layers "
+              f"(side stream={int(_EARLY_PF_DEV)})", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[early-pf] install failed: {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Runtime forward: dispatch -> prefetch -> grouped GEMM on [epn+B] aliases
 # ---------------------------------------------------------------------------
 def run_slot_forward(
@@ -306,17 +587,117 @@ def run_slot_forward(
         capturing = False  # outside an engine forward context (harness use)
     if capturing:
         raise RuntimeError("MoonEP slot mode cannot run inside captured graphs.")
+    plan_use = plan
+    if _EARLY_PF:
+        try:
+            from vllm.distributed.parallel_state import get_ep_group
+
+            rank = get_ep_group().rank_in_group
+            # the row the speculative prefetch fetched (previous step's plan)
+            spec_row = _PF["pending"].pop(id(state._w13_src), None)
+            _pf_stats_init(plan.experts_to_copy.device)
+            cnt = _PF["cnt"]
+            cnt["layers"] += 1
+            if spec_row is not None:
+                cnt["spec_layers"] += 1
+                real_row = plan.experts_to_copy[rank]
+                same = spec_row == real_row
+                cnt["slots"] += real_row.numel()
+                cnt["matched"] += same.sum()
+                repair_row = torch.where(same, torch.full_like(real_row, -1), real_row)
+                etc = torch.full_like(plan.experts_to_copy, -1)
+                etc[rank] = repair_row
+                import dataclasses as _dc
+
+                plan_use = _dc.replace(plan, experts_to_copy=etc)
+        except Exception as exc:  # noqa: BLE001
+            _PF["fail"] += 1
+            if _PF["fail"] in (1, 50):
+                print(f"[early-pf] repair-plan build failed: {exc}", flush=True)
+            plan_use = plan
+        # anything that touches the slot chunks must wait for the side-stream GET
+        finish_speculative_prefetch()
+    _sync = os.environ.get("MOONEP_PF_TIMING", "0") == "1"
+    if _sync:
+        # measurement-only: the device time of the prefetch itself (the host-side
+        # timer under MOONEP_TIME_STATS only sees the launch)
+        torch.npu.synchronize()
+        _t_dev = time.perf_counter()
+    # --- persistent per-layer cache: serve repeats with a local copy ---
+    cache_plan = None
+    skip_prefetch = False
+    if MOONEP_SLOT_CACHE > 0 and state.cache_w13 is not None:
+        try:
+            from vllm.distributed.parallel_state import get_ep_group
+
+            rank = get_ep_group().rank_in_group
+            row = [int(v) for v in plan_use.experts_to_copy[rank].tolist()]
+            hits, misses = [], []
+            for i, e in enumerate(row):
+                if e < 0:
+                    continue
+                if e in state.cache_experts:
+                    hits.append((state.cache_experts.index(e), i))
+                else:
+                    misses.append((e, i))
+            state.cache_stats[0] += len(hits)
+            state.cache_stats[1] += len(misses)
+            _SLOT_CACHE_STATS[id(state)] = state.cache_stats
+            if hits:
+                masked = list(row)
+                for _, i in hits:
+                    masked[i] = -1          # the library skips -1 slots
+                etc = plan_use.experts_to_copy.clone()
+                etc[rank] = torch.tensor(masked, dtype=etc.dtype, device=etc.device)
+                import dataclasses as _dc
+
+                plan_use = _dc.replace(plan_use, experts_to_copy=etc)
+            cache_plan = (hits, misses)
+            # The prefetch's cost is dominated by its fixed part (kernel launch
+            # + two cross-rank barriers: ~0.38 ms of the measured 0.49 ms), not
+            # by the bytes, so masking hits out of the plan saves almost nothing
+            # -- the launch itself must be skipped. When this layer's cache
+            # covers every used slot, skip the whole call.
+            skip_prefetch = not misses
+        except Exception as exc:  # noqa: BLE001 - never break a step
+            _PF["fail"] += 1
+            if _PF["fail"] in (1, 50):
+                print(f"[slot-cache] skipped: {exc}", flush=True)
+            cache_plan = None
     _t_pf = time.perf_counter() if os.environ.get("MOONEP_TIME_STATS", "0") == "1" else None
-    buffer.prefetch_projections(
-        plan=plan,
-        projections=[state.full_w13, state.full_w2],
-    )
+    if skip_prefetch:
+        _PF_SKIPPED[0] += 1
+    else:
+        buffer.prefetch_projections(
+            plan=plan_use,
+            projections=[state.full_w13, state.full_w2],
+        )
+    if _sync:
+        torch.npu.synchronize()
+        _pf_time(name="prefetch", dt=time.perf_counter() - _t_dev)
     if _t_pf is not None:
         from vllm_ascend.ops.fused_moe.moonep_comm import _MOONEP_TSTATS
 
         acc = _MOONEP_TSTATS.setdefault("prefetch", [0.0, 0])
         acc[0] += time.perf_counter() - _t_pf
         acc[1] += 1
+    if cache_plan is not None:
+        # stream-ordered after the prefetch: hits come from this layer's cache
+        # (no remote GET), the fetched experts refill the cache for later steps
+        hits, misses = cache_plan
+        with torch.no_grad():
+            for j, i in hits:
+                state.slot_w13[i].copy_(state.cache_w13[state.layer_index, j])
+                state.slot_w2[i].copy_(state.cache_w2[state.layer_index, j])
+            for e, i in misses:
+                j = state.cache_next
+                state.cache_next = (j + 1) % max(MOONEP_SLOT_CACHE, 1)
+                state.cache_w13[state.layer_index, j].copy_(state.slot_w13[i])
+                state.cache_w2[state.layer_index, j].copy_(state.slot_w2[i])
+                state.cache_experts[j] = e
+    if _sync:
+        torch.npu.synchronize()
+        _t_gemm = time.perf_counter()
     swiglu_limit = fused_experts_input.swiglu_limit
     rows, _ = unquant_apply_mlp(
         hidden_states=hidden_trim,
@@ -328,6 +709,9 @@ def run_slot_forward(
         need_trans=False,
         swiglu_limit=swiglu_limit,
     )
+    if _sync:
+        torch.npu.synchronize()
+        _pf_time("gemm_after_prefetch", time.perf_counter() - _t_gemm)
     return rows
 
 

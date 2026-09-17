@@ -3831,9 +3831,19 @@ class NPUModelRunner(GPUModelRunner):
         # exists so every MoE layer is registered; construct the symmetric
         # Buffers and run the one collective ShmemRuntime init *before* any
         # forward (the UDMA path stalls if initialized lazily mid-forward).
-        from vllm_ascend.ops.fused_moe.moonep_comm import ensure_runtime_initialized
+        from vllm_ascend.ops.fused_moe.moonep_comm import (
+            ensure_runtime_initialized,
+            maybe_install_early_router_probe,
+        )
 
         ensure_runtime_initialized()
+        # MOONEP_EARLY_PLAN=1 (no-op otherwise): the early-plan speculation probe
+        maybe_install_early_router_probe(self.model)
+        # MOONEP_EARLY_PREFETCH=1 (no-op otherwise): predict the plan during
+        # attention and prefetch the mirrored experts on a side stream
+        from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_early_prefetch
+
+        maybe_install_early_prefetch(self.model)
 
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:

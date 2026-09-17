@@ -724,6 +724,8 @@ class Buffer:
         # cross_rank_barrier is a no-op and ignores the stream; only query it
         # when tracing (the call is far from free inside a running engine).
         stream = torch_npu.npu.current_stream().npu_stream if _TSTATS_ON or _TRACE_ON else None
+        _t = _time.perf_counter() if _TSTATS_ON else 0.0
+        _t = _ts("comb_hdr", _t)
         if not zero_copy:
             # master-style boundary copies into the shard (same stream).
             ctx['hidden_buf_local'].copy_(hidden_nvsh)
@@ -737,6 +739,7 @@ class Buffer:
         if inter_rank_sync:
             cross_rank_barrier(ctx, stream)
         # Prologue is folded into moonEP_combine (cf. dispatch_epilogue).
+        _t = _ts("comb_bufcopy", _t)
         ctx['kernels']['combine'].compute(
             ctx,
             hidden_sh,
@@ -744,6 +747,7 @@ class Buffer:
             output_sk=route_weights_sk,
             shmem_instance_id=0,
         )
+        _t = _ts("comb_kernel", _t)
 
     def _run_prefetch_weight_on_current_stream(
         self,

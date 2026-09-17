@@ -1,0 +1,51 @@
+diff --git a/csrc/ops/prefetch.cpp b/csrc/ops/prefetch.cpp
+index 13a224e..5ad8537 100644
+--- a/csrc/ops/prefetch.cpp
++++ b/csrc/ops/prefetch.cpp
+@@ -6,6 +6,8 @@
+ 
+ #include <torch_npu/csrc/core/npu/NPUStream.h>
+ 
++#include <cstdlib>
++
+ #include "shmem.h"
+ #include "ascend_moonep/kernels/launch.h"
+ #include "csrc/common/check.h"
+@@ -96,7 +98,25 @@ torch::Tensor LaunchPrefetch(
+     const int64_t block_dim = aicore_count;
+ 
+     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+-    aclshmemx_barrier_all_on_stream(stream);
++    // ASCEND_MOONEP_PREFETCH_RELAXED=1: skip the two cross-rank barriers so the
++    // caller may issue this op out of the main-stream order (e.g. on a side
++    // stream that overlaps an attention kernel). Safe for the inference use
++    // this op exists for:
++    //   * the source is the peer's *home* chunk, written once at init and never
++    //     modified afterwards, so a pre-barrier orders nothing that matters;
++    //   * the kernel's own MTE3_MTE2 event flags make every GET complete before
++    //     the kernel ends (see kernels/prefetch.cpp), so a post-barrier is not
++    //     needed for local visibility either -- the caller must order the
++    //     transfer against its own consumers, which is what we do with an event;
++    //   * every rank sets the same env, so the barrier generation sequence stays
++    //     consistent across the collective.
++    static const bool relaxed = []() {
++        const char* v = std::getenv("ASCEND_MOONEP_PREFETCH_RELAXED");
++        return v != nullptr && v[0] == '1';
++    }();
++    if (!relaxed) {
++        aclshmemx_barrier_all_on_stream(stream);
++    }
+     auto kernel = use_udma
+         ? prefetch_weight_kernel_udma_do
+         : prefetch_weight_kernel_do;
+@@ -110,7 +130,9 @@ torch::Tensor LaunchPrefetch(
+         Hp,
+         B,
+         block_dim);
+-    aclshmemx_barrier_all_on_stream(stream);
++    if (!relaxed) {
++        aclshmemx_barrier_all_on_stream(stream);
++    }
+     return prefetch_buffers;
+ }
+ 
