@@ -117,6 +117,41 @@ def _num_sms_dedup_from_env(max_sms: int) -> int:
     return value
 
 
+def _planning_num_sms(default: int, routes: int) -> int:
+    """Block count for the planning kernel alone.
+
+    Planning is almost pure fixed cost: one cross-rank ``barrier_all_vec`` plus
+    14 grid-wide ``SyncAll<true>``, and a grid sync gets dearer with every extra
+    block. Measured on 4 ranks, all 4 arriving together (isolated bench, NPU
+    events, host latency excluded):
+
+        routes (S*K)     128    512   2048   8192  32768  65536
+        8 blocks        48.7   52.6   54.3   61.1  111.5  188.3  us
+        32 blocks       58.3   60.5   61.6   63.7   71.7   85.8  us
+        56 blocks       67.1   72.5   72.4   74.4      -      -  us
+
+    So the narrow grid wins everywhere the engine actually runs decode
+    (64 tokens/rank -> 512 routes) and small prefill, by ~8 us/call, and loses
+    once the route count is large enough for the per-route stages to matter.
+    Dispatch / combine / prefetch deliberately keep the full ``num_sms``: they
+    are bandwidth-bound (prefetch measured 96% MTE2-busy) and want every block.
+
+    ``MOONEP_PLANNING_NUM_SMS`` overrides the choice outright.
+    """
+    raw = os.environ.get("MOONEP_PLANNING_NUM_SMS")
+    if raw:
+        value = int(raw)
+    elif routes <= 8192:
+        value = 8
+    else:
+        value = max(8, min(default, 32))
+    if not 8 <= value <= 56:
+        raise ValueError(
+            f"planning block dim must be in [8, 56], got {value} "
+            "(the planning kernel validates core_num)")
+    return value
+
+
 def _op_ws_bytes_from_env(default: int = OP_WS_BYTES_DEFAULT) -> int:
     """Per-op symmetric workspace bytes (tunable for benchmarks).
 
@@ -171,7 +206,9 @@ def _log_context_buffer_size(ctx: dict) -> None:
         f"R={ctx['R']}, S={ctx['S']}, H={ctx['H']}, E={ctx['E']}, "
         f"K={ctx['K']}, NvS={ctx['NvS']}",
         "  sm_count               : "
-        f"num_sms={ctx['num_sms']}, num_sms_dedup={ctx['num_sms_dedup']}",
+        f"num_sms={ctx['num_sms']}, "
+        f"planning_num_sms={ctx.get('planning_num_sms', ctx['num_sms'])}, "
+        f"num_sms_dedup={ctx['num_sms_dedup']}",
         f"  hidden_chunk           : {format_nbytes(hidden_chunk_bytes)}",
         f"  meta_vars              : {format_nbytes(meta_vars_bytes)}",
         f"  local_temp             : {format_nbytes(local_temp_bytes)}",
@@ -253,8 +290,11 @@ def _create_context(
         "planning requires 0 < S*K < int32_max: "
         f"S={S}, K={K}, S*K={N}, int32_max={int32_max}"
     )
+    # The planning workspace layout is derived from the planning block dim, so
+    # this must resolve before the sizing call and be reused by PlanningOp.
+    planning_num_sms = _planning_num_sms(num_sms, N)
     planning_local_elems, planning_symmetric_bytes = planning_workspace_sizes(
-        S, K, E, NvS, R, num_sms
+        S, K, E, NvS, R, planning_num_sms
     )
     # ================================================================
     # Allocate communication chunks as CANN VMM physical chunks (collective).
@@ -299,7 +339,8 @@ def _create_context(
     # ================================================================
     ws = _op_ws_bytes_from_env()
     kernels = {
-        'planning': PlanningOp(ws_bytes=planning_symmetric_bytes, num_sms=num_sms),
+        'planning': PlanningOp(ws_bytes=planning_symmetric_bytes,
+                               num_sms=planning_num_sms),
         'dispatch': DispatchOp(ws_bytes=ws, num_sms=num_sms),
         'combine': CombineOp(ws_bytes=ws, num_sms=num_sms),
         'prefetch': PrefetchOp(ws_bytes=0, num_sms=num_sms),
@@ -324,6 +365,7 @@ def _create_context(
         'B': B,
         'N': N, 'NvS': NvS,
         'num_sms': num_sms,
+        'planning_num_sms': planning_num_sms,
         'num_sms_dedup': num_sms_dedup,
         'device': device,
         '_udma_supported': udma_supported,
