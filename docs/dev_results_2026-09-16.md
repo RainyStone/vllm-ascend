@@ -260,3 +260,95 @@ WorkerProc initialization failed ... (启动即失败)
   **设备时间 −7% 是实打实的**，在抢卡/多租户场景下能多留余量；墙钟中性；
 - **不要再往这个方向投时间**：planning 的瓶颈是跨 rank 交换的延迟，要动就得动交换本身
   （减少交换的数据量/次数），不是加核。
+
+---
+
+# 附录三（2026-09-17）：planning 到底是什么受限 —— 同步，不是算力
+
+## 先纠正一个数字
+
+附录二里 `planning_kernel` 的 **278 µs/层**是 **profiler 口径**，不是真实成本。
+拆开来看：
+
+| 项 | 值 | 来源 |
+|---|---|---|
+| 引擎内 `planning_kernel` Duration | 278 µs/层（p50 257）| msprof |
+| ↳ 其中"等其它 rank 到达" | **~167 µs** | 见下"栅栏判定" |
+| ↳ 剩下（profiler 开销 + 入队）| 其余 | — |
+| **隔离测量的真实设备成本** | **~58 µs/层**（32 块）| `bench_planning.py` 的 `seq` |
+
+**`iso` vs `seq` 的区别很重要**：`iso` 是"发一次调用 + sync"，里面含着 host 入队延迟；
+`seq` 是"连发 N 次只 sync 一次"，host 早跑到前面去了，量到的是纯设备时间。
+同配置下 iso≈100 µs 而 seq≈58 µs ⇒ **~40 µs 是 host 入队，不是 kernel**。
+
+## 栅栏判定：四个算子的 end skew 都是常数
+
+取每次调用在 4 个 rank 上的 start/end 时刻：
+
+| kernel | start skew p50 | end skew 均值 / 标准差 |
+|---|---|---|
+| `moonep_dispatch_kernel` | 184.5 | **179.7 / 5.4** |
+| `moonep_combine_kernel` | 206.8 | **179.7 / 5.7** |
+| `barrier_on_stream_kernel` | 201.0 | **179.7 / 5.4** |
+| `planning_kernel` | 346.8 | **179.4 / 5.4** |
+
+四个算子的 end skew **mean≈max≈p90≈180 µs、标准差只有 5.4 µs** ⇒ 这不是"等待"，
+这是 **4 张卡的时钟基准差了一个常数 ~180 µs**。减掉它之后：
+
+| kernel | 真实 start skew | 真实 end skew |
+|---|---|---|
+| `dispatch` | **5 µs** | ~0 |
+| `barrier_on_stream` | 21 µs | ~0 |
+| `combine` | 27 µs | ~0 |
+| **`planning`** | **167 µs** | ~0 |
+
+⇒ **所有这些都是"结束对齐"的栅栏算子**，谁最后到谁决定大家什么时候走。
+planning 的 167 µs 就是**上一层尾部（attention + router）累积出来的 rank 间偏斜**，
+在 planning 的栅栏处被吸收掉了 —— 它不是 planning 的成本，是**系统的偏斜**。
+这也解释了为什么砍 planning 的 13% 设备时间对墙钟没影响。
+
+## 那 58 µs 里是什么
+
+**pipe 计数（msprof，`planning_kernel`）**：`aiv_time` 278 µs，但真正发射的只有
+`vec 7.3 + scalar 15.6 + mte2 3.4 + mte3 2.8 ≈ 29 µs` ⇒ **90% 在停等**。
+（对照 `prefetch_weight_kernel`：mte2 65.6 / aiv 68.0 = 96% 忙，说明这个口径可信。）
+
+**核数扫描**（R=4、E=128、K=8，隔离，单位 µs，`seq`）：
+
+| 块数 | N=128 | N=512 | N=2048 | N=8192 | N=32768 | N=65536 |
+|---|---|---|---|---|---|---|
+| **8** | **48.7** | **52.6** | **54.3** | **61.1** | 111.5 | 188.3 |
+| 32（库默认）| 58.3 | 60.5 | 61.6 | 63.7 | **71.7** | **85.8** |
+| 56 | 67.1 | 72.5 | 72.4 | 74.4 | 79.6 | 90.7 |
+
+⇒ 固定开销**随块数线性涨**（≈0.4 µs/块），路由数在 128→8192 之间只涨 12 µs。
+
+**E 扫描**（R=2、S=64、32 块，`seq`）：epn=32→50.1，64→51.5，128→55.6，256→54.7，512→74.6。
+分配迁移里那个 `(R+epn)·epn` 的**标量循环**是 O(epn²)，epn 涨 16 倍只多了 5 µs
+⇒ **它不是瓶颈**（若是，epn=512 该是 epn=32 的 256 倍代价量级）。
+
+**结论**：planning ≈ **40-45 µs 纯栅栏/收敛开销 + 十几 µs 实际工作**，
+对 S 和 E 都几乎不敏感，只对**块数**敏感。要再往下压，只能减少同步轮次
+（现结构：1 次跨卡 `barrier_all_vec` + **14 次 `SyncAll<true>`** + 19 处 SIMT 调用），
+属库侧重写，风险和收益（~1% 步时间）不成比例。
+
+## 本轮的改动（已提交 → dev）
+
+**给 planning 单独的（更窄的）块数**：`_planning_num_sms()` 按路由数选
+**N ≤ 8192 用 8 块**，否则 `min(num_sms, 32)`；dispatch/combine/prefetch **保持 32**
+（它们是带宽受限的，prefetch 实测 96% MTE2 忙）。
+decode 几何（{R=4, E=128, K=8, S=64}）下 **60.5 → 52.6 µs（−13%）**。
+`MOONEP_PLANNING_NUM_SMS` 可覆盖。
+
+正确性：`test/mte/test_planning.py --ep-size 2 --num-tokens 64 --num-topk 8`
+的 balanced/skewed/duplicate/random 四例在 8 块路径上**全部通过** CPU 黄金参考比对。
+
+## 一个必须记住的坑
+
+`sys.path[0]` 是 **cwd**，而 `/home/ascend-moonep/ascend_moonep/` 本身就是一个包目录
+⇒ **在 `/home/ascend-moonep` 目录下跑测试，导入的是外部仓库的那份 Python 层，
+不是 `third_party/ascend_moonep/` 里改了的那份**（两份 api.py 相差 90 行，inode 不同）。
+引擎从 `/home/tmp` 起跑，导入的才是 third_party 那份。
+**验证改动是否生效的第一步永远是打印 `ascend_moonep.api.__file__`。**
+（`ascend_moonep` 还有 editable install 的 meta-path finder 指到 `/home/ascend-moonep`，
+但它是 `append` 到 `sys.meta_path`，所以 cwd/PYTHONPATH 仍然优先。）
