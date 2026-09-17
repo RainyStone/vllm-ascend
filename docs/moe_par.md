@@ -306,6 +306,82 @@ step=0 layer=0 method=MC2CommImpl counts=[12,0,45,...]
 同一步内所有层共用一个方式。只要开了 `--moonep` 就认为「这次跑的是 MoonEP」是不对的，
 要看 dump 里的 `method=` 或报告里的「通信方式」列。
 
+#### 这个 `method=` 是怎么选出来的
+
+一句话：**每个 forward step 开始时决定一次，判据是该步的 token 数加一组静态配置**；同一步内所有
+MoE 层共用同一种方式，与层号无关（所以按 `(step, layer)` 打标签是成立的）。
+
+选型链路（`ascend_forward_context.py:99-104`，建立 forward context 时）：
+
+| 步骤 | 代码 | 说明 |
+|---|---|---|
+| ① 取本步 token 数 | `max_num_tokens = num_tokens_across_dp.max()`（`:99`） | 取 **DP 组内各 rank 的最大值**，好让整个 EP 组选出同一种方式（否则集合通信会错配）；没有 DP 时就用本 rank 的 `num_tokens` |
+| ② 选类型 | `select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)`（`:100`，定义在 `:335`） | 返回一个 `MoECommType`（或 `None`） |
+| ③ 取实现 | `get_moe_comm_method(moe_comm_type)`（`:101`，定义在 `moe_comm_method.py:51`） | 从注册表取**单例**；注册发生在 `setup_moe_comm_method`（`moe_comm_method.py:55`），在建 MoE 层时调用一次（`AscendMoERunner.__init__`，`fused_moe.py:440`），逐 step 只是选哪个 |
+| ④ 记进 dump | `moe_par_stats.record(..., type(_EXTRA_CTX.moe_comm_method).__name__)`（`fused_moe.py:716`） | 记的就是**这一步实际用的那个**，与 ② 的选择一一对应 |
+
+注册表里有什么（`moe_comm_method.py:55-68`）：`ep_size > 1` 时注册 all-to-all / all-gather / MC2 / fused-MC2，
+开了 `enable_moonep` 再注册 MoonEP (SHMEM)；`ep_size == 1` 时**只注册 all-gather**。
+
+判定顺序（`select_moe_comm_method`，`ascend_forward_context.py:335-411`）：
+
+```text
+select_moe_comm_method(num_tokens)
+│
+├─ 1. 不是 MoE 模型 ───────────────────────────────→ None
+│
+├─ 2. MoonEP 覆盖（插在最前，优先级最高）：
+│     enable_moonep 且 enable_expert_parallel
+│     且 ep_group.world_size > 1
+│     且 SHMEM 容量 S 已建好
+│     且 num_tokens <= S ─────────────────────────→ SHMEM（MoonEP）
+│
+├─ 3. 没开 EP，或 ep_group.world_size == 1 ───────→ ALLGATHER
+│
+└─ 4. 按芯片分派（soc_version）：
+      ├─ A2：每卡专家数 <= 24 且 ep >= 16
+      │      且 num_tokens <= mc2容量 ────────────→ MC2
+      │      否则 ─────────────────────────────────→ ALLGATHER
+      │
+      ├─ A3：num_tokens <= mc2容量
+      │       ├─ enable_fused_mc2==1 且 ep <= 32 ─→ FUSED_MC2
+      │       ├─ enable_fused_mc2==2 且草稿模型走
+      │       │   dispatch_gmm_combine_decode、
+      │       │   且量化是 w8a8_dynamic ───────────→ FUSED_MC2
+      │       └─ 否则 ────────────────────────────→ MC2
+      │      否则（大 batch / prefill）
+      │       ├─ enable_fused_mc2==1 且 ep <= 32 ─→ FUSED_MC2
+      │       └─ 否则 ────────────────────────────→ ALLTOALL
+      │
+      ├─ A5：num_tokens <= mc2容量 且 world_size > 1 → MC2
+      │      否则 world_size <= num_experts_per_tok → ALLGATHER
+      │      否则 ──────────────────────────────────→ ALLTOALL
+      │
+      └─ 310P ──────────────────────────────────────→ ALLGATHER
+```
+
+MoonEP 是**插在最前面的覆盖**：只要条件成立就选它，连 A3 上的 fused-MC2 也排在它后面。
+
+两个容量是两码事，分界就靠它们：
+
+| 容量 | 谁设 | 值 | 作用 |
+|---|---|---|---|
+| **MoonEP 容量 `S`** | `set_moonep_tokens_capacity`（`:232`），在 model_runner 初始化时无条件调用（`worker/model_runner_v1.py:502`，v2 在 `worker/v2/model_runner.py:130`） | `max_num_batched_tokens`，有 cudagraph capture 时取其上限的较大者 | 对称内存的每 rank 静态容量。**调度器一步永远不会超过 `max_num_batched_tokens`，所以只要第 2 步其余条件成立，整轮每一步都走 MoonEP**（dump 里每一行都是 `MoonEPCommImpl`，不会 MC2、MoonEP 交替出现） |
+| **MC2 容量** | `set_mc2_tokens_capacity`（`:204`），同样在 model_runner 初始化时（`model_runner_v1.py:501`） | 开 `enable_prefill_mc2` 时取 `max_num_batched_tokens`，否则取 cudagraph capture 上限，再否则 `max_num_reqs × uniform_decode_query_len`；按 TP 上取整后**截到 512/rank**，最后 `× tp_size` | 判「这一步的 token 数放不放得进 MC2 融合算子」 |
+
+**本机是 A5**（Ascend950PR；`get_ascend_device_type()` 按 `soc_version == 260` 判定，`utils.py:857`），
+所以本机不开 moonep 时走的是上表的 A5 分支；A2 / A3 / 310P 的规则不同，换机器别照搬。
+
+对读报告的意义：
+
+- **「这次跑的是不是 MoonEP」只能看 dump 的 `method=` 或报告的「通信方式」列，不能看命令行**：
+  开了 `--moonep` 但没开 EP、或 EP 只有 1 个 rank 时，第 2 步不成立，会**静默退回**芯片默认规则，
+  dump 里一行 `MoonEPCommImpl` 都不会有；
+- 一次运行里出现多种 `method=` 是正常的（不开 moonep 的一次实跑里同时出现过
+  `AllGatherCommImpl` 与 `MC2CommImpl`，逐 step 交替）；报告按 step 列出通信方式，三种 PAR 口径也按 step 分组；
+- **负载口径跟着 `method=` 走**：只有 MoonEP 的计数含容量 pad、只有 MoonEP 的 dump 是
+  `counts_scope=global`，其余都是接收侧本地槽位口径（见下一节）。
+
 ### 负载口径：数的是什么
 
 **先把口径定死**，后面所有数字都按它读（报告最上方的「口径与统计」面板会把这三条再讲一遍）：
@@ -654,6 +730,10 @@ MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间�
    所以要 `VLLM_WORKER_MULTIPROC_METHOD=spawn`（`scripts/moe_par_bench.py` 已默认）或用
    `--flush-every 1` 把窗口压到最小。这个坑的表现是「dump 看起来正常、数值也自洽，只是总量比 bench 少
    百分之几」，不查对账不容易发现。
+10. **开了 `--moonep` 不等于这次走的就是 MoonEP**：通信方式是逐 step 选的（见 §6「这个 `method=`
+    是怎么选出来的」），条件不满足时会静默退回芯片默认规则（本机 A5 是 MC2 / all-to-all / all-gather）。
+    判断依据只有 dump 的 `method=` 或报告的「通信方式」列；命令行开关和 `bench.json` 里的配置项
+    （`config.moonep` 等）只说明**要求了什么**，不说明**实际走了什么**。
 
 ---
 

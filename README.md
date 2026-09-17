@@ -97,6 +97,36 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 \
 
 `MOONEP_SLOT_STATS=1` 会在进程退出时打印：dispatch 总次数、发生槽平衡的次数、槽内行数、预取的远程专家槽数。
 
+### MoE 负载采集与峰均比报告（离线）
+
+同一套负载参数跑多次、每次只换通信方式，再离线对比各 rank 的负载分布与峰均比（PAR）。
+**打点只数本 rank 的量、不做任何额外集合通信**，跨 rank 的聚合全在离线脚本里做；不需要开 EPLB。
+
+```bash
+cd scripts
+# ① 第 1 次运行：不开 moonep（EP 打开时走 MC2 / all-gather）
+python moe_par_bench.py --tp 2 --batch-size 16 --max-num-batched-tokens 512 \
+    --max-tokens 256 --num-prompts 100 --tag tp2-ep-b16-bt512-o256
+#   结束时会打印 dump 目录、每份 dump 的行数/步数，以及可直接复制的出报告命令
+#   dump 默认落在 scripts/moe_par_stats/<tag>/，每 rank 一个文件
+
+# ② 第 2 次运行：同样的负载参数，只换通信方式（MoonEP / SHMEM）
+ASCEND_RT_VISIBLE_DEVICES=6,7 python moe_par_bench.py --tp 2 --batch-size 16 \
+    --max-num-batched-tokens 512 --max-tokens 256 --num-prompts 100 \
+    --moonep --tag tp2-ep-b16-bt512-o256-moonep
+
+# ③ 出报告（可 --run 多份 dump 对比，名字随便起）
+python analyze_moe_par.py --run mc2=moe_par_stats/tp2-ep-b16-bt512-o256 \
+    --run moonep=moe_par_stats/tp2-ep-b16-bt512-o256-moonep \
+    -o /tmp/moe_par_report.html
+#   产出单个自包含中文 HTML（CSS/JS/数据全内联，无 CDN），可直接双击打开或整份发出去
+```
+
+报告回答四个问题：负载口径是什么、PAR 有多大、token 在专家上的分布、token/专家在 rank 上的分布；
+顶部有「口径与统计 · 先读这里」面板和逐层/整步/全程三种 PAR 口径的统计表。
+打点开关是 `VLLM_ASCEND_MOE_PAR_*` 四个环境变量，`moe_par_bench.py` 已按参数代管，一般不用手设。
+**完整用法、dump 格式、报告图表清单、已知边界见 [`docs/moe_par.md`](docs/moe_par.md)。**
+
 ## 性能优化点与收益（dispatch/combine host 段，2026-09-10/11）
 
 **一句话**：dp2ep2（1024 seq × 256 prompt、MTE）从 **4684 → ~6300–6800 tok/s**（同窗口 A/B **+45%**），
