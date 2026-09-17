@@ -199,6 +199,64 @@ python3 scripts/moonep_dev/analyze_profile.py /home/tmp/msprof/msprof_mc2 /home/
 
 ## 下一步（按性价比）
 
-1. **`num_sms` / `MOONEP_NUM_SMS_DEDUP` 调参** —— 目标是 278 µs/层的 `planning_kernel`（默认 `num_sms=32`，对 Ascend950 偏少）；纯 env 改动，可能省 5–10 ms/步；
+1. ~~**`num_sms` 调参**~~ —— **已做完，结论是死路**（见 §附录二）；
 2. **prefetch 缓存要兑现收益，必须让槽内容在步间持久** ⇒ 按层独立槽 chunk（每层 ~19 MB、48 层 ~900 MB），命中时无需拷贝也无需 host 读；代价是每层一份 `[epn+B]` 别名（+96 VMM 映射）；
 3. **重叠**（真正的大头）需库侧把 dispatch + GEMM + combine 融合，属大改。
+
+---
+
+# 附录二（2026-09-17）：`num_sms` 扫描 —— planning_kernel 是延迟受限，不是算力受限
+
+## 硬约束（先撞到的）
+
+```
+RuntimeError: planning core_num must be in [8, 56], got 64
+WorkerProc initialization failed ... (启动即失败)
+```
+
+`num_sms=64 / 128` 两条腿**引擎起不来**（不是跑得慢，是 init 抛异常）。
+`planning_workspace_sizes()` → `local_workspace_elements(..., core_num)` 里做的校验：
+**planning 的核数上限就是 56**。库默认 `num_sms=32`（`api.py:211`），所以合法区间只有 `[8,56]`。
+
+## 设备侧：确实加速了
+
+同样 config（N_SEQ=64、每卡 16、PROMPT_LEN=512、GEN=8、MBT=2048、DP4=EP4），
+只用 `MOONEP_NUM_SMS=56` 换个环境变量，`msprof` 逐 kernel 对比：
+
+| kernel | num_sms=32 | num_sms=56 | Δ |
+|---|---|---|---|
+| `planning_kernel` | **278.0 µs/层** | **242.4 µs/层** | **−12.8%** ✓ |
+| `moonep_dispatch_kernel` | 48.4 µs/层 | 38.7 µs/层 | −20.0% ✓ |
+| `moonep_combine_kernel` | 93.0 µs/层 | 80.6 µs/层 | −13.3% ✓ |
+| `barrier_on_stream_kernel` | 68.2 µs/次 | 62.6 µs/次 | −8.2% |
+| `prefetch_weight_kernel` | 68.8 µs/次 | 68.7 µs/次 | 0 ✗ |
+| `GroupedMatmulV5` | 0.987 s | 0.987 s | 0（不受影响，预期内）|
+| **总设备时间** | **13.68 s** | **12.69 s** | **−7.2%** ✓ |
+
+## 端到端：白干
+
+| num_sms | step_mean (ms) | TPOT p50 | 相对默认 |
+|---|---|---|---|
+| 32（库默认）| 71.87 | 72.11 | — |
+| 40 | 71.72 | 71.98 | −0.2% |
+| 48 | 73.51 | 73.78 | **+2.3%** ✗ |
+| 56 | 71.33 | 71.57 | −0.8% |
+
+四条腿落在 **71.3–73.5 ms**，即今日噪声带宽 ~±1.5%（今晨 slot 基线是 69.7 ms，
+同 config 两天差 3% ⇒ 环境漂移比信号大）⇒ **墙钟上没有可信收益** ✓。
+
+## 为什么"设备省了 1 s、墙钟不动"
+
+- 用 Amdahl 估：纯算力受限时 56 核相对 32 核最多 1.75×，实测只有 **1.13×**
+  ⇒ planning 的 **~2/3 是固定延迟**（跨 rank 直方图交换 + 内部 `aclshmemx_barrier_all_vec`），
+  不是并行度不够；
+- 而它省下的那部分，**正好被栅栏的等待时间吃掉**：`barrier_on_stream_kernel`
+  自己从 68.2 → 62.6 µs/次（每层 4 次）⇒ 最长 rank 早到，其余 rank 就多等一会儿；
+- ⇒ 这个旋钮的天花板是 278 µs 里的 13% ≈ 36 µs/层 ≈ 1.7 ms/步，实测兑现 **0.5 ms**（其余是 slack）。
+
+## 处置
+
+- `MOONEP_NUM_SMS` 保留为 env 旋钮（默认不设 = 32，与库一致）：
+  **设备时间 −7% 是实打实的**，在抢卡/多租户场景下能多留余量；墙钟中性；
+- **不要再往这个方向投时间**：planning 的瓶颈是跨 rank 交换的延迟，要动就得动交换本身
+  （减少交换的数据量/次数），不是加核。
