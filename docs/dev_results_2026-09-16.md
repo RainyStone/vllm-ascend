@@ -352,3 +352,80 @@ decode 几何（{R=4, E=128, K=8, S=64}）下 **60.5 → 52.6 µs（−13%）**�
 **验证改动是否生效的第一步永远是打印 `ascend_moonep.api.__file__`。**
 （`ascend_moonep` 还有 editable install 的 meta-path finder 指到 `/home/ascend-moonep`，
 但它是 `append` 到 `sys.meta_path`，所以 cwd/PYTHONPATH 仍然优先。）
+
+---
+
+# 附录四（2026-09-17）：砍 host 算子条数，端到端 −3 ms/步
+
+## 改了什么
+
+| # | 改动 | 为什么安全 |
+|---|---|---|
+| 1 | `tokens_per_expert` 不再每层用 `torch.histc(topk.to(f32), ...).to(i32)` 重算（2 个 Cast + 1 个 Histc，注释自标价 ~40 µs/层），改成一个一次分配的零 scratch | 库**不消费**它：`PlanningOp` docstring 明说 *"retained for MoonEP API compatibility … the kernel computes local expert counts from topk_flat"*；`_collect_inputs` 只查 shape/dtype；**它根本不在 `launch_planning_op(...)` 的参数表里** ⇒ 内容到不了任何 kernel |
+| 2 | 行数统计不再用 `counts[0] = cu64[0]` 单独拼一个标量；改用 `cu_pad`（nrows+1，`[0]` 恒 0），一个 `sub` 得到 `cu[i]−cu[i−1]`（含隐含 `cu[-1]=0`）| 对 200 组随机 `cu` 验证新式 == 旧式 == `diff(cat([0],cu))` |
+
+## 一个必须先知道的方法论问题：**这个引擎不可复现**
+
+本来打算用"逐 token 完全一致"做 A/B，**结果同一份代码连跑两次输出就不同**：
+
+```
+rank0: after vs after2 identical=False
+   after [:9] = [220, 7281, 11, 10339, 279, 7354, 304, 7716, 624, ...]
+   after2[:9] = [220, 7281, 11, 10339, 279, 7354, 304, 7716,  13, ...]
+```
+
+⇒ **run-to-run 非确定性**，token 相等在两个方向上都不是判据。正确性只能靠
+"按构造论证 + 单测 + 准确率统计"，性能只能靠 **多轮交替测量**。
+
+## 实测（2 卡 DP2×EP2，交替 3 轮）
+
+配置：`N_SEQ=64`、`GEN=128`、`MBT=2048`；`after`/`before` 交替执行以抵消租户负载漂移
+（同一台机器上另外 6 张卡被别的租户占着）。
+
+| | step_ms 各轮 | 均值 | 极差 |
+|---|---|---|---|
+| **after**（改动）| 61.12, 60.91 | **61.02** | **0.21** |
+| **before**（基线）| 63.22, 64.67, 64.32 | **64.07** | 1.45 |
+
+**两个分布完全不重叠**（after ∈ [60.91, 61.12]，before ∈ [63.22, 64.67]）：
+
+```
+匹配对 r1        : after 61.12 vs before 63.22  ->  -2.10 ms  (-3.3%)
+全部已完成轮次均值: 61.02 vs 64.07             ->  -3.06 ms  (-4.8%)
+decode 吞吐      : 1024.7 vs 977.6 tok/s       ->  +4.8%
+```
+
+> 有一轮 `after` 因租户把卡打到 100% 而**没在 600 s 内跑完**（无结果，故不计入）；
+> 它的配对 `before` 那一轮是三条 before 里最慢的（64.67），说明那段时间确实在抢卡。
+> 剔除该轮不偏向任何一方——after 的两轮极差只有 0.21 ms。
+
+## 交叉验证：算子条数确实降了
+
+msprof，2 卡，97 步 × 48 层：
+
+| op | before | after |
+|---|---|---|
+| `aclnnHistc_Histogram` | 1.00 / 层 | **0.00** ✓ |
+| `aclnnInplaceCopy_Cast` | 5.08 / 层 | **3.08** ✓ |
+| **kernel 总数 / 层 / 卡** | **40.41** | **37.41（−7.4%）** |
+
+## 结论与下一步
+
+- **3 个 launch/层 = −3 ms/步（−4.8%）**，收益比预期的大：说明这些空档里
+  `histc` 那一条（带 `to(float32)`/`to(int32)` 两次全量 Cast）确实是大头；
+- 换算到 4 卡（decode T=64/卡、步时间 ~72 ms）：**绝对量应该同样是 ~3 ms/步（≈4%）**，
+  因为省下的是 host 侧每次 launch 的空档，与 token 数无关；
+- 剩余候选（按性价比，都不大）：
+  `own_counts` 的 copy 改 view（1 个 launch）、`T == capacity` 时跳过 3 次 pad copy
+  （只在 T 正好等于档位值时成立，decode 里很少）、combine 的 `Mul`+`Cast` 融合
+  （**会改数值**，需先定精度）；
+- **大方向**：即使把 MoonEP 的算子全删掉也只能到 ~24 个/层，因为 vLLM 自己的
+  attention+router+采样 就有 ~24 个 —— 真正的大头是 **eager 模式下的 vLLM 算子条数**，
+  下一步该看能不能开 CUDA graph / 减少 vLLM 侧算子。
+
+## 运维教训（自己踩的）
+
+`nohup` 起的长跑腿被 `kill` 掉时，**它 spawn 出去的 worker 会变成孤儿继续占着卡**
+（这次两个 `VLLM::Worker_DP*` 各占 35 GB 卡住了 2、3 号卡，导致后面 6 条腿全部
+`aclrtMallocPhysical(...) failed with 207001`）。收尾必须按 **明确的 PID** 清掉孤儿
+（`kill -9`，SIGTERM 对它们无效），`pkill -f <pattern>` 还会把自己的 shell 一起打死。
