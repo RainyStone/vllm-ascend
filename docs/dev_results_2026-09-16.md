@@ -573,3 +573,38 @@ MoE GEMM 只有 93 µs、attention 的 FIA 只有 15 µs —— **通信路径�
 在单流串行的前提下这就是 10.2 ms/步的实打实工作量。
 两者矛盾，**旧的"不在关键路径"结论需要用当下的 slot 模式重测**（当时那两次实验分别是
 slot-cache 与 early-prefetch 的上下文，可能不可比）。
+
+## ⚠️ 附录六的重要修正：这个 run 的 context 只有 81 个 token
+
+**attention 只占 1% 不是统计错误，是负载太短。**
+
+benchmark 自己的账本（`/tmp/bench_dp2ep2_msprof_slot_g8_b256.json`）：
+`prefill_tokens=4676`、`n_seq=64` ⇒ **每个 prompt 73 个 token**（GSM8K 题面本来就 ~73 token，
+`PROMPT_LEN=512` 只是个上限，根本没截到）；再加 `GEN=8` ⇒ **decode 全程 context ≤ 81 token**。
+FIA 的 shape 也对上：query `16,32,128`、KV 是分页 cache、写入 token 数 16 量级。
+
+**KV 读取随 context 线性增长，而 MoE 路径不随 context 变**（它只跟 batch×K 有关）。
+Qwen3-30B-A3B 每 token 每层 KV = 2×4(kv heads)×128×2B = **2048 B**：
+
+| context | KV 读/层 | 推算 attention | vs MoE四件套 1113 µs |
+|---|---|---|---|
+| **81**（本 run）| 2.7 MB | **15 µs**（实测 14.8 ✓）| **~0%** |
+| 512 | 16.8 MB | 95 µs | 3% |
+| 2048 | 67.1 MB | 379 µs | 12% |
+| 8192 | 268 MB | 1517 µs | 48% |
+| 32768 | 1.07 GB | 6066 µs | 193% |
+
+（按实测点 2.7 MB → 14.8 µs 定标，即 ~177 GB/s 有效带宽；线性外推是粗略的，
+小尺寸时是开销受限、大尺寸时应好于线性，所以这里给的是上界量级。）
+
+**⇒ 结论的适用范围必须限定**：
+
+1. 附录六的"MoE 通信占 82%"**只对短 context（≤ 数百 token）成立**；
+2. context 到 2K 时 attention 已经不可忽略，8K 时与整条 MoE 路径同量级，32K 时反过来碾压；
+3. 因此 **"MoonEP 比 MC2 慢 29%"这个结论也要按 context 打折** —— MoE 路径的开销是
+   与 context 无关的常数，context 越长它在总时间里的占比越小；
+4. **本 run 的 `gen=8` 也偏小**：整个 profiling 只覆盖了 512 个 decode token（8×64），
+   ITL 只有 ~100 ms 量级，样本很少。
+
+**下一步该做**：用**真实长度的 context**（比如 2K / 8K）重跑一遍这个负载表，
+才能得到生产形态下的瓶颈归属。当前这张表只能回答"短 context 下谁是大头"。
