@@ -765,3 +765,73 @@ GSM8K 题面根本没到），加 `GEN=8` ⇒ **decode 全程 context ≤ 81**�
 
 > 口径提醒：本 leg 每卡 4 序列（T=4），ctx2046 那轮是 8 序列（T=8），
 > 所以 **MoE 部分不可直接比**（batch 不同）；attention 的 per-call 值可直接比。
+
+---
+
+# 附录九（2026-09-18）：PREFILL 的负载 —— 大头是 attention，不是 MoE
+
+附录八只分析了 decode。prefill 完全是另一幅图。
+
+## 方法：固定 chunk 大小，只改累积 context
+
+两个 run 都开了 chunked prefill（`MBT=8192`），因此**每层处理的 token 数都是 8192**
+（`MoeGatingTopK` 的 Input Shape 第一段 = 8192）。两个 run 的区别只在**已累积的 context**：
+
+| run | prompt | prefill chunk | T=8192 的层样本 |
+|---|---|---|---|
+| ctx2046 | 2046 | 8192（多个序列打包）| 384（每卡 96）|
+| ctx20460 | 20460 | 8192（单条长序列的第 1..3 段）| 2304（每卡 576）|
+
+⇒ **同一 chunk 大小、不同 KV 长度**，正好隔离出"context 对 prefill 的影响"。
+
+## 每层每卡（中位数，µs）
+
+| | ctx2046 | ctx20460 | 倍数 | 占比46 | 占比20k |
+|---|---|---|---|---|---|
+| **① MoE 四件套** | 3817.1 | 3873.6 | **1.01×** | 34% | 26% |
+| ↳ dispatch | 1652.4 | 1560.5 | 0.94× | 15% | 11% |
+| ↳ combine | 1823.7 | 1773.4 | 0.97× | 16% | 12% |
+| ↳ prefetch | 112.9 | 218.5 | 1.94× | 1% | 1% |
+| ↳ planning | 96.7 | 120.4 | 1.24× | 1% | 1% |
+| ↳ barrier ×4 | 123.4 | 115.1 | 0.93× | 1% | 1% |
+| **② MoE GEMM** | 2199.6 | 2109.1 | 0.96× | 20% | 14% |
+| **③ attention** | **740.8** | **4479.3** | **6.05×** | **7%** | **31%** |
+| ④ 投影/归一化/rope | 1394.3 | 1395.3 | 1.00× | 13% | 10% |
+| ⑥ 拷贝/搬运 | 2220.6 | 2207.1 | 0.99× | 20% | 15% |
+| ⑧ 其它 | 692.7 | 700.6 | 1.01× | 6% | 5% |
+| **全部** | **11091.2** | **14625.6** | **1.32×** | 100% | 100% |
+
+## 结论
+
+**1）prefill 的最大单项是 attention，不是 MoE 通信。**
+
+```
+ctx20460 prefill 每层 14626 µs
+  = attention 4479 (31%)  +  MoE四件套 3874 (26%)  +  拷贝 2207 (15%)
+  + MoE GEMM 2109 (14%)   +  投影/rope 1395 (10%)  +  其它 700 (5%)
+```
+
+⇒ **和 decode 正好相反**（decode 里 MoE 四件套 75%、attention 14%）。
+
+**2）attention 在 prefill 里随 context 是 ~线性增长（6.05× / 10×），不是 decode 里的 √context。**
+理由很直接：prefill 的 attention 计算量 ∝ `q_len × kv_len`，而 `kv_len` 就等于已累积的
+context；decode 里 `q_len=1` 且受带宽/开销摊薄，所以呈 √。
+
+**3）MoE 路径在 prefill 里完全不随 context 变（1.01×）** ✓ —— 它只跟 chunk 大小（token 数）有关。
+
+**4）prefill 里 MoE 的主要成本是 dispatch + combine（合计 3334 µs = 23%），
+两个都是真搬运**（此前测过 issue 94% / 62% 忙）；planning/barrier/prefetch 加起来只有 3%。
+
+**5）拷贝/搬运类（Cast/TensorMove/Contiguous/…）占 15%**，是 prefill 里第三大的组。
+
+## 折成每步（×48）与 TTFT 自洽性
+
+| | ctx2046 | ctx20460 |
+|---|---|---|
+| 每步（8192 token/chunk）| 532 ms | **702 ms** |
+| ↳ attention | 36 ms (7%) | **215 ms (31%)** |
+| ↳ MoE 四件套 | 183 ms | 186 ms |
+
+ctx20460 的 prompt 20460 token ÷ 8192 = 3 个 chunk，每卡 4 序列 ⇒ 约 10 个 prefill step
+× 702 ms ≈ **7.0 s**；而实测 `ttft_ms` p50 = **4.64 s**（请求在不同 step 完成，中位数约 7 步）
+⇒ **与逐层账自洽** ✓
