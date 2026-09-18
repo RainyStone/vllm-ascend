@@ -81,14 +81,17 @@ if moe_par_stats.enabled():
 ## 3. 快速开始
 
 前置条件：跑测试的 shell 里已经具备运行环境（`ASCEND_RT_VISIBLE_DEVICES` 选好卡、
-`PYTHONPATH`、`ASCEND_MOONEP_BUILD_DIR`、`LD_LIBRARY_PATH` 等）。本机这些变量写在**仓库外**的
-`../scripts/init_env.sh`（即 `/home/x00893896/vllm_ascend_moonep_integration/scripts/init_env.sh`），
-先 `source` 它。如果选卡是可见设备的真子集，注意 [跨仓修复记录](cross_repo_fixes.md) 里
-「一份 Python 层要放在 `PYTHONPATH` 最前」那条。
+`PYTHONPATH`、`ASCEND_MOONEP_BUILD_DIR`、`LD_LIBRARY_PATH` 等）。**入口就是本仓 `scripts/` 下的
+驱动脚本**（`moe_par_bench.py` / `bench_long.py` / `moe_ab_test.py`，内部是离线 `vllm.LLM(...)`）；
+仓库外 `../scripts/` 下的服务化脚本（`start_prefill.sh`）**当前跑不起来，不作为入口**。
+最小环境（少一项就起不来，见 [跨仓修复记录](cross_repo_fixes.md)）：
 
 ```bash
 cd /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep
-source ../scripts/init_env.sh
+REPO=$PWD
+WS=/home/x00893896/vllm_ascend_moonep_integration
+export PYTHONPATH=$REPO/third_party/ascend_moonep:$REPO:$PYTHONPATH   # 必须 :$PYTHONPATH 追加
+export ASCEND_MOONEP_BUILD_DIR=$WS/ascend-moonep/ascend_moonep
 
 # ① 第 1 次运行：MC2（EP 打开、不开 moonep）
 python scripts/moe_par_bench.py \
@@ -510,9 +513,8 @@ tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计�
 **为什么非要这样：`atexit` 在 fork 出来的 worker 里不会执行。** `multiprocessing` 的 fork 子进程
 结束时走 `os._exit()`，绕过所有 atexit 钩子（spawn 子进程会正常执行，已用最小样例实测对照）。
 后果是 dump 会缺两样东西：末行汇总，以及**最后不足 `flush_every` 步的整批数据**——因为那批还没落盘。
-本工程的环境脚本（`init_env.sh` / `start_prefill.sh`）本来就把
-`VLLM_WORKER_MULTIPROC_METHOD=spawn` 写在环境里，`scripts/moe_par_bench.py` 也**默认替调用方设成
-`spawn`**（用 `setdefault`，环境里显式的选择优先）；如果环境里是别的值，脚本会在 stderr 打一条警告，
+`scripts/moe_par_bench.py` **默认替调用方设成 `spawn`**（用 `setdefault`，环境里显式的选择优先）；
+如果环境里是别的值，脚本会在 stderr 打一条警告，
 说明这份 dump 会缺最后不足 `flush_every` 步、对账自查会报出来。
 
 分析器对一个没有收尾行的 dump 不会把「扣了多少 pad」「有几步不完整」当成 0，而是明确写
