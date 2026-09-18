@@ -429,3 +429,72 @@ msprof，2 卡，97 步 × 48 层：
 （这次两个 `VLLM::Worker_DP*` 各占 35 GB 卡住了 2、3 号卡，导致后面 6 条腿全部
 `aclrtMallocPhysical(...) failed with 207001`）。收尾必须按 **明确的 PID** 清掉孤儿
 （`kill -9`，SIGTERM 对它们无效），`pkill -f <pattern>` 还会把自己的 shell 一起打死。
+
+---
+
+# 附录五（2026-09-18）：四个算子在 prefill / decode 的负载归属
+
+数据源：`/home/tmp/msprof/msprof_slot`（4 卡 DP4×EP4、N_SEQ=64、PROMPT_LEN=512、GEN=8、MBT=2048）。
+按**每层的 token 数 T** 分层——取自 `aclnnMoeGatingTopK` 的 Input Shape（`T,128`），
+这是 prefill/decode 最干净的判据。
+
+`Duration` 是 profiler 的算子墙钟（**含跨 rank 栅栏的等待**），
+`issue` = `aiv_vec + aiv_scalar + aiv_mte2 + aiv_mte3`，即**真正发射的指令时间**。
+
+## 逐层（µs，4 卡平均）
+
+| | planning | dispatch | combine | prefetch | 四件套 | issue 占比 |
+|---|---|---|---|---|---|---|
+| **PREFILL**（T≥254，576 层）Duration | **436.7** | 230.3 | 395.2 | 96.6 | 1158.8 | |
+| ↳ issue | 55.0 | **217.4** | **245.6** | 82.1 | 600.1 | **52%** |
+| ↳ issue/Duration | 13% | **94%** | **62%** | 85% | | |
+| **DECODE**（T=16，本 run 主区间，960 层）Duration | **441.3** | 52.3 | 55.9 | 106.2 | 655.6 | |
+| ↳ issue | 35.6 | 12.4 | 8.7 | **106.4** | 163.1 | **25%** |
+| ↳ issue/Duration | **8%** | 24% | 16% | **100%** | | |
+| DECODE（T=1，10272 层）Duration | 254.8 | 38.1 | 82.1 | 61.7 | 436.7 | |
+| ↳ issue | 25.6 | 7.3 | 7.5 | 59.2 | 99.6 | 23% |
+
+## 折成每步（48 层）
+
+| | planning | dispatch | combine | prefetch | MoE 合计 | 其中真活 |
+|---|---|---|---|---|---|---|
+| PREFILL（T=2048） | 21.0 | 11.1 | 19.0 | 4.6 | **55.6 ms** | 28.8 ms |
+| DECODE（T=16） | 21.2 | 2.5 | 2.7 | 5.1 | **31.5 ms** | **7.8 ms** |
+
+## 结论：bottleneck 分两层，答案不一样
+
+**1）按"占用关键路径的时间"（Duration）——两边都是 `planning`**
+
+decode 441 µs/层（占 MoE 四件套的 67%）、prefill 437 µs/层（38%）。
+**但它 87–92% 是等待**：真实发射只有 35.6 µs（decode）/ 55.0 µs（prefill）。
+那 400 µs 是**其它 rank 还没到**——见附录三：图层间的偏斜在 planning 的跨卡栅栏处被吸收。
+⇒ 让 planning 更快解决不了它（已验证：砍 13% 设备时间、墙钟零变化）。
+
+**2）按"真正把设备干满"（issue）——两条路线完全不同**
+
+| | 真瓶颈 | 依据 |
+|---|---|---|
+| **PREFILL** | **dispatch + combine** | issue 217 / 246 µs/层，分别 94% / 62% 忙；这是真正的数据搬运 |
+| **DECODE** | **prefetch** | issue **106.4 µs/层、100% 忙**——四个算子里唯一"没有任何余量"的；其余三个加起来才 56.7 µs |
+
+**3）注意这跟"谁在关键路径上"是两回事**
+
+prefetch 在 decode 里 100% 满负荷（106 µs/层），但此前实测**砍掉 80% 的调用步时间不变**
+⇒ 它虽然满忙，却**可以被重叠掉**（它的等待是被别的等待盖住的）。
+反过来 dispatch/combine 在 decode 里只忙 12/9 µs，却是"发射即阻塞"的串行环节。
+
+**4）总量口径**
+
+decode 时 MoE 四件套占 **31.5 ms/步**的 Duration，其中真活只有 **7.8 ms** ⇒
+**23.7 ms/步（75%）是等待**（跨 rank 栅栏 + 等 host 发射）。
+prefill 时 55.6 ms/步里真活 28.8 ms（52%）。
+
+⇒ 想把 decode 的步时间打下来，**继续压 planning 的 Duration 是无效的**（它本来就是"别人的时间"）；
+有效的是两条：(a) 消掉那 23.7 ms 的等待（栅栏结构 / host 发射），(b) 把 prefetch 那 5.1 ms 真活重叠掉。
+
+## 口径提醒
+
+- `Duration` 含跨 rank 栅栏等待，**不能当算力成本**（附录三已证）；
+- 这是 profiled 数据，msprof 会放大 host 空档；
+- T=1 那 10272 层是低批区间（214 步），不代表正常 decode，故单列；
+- 4 卡、每卡 16 条序列，生产配置（N_SEQ=256 / 每卡 64）下各值都会更大。
