@@ -124,6 +124,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Steps buffered on device between host copies. Larger means fewer CPU-NPU
     # syncs and coarser durability. Must be >= 1.
     "VLLM_ASCEND_MOE_PAR_FLUSH_EVERY": lambda: int(os.getenv("VLLM_ASCEND_MOE_PAR_FLUSH_EVERY", "16")),
+    # MoonEP slot/balance mode: keep hot experts' rows local and prefetch the
+    # remote weight rows into B SHMEM slots (see ops/fused_moe/moonep_balance.py).
+    # Default off — MoonEP then runs owner-only dispatch. Requires MOONEP_B ==
+    # E/R and --enforce-eager (the MoonEP collective kernels cannot be captured).
+    "MOONEP_SLOT_MODE": lambda: bool(int(os.getenv("MOONEP_SLOT_MODE", "0"))),
+    # Number of prefetch slots; defaults to E/R (the library plan requires B == E/R,
+    # other values are rejected).
+    "MOONEP_B": lambda: os.getenv("MOONEP_B", None),
+    # Quantized payloads (W4A8MXFP: uint8 NZ weights + e8m0 scales) in slot mode.
+    # "0" restores the pre-quant POC scope — a quantized model then raises instead
+    # of mirroring 4 payloads, so a launch config can be bisected without touching
+    # MOONEP_SLOT_MODE.
+    "MOONEP_SLOT_QUANT": lambda: bool(int(os.getenv("MOONEP_SLOT_QUANT", "1"))),
 }
 
 # end-env-vars-definition

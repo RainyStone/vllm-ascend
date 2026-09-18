@@ -361,10 +361,12 @@ class _MoonEPRuntime:
                 if layer is None or id(layer) in seen:
                     continue
                 seen.add(id(layer))
-                w13 = layer.w13_weight
-                F = int(w13.shape[2]) // 2
+                # F（每分区的 ffn 维）改由 _LayerWeightState 按权重布局自己推并做校验，
+                # 布局知识只留一处：量化后 w13 是 [epn, H/2, 2F]、w2 是 [epn, F/2, H]
+                # （process_weights_after_loading 的 npu_format_cast + transpose(1,2)），
+                # 两边的 scale 又各自不同，散落推导迟早会错。
                 states.append(
-                    _LayerWeightState(layer, int(e["E"]), int(e["H"]), F, rank, dev))
+                    _LayerWeightState(layer, int(e["E"]), int(e["H"]), rank, dev))
             self._states = states
             self._state_by_w13 = {id(st._w13_src): st for st in states}
 
@@ -813,9 +815,9 @@ class MoonEPCommImpl(MoECommMethod):
                 state=meta.state,
                 buffer=meta.buffer,
                 plan=meta.plan,
-                hidden_trim=disp.hidden_states,
-                group_list=meta.group_list,
+                token_dispatch_output=disp,
                 fused_experts_input=fused_experts_input,
+                use_fusion_ops=self.use_fusion_ops,
             )
             routed_out = self.token_dispatcher.token_combine(mlp_rows, meta)
         finally:

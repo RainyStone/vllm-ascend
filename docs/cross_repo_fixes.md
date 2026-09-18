@@ -16,7 +16,8 @@ vllm-ascend `releases/v0.23.0`（本仓为其 fork）、vllm v0.23.0、ascend-mo
 ├── vllm-ascend/          # 上游 vllm-ascend，releases/v0.23.0（供对照）
 ├── vllm_ascend_moonep/   # 本仓（分支 moonep），内含子模块 csrc/third_party/catlass
 ├── ascend-moonep/        # gitcode jayhua/ascend-moonep（urma_dev），内含子模块 3rdparty/shmem
-└── scripts/              # 本仓外部：init_env.sh / start_prefill.sh（环境变量与拉起脚本）
+└── scripts/              # 本仓外部：服务化脚本，当前跑不起来、不作为入口
+                          # （跑测入口是 vllm_ascend_moonep/scripts/ 下的驱动脚本）
 ```
 
 ## 索引
@@ -232,7 +233,7 @@ vendored 那份的同一个调用在 518 行，而且外面有 id 是否相等�
 **解法 A（运行期，推荐；路径已存在，端到端尚待验证）**
 
 把 vendored 层放在 `PYTHONPATH` 最前，并用 `ASCEND_MOONEP_BUILD_DIR` 指到外部构建目录取
-`_C*.so` 与 `lib/*.so`（`../scripts/init_env.sh` 就是这么设的）：
+`_C*.so` 与 `lib/*.so`（本仓 `scripts/` 下的驱动脚本就是这么跑的）：
 
 ```bash
 export PYTHONPATH=<repo>/third_party/ascend_moonep:$PYTHONPATH
@@ -293,7 +294,8 @@ def pad_and_split_input_ids(self, input_ids):
 
 **约束（拉起这类模型时的前置条件）**
 
-- `MOONEP_SLOT_MODE` 必须为 **0**：slot 模式不支持量化模型；
+- `MOONEP_SLOT_MODE` 可开（W4A8MXFP 已打通到单层产品路径 bit-identical，端到端待 EP≥8 空卡；
+  见 [moonep_slot_quant.md](moonep_slot_quant.md)）；
 - 关闭 dynamic EPLB / mix_placement；
 - token 数 ≤ `max_num_batched_tokens` 时走 SHMEM，超出会回落到 MC2 / all-to-all
   （所以 `method=` 列里可能混着出现，见 [moe_par.md](moe_par.md) 第 6 节）；

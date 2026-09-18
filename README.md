@@ -15,7 +15,7 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
 | 模式 | 说明 | 启用 |
 |---|---|---|
 | **owner**（默认） | token 行按“专家属主”经 SHMEM 对称内存分发/归约，替换 HCCL MC2/all2all | `MOONEP=1`（引擎侧 additional config `enable_moonep`） |
-| **slot / 平衡**（MindSpeed 风格） | 额外启用“冗余专家”预取槽：过热专家的行留在本地算，权重行 RDMA 预取进 B=epn 槽，负载均衡 | `MOONEP_SLOT_MODE=1`（需 bf16 无量化模型） |
+| **slot / 平衡**（MindSpeed 风格） | 额外启用“冗余专家”预取槽：过热专家的行留在本地算，权重行 RDMA 预取进 B=epn 槽，负载均衡 | `MOONEP_SLOT_MODE=1`（bf16；W4A8MXFP 量化需 EP≥8，见 [moonep_slot_quant.md](docs/moonep_slot_quant.md)） |
 
 两种模式共用同一通信内核；slot 模式增加对称权重镜像（home）+ 槽 + `[epn+B]` 别名 GEMM。
 
@@ -205,7 +205,8 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
-| `MOONEP_SLOT_MODE=1` | slot/冗余专家平衡模式（仅 bf16 无量化） |
+| `MOONEP_SLOT_MODE=1` | slot/冗余专家平衡模式（bf16；W4A8MXFP 见 [moonep_slot_quant.md](docs/moonep_slot_quant.md)） |
+| `MOONEP_SLOT_QUANT=1` | slot 模式接受量化 payload（默认 1）；置 0 则量化层在 slot 模式显式报错（回滚开关） |
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
@@ -245,8 +246,9 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 3. **planning 要求 B == E/R**；GPU 原版“推理用小 B”在 Ascend 移植库上暂不支持。
 4. **超容量/倾斜**：owner 模式在极端路由倾斜下可能丢行（见模块注释的容量包络）；
    计划中增加 `plan.remote_stats` 保护（越界自动回退原生 comm）。
-5. 仅 bf16 无量化、无 dynamic EPLB/mix、tp=1..N 均可（EP 跨 TP 组）；需 `--enforce-eager`
-   （MoonEP 集体内核不能进 CUDA 图）。
+5. 量化只支持 W4A8MXFP（DeepSeek-V4 布局）且 slot 模式要求 **EP≥8**（显存账见
+   [moonep_slot_quant.md](docs/moonep_slot_quant.md) §3）；无 dynamic EPLB/mix、tp=1..N 均可
+   （EP 跨 TP 组）；需 `--enforce-eager`（MoonEP 集体内核不能进 CUDA 图）。
 6. **性能仍低于原生 MC2**（dp2ep2 下 MTE 约为 MC2 的 0.69，URMA 约 0.52；两者相对差距
    与 tp2 拓扑一致，说明瓶颈是每层 dispatch 的 host 段 + 无重叠，与拓扑无关）。已削掉的
    host 段见上文"性能优化点"；剩余大头是逐层 `.item()` 同步 + planning/dispatch 核的设备

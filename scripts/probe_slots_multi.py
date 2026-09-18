@@ -115,8 +115,8 @@ def main():
               f"(B={B})", flush=True)
         mlp_rows = run_slot_forward(
             state=meta.state, buffer=meta.buffer, plan=meta.plan,
-            hidden_trim=disp.hidden_states, group_list=meta.group_list,
-            fused_experts_input=fei)
+            token_dispatch_output=disp, fused_experts_input=fei,
+            use_fusion_ops=False)
         torch.npu.synchronize()
         out = dispatcher.token_combine(mlp_rows, meta)
         torch.npu.synchronize()
