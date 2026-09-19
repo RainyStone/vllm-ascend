@@ -191,6 +191,95 @@ def main():
 而本次 slot 在 T=69 只有 1.01 —— 相差 20 倍，口径可能根本不同。<b>这个矛盾决定了 MoonEP
 到底有没有适用场景，应先查清再决定投入。</b></li>
 </ol>
+
+<h3>④ 为什么 MoonEP 是"线性"：dispatch/combine 的搬运粒度</h3>
+
+<p><b>现状：每条 route 一次 put，每次搬一整行 H。</b> 外层循环遍历的是 route
+（<code>token_id = i/K</code>, <code>topk_id = i%K</code>），内层每条 route 发一次：</p>
+
+<pre style="background:#f7f7f7;padding:10px;font-size:12.5px;overflow-x:auto">uint64_t hidden_off_bytes = loff * H * sizeof(HiddenT);   // 对方对称内存里该 route 的槽
+aclshmemx_mte_put_nbi(
+    hidden_symmetric + hidden_off_bytes,   // 目标 VA（aclshmem_ptr 拿到的对端地址）
+    hidden_sh + token_id * H,              // 源：本地该 token 的 hidden 行
+    row_elements,                          // = H 个元素（Qwen3: 2048 bf16 = 4 KB）
+    dest_rank, event_id);</pre>
+
+<table>
+<tr><th></th><th>一次搬多少</th><th>每层每卡次数</th><th>每步（48 层）</th></tr>
+<tr><td><b>MoonEP dispatch</b></td><td><b>4 KB</b>（1 行）</td><td><b>T×K</b>（T=4416 → 35,328）</td><td><b>~170 万次</b></td></tr>
+<tr><td><b>all-gather</b></td><td>数 MB（连续大块）</td><td>~67</td><td>~3,200 次</td></tr>
+</table>
+<p class="note">⇒ <b>报文数差约 500 倍</b>。这就是 all-gather 次线性（T 涨 64×、耗时涨 8.7×）
+而 MoonEP 接近线性（19.7×）的根源：同样的字节量，一个走大块、一个走小包。</p>
+
+<p><b>为什么必须是小包？</b> 因为发往同一个 dest 的行在源端 <code>hidden_sh</code> 里是
+<b>散落的</b>（hidden 按 token 顺序排，而每个 token 的 K 条 route 各去不同的 rank）。</p>
+
+<h4>大块化方案（三步）</h4>
+<pre style="background:#f7f7f7;padding:10px;font-size:12.5px;overflow-x:auto">① 源端：扫一遍 topk_idx，按 dest 分组，把散落的行连续化到 staging buffer
+   —— 一次卡内 DMA（读 T×H + 写 T×H，本地带宽，便宜）
+② 网络：每个 dest 一次 mte_put_nbi，搬 [n_rows × H] 的连续块
+   —— put 次数 T×K → R−1 = 7 次/层/卡   ★ 500× 的降幅
+③ 接收端：目标布局当前是「专家连续」（GEMM 的 group_list 要求），而大块 put
+   要求「来源连续」⇒ 接收端补一次 permute 成 expert-grouped</pre>
+
+<p class="note">第 ③ 步不是新发明 —— 这正是 all-gather 路线里
+<code>aclnnMoeInitRoutingV3</code> 干的事（实测 265 ms），也是 MC2/DeepEP 的标准 dispatch 结构。
+做完之后接收端数据形态与 all-gather 路线一致，<b>两条路线可共用同一套 MLP 接口</b>。</p>
+
+<table>
+<tr><th></th><th>报文数/层/卡</th><th>需要源端重排</th></tr>
+<tr><td><b>逐行（现状）</b></td><td>T×K = 35,328</td><td>❌ 就地发</td></tr>
+<tr><td><b>大块化</b></td><td>R−1 = 7</td><td>✅ 散行先连续化</td></tr>
+</table>
+
+<h4>语义澄清：这仍然是 one-sided</h4>
+<p>"one-sided" 的定义是<b>通信的完成不需要对端执行配对操作</b>。
+源端 compact 是发送方<b>自己设备内</b>的数据重排，<b>根本不涉及通信</b>；
+发送方本来就必须参与（是它发起的那个 put）。</p>
+<table>
+<tr><th>步骤</th><th>谁参与</th><th>是否 one-sided</th></tr>
+<tr><td>① 源端 compact</td><td>本地 AIV</td><td>不涉及通信</td></tr>
+<tr><td>② 大块 put</td><td>本地 AIV → 对端内存</td><td><b>是</b></td></tr>
+<tr><td>③ 接收端 permute</td><td>对端本地 AIV</td><td>不涉及通信</td></tr>
+</table>
+<p class="note">全程<b>没有对面 CPU 参与</b>：数据靠 <code>aclshmemx_mte_put/get_nbi</code> 直接落到对端
+对称内存；完成通知靠 (a) 发送方把 flag 也 one-sided 写进对端、接收方设备侧轮询，或
+(b) 设备侧栅栏（<code>aclshmemx_barrier_all_vec</code>，各 rank 的 AIV 进栅栏，不是 CPU）。
+对比 HCCL：它也是设备侧，但用 <b>AICPU kernel</b> 做 rank 间协调，且是<b>集合式</b>（所有 rank 必须一起调用）。</p>
+
+<h4>4 次全局栅栏：时机与性质</h4>
+<p>profiler 实测 <code>barrier_on_stream_kernel</code> 4 次/层，来源是
+<b>2 次 prefetch 调用 × 每次 2 个栅栏</b>（<code>csrc/ops/prefetch.cpp:118</code> 与 <code>:134</code>）：</p>
+<table>
+<tr><th>位置</th><th>本意</th><th>数据上必需？</th></tr>
+<tr><td>进 prefetch 前</td><td>"别在别人还在用 slot 时覆盖它"</td><td><b>否</b></td></tr>
+<tr><td>出 prefetch 后</td><td>"别在权重还没到时就做 GEMM"</td><td><b>否</b></td></tr>
+</table>
+
+<p><b>库作者自己就说它们不必要</b>（<code>prefetch.cpp</code> 里 <code>RELAXED</code> 开关的注释原话）：</p>
+<ul>
+<li>源是 peer 的 <b>home chunk</b>（init 时写好、之后再也不改）⇒ <b>pre-barrier 无物可排</b>；</li>
+<li>kernel 自己的 <b>MTE3_MTE2 event</b> 已保证每次 GET 完成 ⇒ <b>post-barrier 对本地可见性也不需要</b>；</li>
+<li>每个 rank 必须设同一个 env，否则<b>栅栏代际错位</b>。</li>
+</ul>
+
+<p><b>但默认不能关，因为栅栏代际是共享的</b>（<code>api.py:503</code> 原话）：
+prefetch 的 host 栅栏与 planning/dispatch 的 device <code>aclshmemx_barrier_all_vec</code>
+<b>共用同一个 <code>sync_counter</code></b>；rank 间代际不一致就<b>死锁</b>。</p>
+
+<p>已实测：全集群一起关（<code>ASCEND_MOONEP_PREFETCH_RELAXED=1</code>）⇒
+<b>反而慢 2.9 ms</b> ✗ —— 说明它们虽不保护数据，却<b>在当前结构下承担 rank 对齐</b>；
+拿掉后偏斜不会消失，只是转移到后面的栅栏上。</p>
+
+<h4>改造建议：两步，第 2 步是前提</h4>
+<ol>
+<li><b>大块化</b>：put/get 次数 T×K → R−1（源端 compact + 接收端 permute）；</li>
+<li><b>同步解耦（前提）</b>：把 prefetch 的同步从<b>共享的栅栏代际</b>里拿出来
+（改用独立 event/flag），这样栅栏数才能从 4 次/层收敛到 <b>1–2 次/层</b>。</li>
+</ol>
+<p class="note">只做第 1 步收益会打对折：报文从 35,328 降到 7，但每层仍要等 4 次全局栅栏。
+不先解耦代际，栅栏数降不下来。</p>
 """
 
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
