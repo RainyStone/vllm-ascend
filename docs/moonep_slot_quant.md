@@ -269,7 +269,7 @@ dtype / 无 padding / `MOONEP_SLOT_QUANT` 闸门只能在权重加载后做，�
 | **S1** | **产品代码路径**（`_LayerWeightState` 真构造，非原型）：量化下四 payload 的镜像逐字节无损 / 投影描述符 source VA 指向 home+slot / alias 形状与逐专家步长对齐 / alias 上 gmm1 与真实权重 bit-identical | **PASS**（`--only S1`，max\|diff\|=0） |
 | **S2** | **引擎真正调的那条链**：`build_fused_experts_input` → `run_slot_forward` 本体（buffer 用空替身）→ `unified_apply_mlp`，即融合 gmm1+swiglu（`DeviceOperator.npu_grouped_matmul_swiglu_quant`，A5 上落到 `torch.ops._C_ascend.npu_swiglu_group_quant`，`clamp_value=swiglu_limit=10.0`）与 gmm2（`..._gmm2` → `npu_grouped_matmul(antiquant_scale)`）。判据：swiglu 输出 / out_scale / gmm2 输入 / 最终输出**逐比特相等**，且组数确为 E+B（alias 里 8 个槽位参与 GMM） | **PASS**（`--only S2`，四项 max\|diff\|=0；显存 ~260 MiB、单卡、无需 shmem） |
 | **R-bf16** | 改完的产品代码跑既有 bf16 回归：`smoke_slots.py`（R=2）与 `probe_slots_multi.py`（R=3，多热专家，需 `MOONEP_DISABLE_UDMA=1`，UDMA combine 要求 R 为偶数或 16 的倍数） | **PASS**（rel err 0.0052–0.0075） |
-| M7 | 引擎端到端：`MOONEP_SLOT_MODE=1 MOONEP_SLOT_STATS=1` 跑一次，`[moonep-stats]` 行必须 `total_slot_rows>0 && calls_with_slot_rows>0`（否则 prefetch 没生效，是**假通过**） | 未跑（需 R≥8 空卡） |
+| M7 | 引擎端到端：`MOONEP_SLOT_MODE=1 MOONEP_SLOT_STATS=1` 跑一次，`[moonep-stats]` 行必须 `total_slot_rows>0 && calls_with_slot_rows>0`（否则 prefetch 没生效，是**假通过**） | 未跑（需 R≥8 空卡）；2026-09-19 用 DP4/卡 4-7/R=4 首次试跑，在 `_packed_alias` 建 VA 处撞 `aclrtMemSetAccess 507899`（逻辑号/物理号混用，见 [cross_repo_fixes.md](cross_repo_fixes.md) §3 补记），已在 `moonep_balance._packed_alias` 修好，**待重跑** |
 | M8 | 与 owner 模式做 logprobs A/B 对照（`scripts/moe_ab_test.py`） | 未跑 |
 
 复现：`ASCEND_RT_VISIBLE_DEVICES=<空卡> python scripts/spike_slot_quant.py`
