@@ -953,3 +953,25 @@ CheckProtocolSupport(commHandle, layerList, layerNum, protocol);  // ← 唯一�
 2. **回退的代价约 10%**（同卡数 DP4 下 decode −10.1%、TPOT +11.3%）—— 比预想的温和；
 3. 要 MC2 在 EP8 真正可用，需 CANN 修 `GetCommProtocol` 的 `layerNum==1` 早退（应同样做协议
    校验/回退），或让 `GetHcclCommLink` 接受协议候选集。
+
+### 附录十补二：8 卡 slot（MoonEP）也能跑通 —— 但比 ALLGATHER 慢
+
+`enable_moonep=1` 时选路直接返回 `MoECommType.SHMEM`，**完全不经过 MC2**，所以绕开了
+协议协商那个缺陷。实测 8 卡（DP8×TP1=EP8）`MOONEP_SLOT_MODE=1`：
+
+- **EXIT=0、64/64 完成、无抢占、零 error/traceback** ✓
+- KV cache 532,608 token
+
+四路同配置对比（`N_SEQ=64`、`GEN=32`、`MBT=2048`、`PROMPT_LEN=256`）：
+
+| 配置 | 路线 | decode tok/s | prefill tok/s | TTFT p50 | TPOT p50 |
+|---|---|---|---|---|---|
+| DP4 | MC2 | **1192.0** | 76,141 | **210.5** | **48.7** |
+| DP4 | ALLGATHER | 1071.0 | 75,329 | 219.9 | 54.2 |
+| **DP8** | **slot（MoonEP）** | 796.8 | **32,616** | 638.0 | 65.9 |
+| **DP8** | ALLGATHER | **984.3** | **61,880** | **326.3** | **58.6** |
+
+⇒ **8 卡上 slot 比 ALLGATHER 慢**：decode −19.1%、**prefill −47.3%**、TTFT +95.5%、TPOT +12.5%。
+
+**prefill 差一倍**这一点与附录九的结论一致：prefill 里 MoonEP 的主要成本是
+dispatch + combine 的跨卡搬运，而这部分比 MC2/ALLGATHER 的融合算子重。
