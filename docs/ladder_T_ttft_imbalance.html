@@ -174,8 +174,11 @@ aclshmemx_mte_put_nbi(
 对比 HCCL：它也是设备侧，但用 <b>AICPU kernel</b> 做 rank 间协调，且是<b>集合式</b>（所有 rank 必须一起调用）。</p>
 
 <h4>4 次全局栅栏：时机与性质</h4>
-<p>profiler 实测 <code>barrier_on_stream_kernel</code> 4 次/层，来源是
-<b>2 次 prefetch 调用 × 每次 2 个栅栏</b>（<code>csrc/ops/prefetch.cpp:118</code> 与 <code>:134</code>）：</p>
+<p>profiler 实测 <code>barrier_on_stream_kernel</code> 4 次/层。来源不是"2 次 prefetch 调用"，
+而是<b>一次 <code>prefetch_projections</code> 调用里的 2 个投影（w13 / w2）各发一个 kernel</b>
+（<code>api.py:734</code> 的 <code>for full_weight in weight_prefetch_args</code> 循环），
+而每个 kernel 前后各有 1 个栅栏（<code>csrc/ops/prefetch.cpp:118</code> 与 <code>:134</code>）
+⇒ <b>2 投影 × 2 栅栏 = 4 次/层</b>。</p>
 <table>
 <tr><th>位置</th><th>本意</th><th>数据上必需？</th></tr>
 <tr><td>进 prefetch 前</td><td>"别在别人还在用 slot 时覆盖它"</td><td><b>否</b></td></tr>
@@ -197,12 +200,21 @@ prefetch 的 host 栅栏与 planning/dispatch 的 device <code>aclshmemx_barrier
 <b>反而慢 2.9 ms</b> ✗ —— 说明它们虽不保护数据，却<b>在当前结构下承担 rank 对齐</b>；
 拿掉后偏斜不会消失，只是转移到后面的栅栏上。</p>
 
-<h4>改造建议：两步，第 2 步是前提</h4>
+<h4>栅栏收敛有两条路，可以叠加</h4>
+<table>
+<tr><th>路径</th><th>做法</th><th>栅栏数/层</th><th>风险</th></tr>
+<tr><td><b>B1</b></td><td>把两个投影的 prefetch <b>合并成一个 kernel</b>
+（内核改成一次收多投影、内部循环不同 <code>Hp</code>）</td><td><b>4 → 2</b></td>
+<td><b>低</b> —— 不动代际机制</td></tr>
+<tr><td><b>B2</b></td><td>把 prefetch 的同步<b>从共享的栅栏代际里解耦</b>
+（改用独立 event / flag 轮询）</td><td><b>2 → 0–1</b></td><td>中 —— 要动同步设计</td></tr>
+</table>
+<p class="note"><b>B1 是低垂果实</b>：一次 launch 的成本 + 一对栅栏，每层都能省。</p>
+
+<h4>改造建议（详见 docs/design_moonep_bulk_transfer_and_sync.md）</h4>
 <ol>
 <li><b>大块化</b>：put/get 次数 T×K → R−1（源端 compact + 接收端 permute）；</li>
-<li><b>同步解耦（前提）</b>：把 prefetch 的同步从<b>共享的栅栏代际</b>里拿出来
-（改用独立 event/flag），这样栅栏数才能从 4 次/层收敛到 <b>1–2 次/层</b>。</li>
+<li><b>B1 合并投影 prefetch</b>：栅栏 4 → 2，低风险，可先行；</li>
+<li><b>B2 同步解耦</b>：栅栏 2 → 0–1。不做这步，大块化的收益会被每层的栅栏等待吃掉一半。</li>
 </ol>
-<p class="note">只做第 1 步收益会打对折：报文从 35,328 降到 7，但每层仍要等 4 次全局栅栏。
-不先解耦代际，栅栏数降不下来。</p>
 </body></html>
