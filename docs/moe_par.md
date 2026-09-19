@@ -51,10 +51,10 @@
 | `vllm_ascend/ops/fused_moe/fused_moe_0_23_0.py` | 修改（+调用点） | vllm 0.23.0 实际生效的 `AscendFusedMoE`，在 EPLB 计数点旁挂上打点 |
 | `vllm_ascend/ops/fused_moe/fused_moe.py` | 修改（+调用点） | 其它 vllm 版本的兼容分支，同样挂上打点 |
 | `vllm_ascend/ops/fused_moe/moonep_comm.py` | 修改（+调用点） | MoonEP 调度器把 plan 之前的发送侧直方图 `tpe` 连同 pad 对数/落点交给打点（`note_route_counts`），引擎行为不变 |
-| `scripts/moe_par_bench.py` | **新增** | 驱动：跑数据集 → 写 dump + `bench.json`（含逐请求 TTFT/TPOT 与吞吐） |
-| `scripts/analyze_moe_par.py` | **新增** | 分析器：多份 dump → 三种 PAR + 中文自包含 HTML 报告 |
+| `scripts/moe_par/moe_par_bench.py` | **新增** | 驱动：跑数据集 → 写 dump + `bench.json`（含逐请求 TTFT/TPOT 与吞吐） |
+| `scripts/moe_par/analyze_moe_par.py` | **新增** | 分析器：多份 dump → 三种 PAR + 中文自包含 HTML 报告 |
 | `tests/ut/ops/test_moe_par_stats.py` | **新增** | CPU 可跑的 UT，同时覆盖打点写入与解析读出两侧 |
-| `scripts/gsm8k_test.jsonl` | **新增** | bench 的默认数据集（GSM8K 问题，一行一个 JSON 对象） |
+| `scripts/moe_par/gsm8k_test.jsonl` | **新增** | bench 的默认数据集（GSM8K 问题，一行一个 JSON 对象） |
 
 打点接入点选在**通信方式已经算完 `expert_tokens` 之后**，与 EPLB 累加 `layer.moe_load` 的位置同级：
 
@@ -94,18 +94,18 @@ export PYTHONPATH=$REPO/third_party/ascend_moonep:$REPO:$PYTHONPATH   # 必须 :
 export ASCEND_MOONEP_BUILD_DIR=$WS/ascend-moonep/ascend_moonep
 
 # ① 第 1 次运行：MC2（EP 打开、不开 moonep）
-python scripts/moe_par_bench.py \
+python scripts/moe_par/moe_par_bench.py \
     --tp 2 --batch-size 16 --max-num-batched-tokens 512 --max-tokens 256 \
     --num-prompts 100 --tag tp2-ep-b16-bt512-o256
 #    结束时打印 dump 目录、每份 dump 的行数/步数，以及可直接复制的出报告命令
 
 # ② 第 2 次运行：同样的负载参数，只换通信方式（MoonEP / SHMEM）
-ASCEND_RT_VISIBLE_DEVICES=6,7 python scripts/moe_par_bench.py \
+ASCEND_RT_VISIBLE_DEVICES=6,7 python scripts/moe_par/moe_par_bench.py \
     --tp 2 --batch-size 16 --max-num-batched-tokens 512 --max-tokens 256 \
     --num-prompts 100 --moonep --tag tp2-ep-b16-bt512-o256-moonep
 
 # ③ 出报告（多份 dump 对比；报告落在当前目录）
-python scripts/analyze_moe_par.py \
+python scripts/moe_par/analyze_moe_par.py \
     --run mc2=<dump-dir-1> --run moonep=<dump-dir-2> \
     -o /tmp/moe_par_report.html
 ```
@@ -120,8 +120,11 @@ python scripts/analyze_moe_par.py \
 
 用途：把一份数据集灌进离线 `LLM`，跑完一遍，产出「每 rank 的负载 dump」+「本次运行的性能与配置 `bench.json`」。
 
+> DP 场景（8 卡 DP+MoonEP、DP8 三配置对比、负载测试与 profiling 的采集口径）见
+> [`moe_par_dp8_sweep.md`](moe_par_dp8_sweep.md)。
+
 ```bash
-python scripts/moe_par_bench.py --help
+python scripts/moe_par/moe_par_bench.py --help
 ```
 
 ### 参数（默认值来自脚本内的 argparse）
@@ -130,7 +133,7 @@ python scripts/moe_par_bench.py --help
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--dataset` | `<scripts>/gsm8k_test.jsonl` | 一行一个 JSON 对象的 jsonl |
+| `--dataset` | `<scripts/moe_par>/gsm8k_test.jsonl` | 一行一个 JSON 对象的 jsonl |
 | `--prompt-field` | `question` | 取对象里哪个字段当 prompt |
 | `--num-samples` / `--num-prompts` | `0` | 跑多少条；`0` = 整份文件 |
 | `--max-tokens` | `256` | 每条请求生成多少 token |
@@ -199,7 +202,7 @@ python scripts/moe_par_bench.py --help
 - `MOONEP_SLOT_MODE`、`MOONEP_DISABLE_UDMA` 这类环境开关**不参与 tag 生成**：两次都开 `--moonep`
   但 slot 模式不同的运行，tag 会一样，默认会落到同一个 dump 目录里互相覆盖。要分开就显式 `--tag`
   或 `--dump-dir`。
-- `scripts/moe_par_bench.py` 会把 `VLLM_WORKER_MULTIPROC_METHOD` 默认设成 `spawn`（`setdefault`，
+- `scripts/moe_par/moe_par_bench.py` 会把 `VLLM_WORKER_MULTIPROC_METHOD` 默认设成 `spawn`（`setdefault`，
   调用方环境里写死的值优先）。原因见 §6「收尾与边界情况」：fork 出来的 worker 走 `os._exit()`，
   不执行 `atexit`，dump 的收尾汇总行和最后不足 `--flush-every` 步的数据都会丢。若环境里是别的值，
   脚本会在 stderr 打一条警告并说明后果。
@@ -513,7 +516,7 @@ tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计�
 **为什么非要这样：`atexit` 在 fork 出来的 worker 里不会执行。** `multiprocessing` 的 fork 子进程
 结束时走 `os._exit()`，绕过所有 atexit 钩子（spawn 子进程会正常执行，已用最小样例实测对照）。
 后果是 dump 会缺两样东西：末行汇总，以及**最后不足 `flush_every` 步的整批数据**——因为那批还没落盘。
-`scripts/moe_par_bench.py` **默认替调用方设成 `spawn`**（用 `setdefault`，环境里显式的选择优先）；
+`scripts/moe_par/moe_par_bench.py` **默认替调用方设成 `spawn`**（用 `setdefault`，环境里显式的选择优先）；
 如果环境里是别的值，脚本会在 stderr 打一条警告，
 说明这份 dump 会缺最后不足 `flush_every` 步、对账自查会报出来。
 
@@ -527,7 +530,7 @@ tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计�
 ## 7. `analyze_moe_par.py`：分析器
 
 ```bash
-python scripts/analyze_moe_par.py --run <名字>=<目录> [--run <名字>=<目录> ...] \
+python scripts/moe_par/analyze_moe_par.py --run <名字>=<目录> [--run <名字>=<目录> ...] \
     [-o 报告.html] [--json payload.json]
 ```
 
@@ -729,7 +732,7 @@ MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间�
 9. **fork 出来的 worker 不执行 `atexit`**：`multiprocessing` 的 fork 子进程以 `os._exit()` 结束，
    绕过所有 atexit 钩子，于是「退出时刷最后一批」不会发生——dump 会缺收尾汇总行和最后不足
    `flush_every` 步的数据（对账自查会先报出来）。收尾行已改为每次落盘重写，但**未落盘的那批无法找回**，
-   所以要 `VLLM_WORKER_MULTIPROC_METHOD=spawn`（`scripts/moe_par_bench.py` 已默认）或用
+   所以要 `VLLM_WORKER_MULTIPROC_METHOD=spawn`（`scripts/moe_par/moe_par_bench.py` 已默认）或用
    `--flush-every 1` 把窗口压到最小。这个坑的表现是「dump 看起来正常、数值也自洽，只是总量比 bench 少
    百分之几」，不查对账不容易发现。
 10. **开了 `--moonep` 不等于这次走的就是 MoonEP**：通信方式是逐 step 选的（见 §6「这个 `method=`

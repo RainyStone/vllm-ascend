@@ -554,7 +554,7 @@ DP=2 CARDS=6,7 MOONEP=1 MODEL=/mnt/weight/A5-weights/DeepSeek-V4-Flash python <r
 top-1 差值一行）；`AB_STATS=1` 顺带落 MoE 通信方式 dump，`AB_TIMEOUT`（默认 1800s）到点按
 进程组收尸。默认每个 rank 跑全量 prompts（便于和单进程基线逐 rank 对拍），`AB_SLICE=1`
 才切成官方那种「rank r 处理 PROMPTS[r::DP]」。
-DSV4 走不了 `scripts/moe_par_bench.py` 的 TP 路径（会被 64/128 头约束挡住），要用这套 DP 入口灌数据集。
+DSV4 走不了 `scripts/moe_par/moe_par_bench.py` 的 TP 路径（会被 64/128 头约束挡住），要用这套 DP 入口灌数据集。
 
 **遗留/待 op owner 确认**
 

@@ -22,7 +22,7 @@ accumulates into ``layer.moe_load``. This module taps that value and appends it,
 once per (step, layer), to a per-rank text dump.
 
 Nothing here communicates. The peak-to-average ratio is a cross-rank quantity, but
-the aggregation is offline in ``scripts/analyze_moe_par.py``: each rank writes only
+the aggregation is offline in ``scripts/moe_par/analyze_moe_par.py``: each rank writes only
 its own load and the script stitches the ranks together. That keeps the hot path
 free of collectives -- one device-to-device copy per layer per step, plus a single
 ``.cpu()`` per ``MOE_PAR_STATS_FLUSH_EVERY`` steps.
@@ -53,7 +53,7 @@ Relying on that hook alone was a mistake worth recording: ``atexit`` does not ru
 in a ``fork``ed worker. ``multiprocessing``'s fork child ends in ``os._exit()`` and
 skips the handlers, so the tail of the dump -- up to ``VLLM_ASCEND_MOE_PAR_FLUSH_EVERY``
 steps, and with them every pad number -- went missing on a run started without
-``VLLM_WORKER_MULTIPROC_METHOD=spawn``. ``scripts/moe_par_bench.py`` therefore
+``VLLM_WORKER_MULTIPROC_METHOD=spawn``. ``scripts/moe_par/moe_par_bench.py`` therefore
 defaults that variable to ``spawn``; the per-flush rewrite below is the belt to
 that pair of braces. A step still in flight at exit is dropped outright when it is
 incomplete.

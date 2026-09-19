@@ -36,13 +36,13 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe import moe_par_stats
 
-SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))), "scripts")
+MOE_PAR_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))), "scripts", "moe_par")
 
 
 def _load_analyzer():
     """scripts/ is not a package; load the analysis module straight from its path."""
-    path = os.path.join(SCRIPTS_DIR, "analyze_moe_par.py")
+    path = os.path.join(MOE_PAR_DIR, "analyze_moe_par.py")
     spec = importlib.util.spec_from_file_location("analyze_moe_par", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

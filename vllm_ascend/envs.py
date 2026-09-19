@@ -111,7 +111,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Master switch for the per-rank MoE expert-load dump used by
-    # scripts/analyze_moe_par.py to compute the peak-to-average ratio offline.
+    # scripts/moe_par/analyze_moe_par.py to compute the peak-to-average ratio offline.
     # "1" records, anything else leaves the recorder inert. Independent of
     # DYNAMIC_EPLB: the dump taps the same per-expert route counts but adds no
     # collective, so it is useful with EPLB off.

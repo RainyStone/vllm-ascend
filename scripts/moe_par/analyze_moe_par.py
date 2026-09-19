@@ -71,7 +71,7 @@ never counts. How a dump delivers that depends on its ``counts_scope``:
 
 Usage::
 
-    python scripts/analyze_moe_par.py \\
+    python scripts/moe_par/analyze_moe_par.py \\
         --run mc2=/tmp/par_mc2 --run moonep=/tmp/par_moonep \\
         -o /tmp/moe_par_report.html
 
