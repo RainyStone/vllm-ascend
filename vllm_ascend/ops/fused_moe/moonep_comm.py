@@ -668,7 +668,18 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # grouped matmul walks exactly sum(group_list) rows (rows past the
             # sum are not computed), so no `.item()` is needed -- the combine
             # masks the untouched tail on the device instead (see combine).
-            hidden_trim = h_nvs
+            #
+            # Fresh view object, not `h_nvs` itself: with reuse_outputs (the
+            # default) the library caches the dispatch output *tensor object*
+            # and hands that same object back on every later dispatch
+            # (contract: "valid until the next dispatch"). The MLP consumes it
+            # via dispose_tensor() -> Tensor.set_, which would re-point the
+            # cached object to an empty 1-D tensor, so every later dispatch
+            # returns [0] and the W4A8MXFP grouped matmul dies with
+            # "GroupedMatmul x dim num should be in the range [2, 6], but
+            # actual is 1". The view shares the storage but is disposable
+            # without touching the library's cached tensor.
+            hidden_trim = h_nvs[:]
             w_trim = w_nvs.clone().to(torch.float32).contiguous()
             tail_masked = True
         else:

@@ -446,6 +446,10 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
         acl_vmm_set_access,
         acl_vmm_unmap,
     )
+    try:
+        from ascend_moonep.buffer_c import acl_vmm_access_device_id
+    except ImportError:  # 上游 buffer_c（无重映射修复）：逻辑号即物理号
+        acl_vmm_access_device_id = int
 
     ref = spec.ref
     epn = int(home.shape[0])
@@ -470,7 +474,10 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
         for alloc, off in ((home_alloc, 0), (slot_alloc, slot_off)):
             va = base + off
             acl_vmm_map(va, int(alloc.size), alloc.mem_handle, 0)
-            acl_vmm_set_access(va, int(alloc.size), dev)
+            # set_access 的 location.id 要物理号，其余 VMM 接口要逻辑号
+            # （docs/cross_repo_fixes.md §3）；buffer_c 里的同类调用都做了这一步。
+            acl_vmm_set_access(
+                va, int(alloc.size), acl_vmm_access_device_id(int(dev)))
             segments.append((va, int(alloc.size), alloc.mem_handle))
     except Exception:
         for va, _, _ in segments:
