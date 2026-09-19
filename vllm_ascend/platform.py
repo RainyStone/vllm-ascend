@@ -882,6 +882,25 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
+        # MOONEP_NO_PIN=1: let vLLM allocate its CpuGpuBuffers as ordinary
+        # pageable host memory instead of pinned memory.
+        #
+        # Why this exists: with DeepSeek-V4-Flash at 8 cards the run dies in
+        # model-runner init with
+        #     torch.OutOfMemoryError: allocate_host_memory_slowpath ...
+        #     aclrtMallocHostWithCfg, error code is 207001
+        # first at `inputs_embeds` (839 MB at MBT=102400, 268 MB at 32768) and
+        # then on ~27 KB block-table buffers. 207001 is the same "physical
+        # resource exhausted" code we hit from aclrtMallocPhysical, and host
+        # memory itself is not the limit: a standalone process can pin 4 GB,
+        # and eight processes pinning 268 MB each (with the NPU device set)
+        # all succeed. So the exhaustion is on the device side -- registering
+        # host memory for DMA after 18.6 GB of weights plus the VMM pool are
+        # already mapped. Falling back to pageable buffers avoids the
+        # registration entirely, trading some H2D copy speed for being able to
+        # run at all.
+        if os.environ.get("MOONEP_NO_PIN", "0") == "1":
+            return False
         return True
 
     @classmethod

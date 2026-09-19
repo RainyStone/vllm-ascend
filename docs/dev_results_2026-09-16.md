@@ -975,3 +975,76 @@ CheckProtocolSupport(commHandle, layerList, layerNum, protocol);  // ← 唯一�
 
 **prefill 差一倍**这一点与附录九的结论一致：prefill 里 MoonEP 的主要成本是
 dispatch + combine 的跨卡搬运，而这部分比 MC2/ALLGATHER 的融合算子重。
+
+---
+
+# 附录十一（2026-09-19）：DeepSeek-V4-Flash 8 卡起不来 —— 三层错误的逐层定位
+
+目标配置：8 卡（DP8×TP1=EP8）、**DeepSeek-V4-Flash**（149 GB 权重、43 层、256 专家、MLA、
+`max_position_embeddings=1M`）、ALLGATHER、`GEN=1`、`N_SEQ=32`、`PROMPT_LEN=3200`、`MBT=102400`。
+
+## 结论
+
+| 配置 | 结果 |
+|---|---|
+| MBT=**16384** + `MOONEP_NO_PIN=1` | ✅ **跑通**：32/32 完成、prefill **102,336 token**、**45,519 tok/s**、TTFT p50 **2975 ms** |
+| MBT=**102400** | ❌ 仍然起不来（第 3 层错误，见下）|
+
+## 三层错误（每层都定位到根因）
+
+### 第 1 层：`aclrtMallocHostWithCfg, error code is 207001` @ `inputs_embeds`
+
+`vllm/v1/utils.py CpuGpuBuffer.__init__` 的 pinned CPU buffer，尺寸 = **MBT × hidden × 2B**：
+
+| 模型 | hidden | MBT | inputs_embeds | 结果 |
+|---|---|---|---|---|
+| Qwen3-30B-A3B | 2048 | 2048 | 8.4 MB | ✅ 一直能跑 |
+| DeepSeek-V4-Flash | 4096 | 102400 | **839 MB** | ❌ 207001 |
+
+根因：**`ulimit -l`（max locked memory）= 8192 KB = 8 MB**。
+Qwen3 那个 8.4 MB 恰好卡在边缘所以从未暴露。**处理**：脚本里 `ulimit -l unlimited`（实测
+python 进程 `/proc/<pid>/limits` 确认生效）⇒ 这一关过了。
+
+### 第 2 层：同一个 207001，但落在 **27 KB** 的 buffer 上
+
+过了第 1 层后，失败点变成 `block_table`（`max_num_reqs(256) × 27 blocks × 4B` = **27 KB**）。
+**说明不是这个分配大，而是分配器已经不可用**。做了三组对照：
+
+| 实验 | 结果 |
+|---|---|
+| 单进程 pin 4 GB | ✅ |
+| 8 进程 × 300 MB（共 2.4 GB）| ✅ 全成功 |
+| 8 进程 × 268 MB，**每个先 `set_device(i)`** | ✅ 全成功 |
+
+⇒ **host 内存本身不紧张**（系统 503 GB，`/dev/shm` 500 GB 只用 2.3 MB，`Mlocked` 12 kB）。
+结合 207001 与之前 `aclrtMallocPhysical` 耗尽是**同一个错误码**，判断是
+**设备侧为 host 内存做 DMA 注册的资源耗尽**（此时每卡已映射 18.6 GB 权重 + 整个 VMM 池）。
+
+**处理**：`vllm_ascend/platform.py::is_pin_memory_available()` 原本**硬编码 `return True`**，
+加了 env 门控 `MOONEP_NO_PIN=1` 让它返回 False ⇒ vLLM 改用可分页内存、完全不触发注册
+⇒ **MBT=16384 下整轮跑通**。
+
+### 第 3 层：`Failed to allocate resource stream ... Resources are exhausted`
+
+MBT=102400 在绕过 pinning 后仍然失败，但错误换成了**设备 stream 资源耗尽**：
+```
+rtStreamCreateWithFlags execution failed, reason=driver error:internal error
+Failed to allocate resource stream with info StreamCreateWithFlags, streamType:1.
+Reason: Resources are exhausted.
+```
+⇒ 一个 rank 死掉，其余卡在 `HcclAllGather` 上等它（`shm_broadcast: No available shared
+memory broadcast block found in 60 seconds`）。
+
+**为什么 102400 特别致命**：ALLGATHER 路线的缓冲区不是按本卡 token 数算，而是
+**`EP 卡数 × MBT × topk`**。实测那个要 37.5 GiB 的 buffer：
+`8 × 102400 × 6 × 4096 × 2B ≈ 40 GB` ✓ 正好对上。
+⇒ **在 ALLGATHER 路线上 MBT 有个 `EP × topk`（=48）的放大系数**，这是选 MBT 时必须知道的。
+
+## 实用结论
+
+- **本 workload 根本不需要 MBT=102400**：32 条 × 3200 token = 102,400 **总量**，
+  8 卡平分后**每卡只有 12,800 token**；MBT ≥ 12800 就能一个 chunk 装下。
+  实测 MBT=16384 已经把 102,336 token 的 prefill 全部装下并跑通。
+- 若要"**每卡 100K token**"（即 N_SEQ=256 × 3200），在 8 卡 ALLGATHER 上会被
+  `EP×topk` 放大到 ~40 GB 单 buffer ⇒ 需要更小的 MBT 或更多卡。
+- 两个新开关（都默认关、env 门控）：`MOONEP_FORCE_ALLGATHER=1`、`MOONEP_NO_PIN=1`。
