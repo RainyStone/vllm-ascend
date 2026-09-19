@@ -835,3 +835,61 @@ context；decode 里 `q_len=1` 且受带宽/开销摊薄，所以呈 √。
 ctx20460 的 prompt 20460 token ÷ 8192 = 3 个 chunk，每卡 4 序列 ⇒ 约 10 个 prefill step
 × 702 ms ≈ **7.0 s**；而实测 `ttft_ms` p50 = **4.64 s**（请求在不同 step 完成，中位数约 7 步）
 ⇒ **与逐层账自洽** ✓
+
+---
+
+# 附录十（2026-09-19）：MC2 在 8 卡上跑不通（EP8 链路协议无实现）
+
+## 现象
+
+8 卡（`DP8 × TP1 = EP8`）跑 **MC2** 路线（`enable_moonep=False`，走原生
+`MoeDistributeDispatch`/`Combine`）：8 个 rank 全部正常加载模型（9.65 GB/卡），
+**第一个 forward 即失败**，之后引擎挂住不再推进。
+
+```
+RuntimeError: npu_moe_distribute_dispatch_v2:.../MoeDistributeDispatchV2KernelOpApi.cpp:194
+  NPU function error: call aclnnMoeDistributeDispatchV4 failed, error code is 561000
+```
+
+CANN plog（`/root/ascend/log/debug/plog/plog-<pid>_*.log`）给出真正的根因：
+
+```
+[mc2_context.cpp:160][GetHcclCommLink] OpName:[Mc2Context]
+    No matching communication protocol found in HCCL links protocol is 6
+[mc2_context.cpp:333][CreatMc2Context] Get HCCL communication resource failed
+[mc2_context.cpp:536][GetMc2ContextTensor] errno[561000]
+```
+
+⇒ **MC2 在建立"通算融合上下文"时，8 卡组的 HCCL 链路协议（protocol 6）没有对应实现**。
+失败发生在 CANN 算子内部的 context 创建阶段，**早于任何模型代码**。
+
+## 对照实验（关键）
+
+| 配置 | 结果 |
+|---|---|
+| MC2, **EP8**（卡 0-7）| ❌ 确定性失败，**复现 2 次**（`561000`）|
+| MC2, **EP4**（卡 0-3）| ✅ **EXIT=0，跑通** |
+| MC2, **EP4**（卡 4-7）| ✅ 早前也跑通（`/home/tmp/msprof/msprof_mc2` 那次）|
+
+⇒ **变量是 rank 数（4 → 8），不是卡的集合**。
+
+## 结论
+
+- **MC2 在 EP8 上不可用，EP4 正常**；
+- 这是**算子/框架侧的限制**，不是 MoonEP 适配引入的（MC2 路径不经过我们的代码）；
+- 推测与 8 卡全互联使用 UB（protocol 6）而 MC2 context 只实现了部分协议有关。
+
+## 下一步
+
+1. **交叉验证**：用**原版 vllm-ascend**（非本分支）跑一次 8 卡 MC2。我们的 bench 虽然
+   `enable_moonep=False` 走原生 dispatcher，但分支本身有改动，交叉后才能断言这是通用问题；
+2. 试 `additional_config={"enable_mc2_hierarchy_comm": true}`（vllm-ascend 有此开关，
+   默认 false，`ascend_config.py:304`），看是否是更大 EP 的路径；
+3. 报给算子/框架侧：`mc2_context.cpp:GetHcclCommLink` 对 protocol 6 无实现。
+
+## 运维教训（再次踩到）
+
+**引擎在启动后失败/挂住时，`run_multi.sh` 退出但 spawn 出的 worker/EngineCore 会变成孤儿
+继续占卡**（本次一度留下 16 个进程、每卡 16 GB，填满全部 8 张卡，还让我误判成"租户抢卡"）。
+收尾必须按 PID 清（SIGTERM 无效，需 `kill -9`）；判断归属用 `/proc/<pid>/environ` 里的
+`MOONEP_DP_FULL_VISIBLE` + `cwd=/home/tmp`。
