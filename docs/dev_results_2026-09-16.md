@@ -893,3 +893,63 @@ CANN plog（`/root/ascend/log/debug/plog/plog-<pid>_*.log`）给出真正的根�
 继续占卡**（本次一度留下 16 个进程、每卡 16 GB，填满全部 8 张卡，还让我误判成"租户抢卡"）。
 收尾必须按 PID 清（SIGTERM 无效，需 `kill -9`）；判断归属用 `/proc/<pid>/environ` 里的
 `MOONEP_DP_FULL_VISIBLE` + `cwd=/home/tmp`。
+
+## 附录十补：根因确认（实测日志）与 ALLGATHER 回退验证
+
+### 根因——比最初的推断更简单（有 INFO 日志实证）
+
+把 CANN 日志开到 INFO 后，单个 rank 的完整执行轨迹（`plog-4060213_*.log`）：
+
+```
+mc2_context.cpp:502 GetMc2ContextTensor   Start
+mc2_context.cpp:456 GetCommProtocol       "HCCL communication layerNum is ..."
+mc2_context.cpp:322 CreatMc2Context       Get rank ID success
+mc2_context.cpp:174 GetNetLayers          Get HCCL layers success
+mc2_context.cpp:185 GetRankSizePerServer  ← 只有 layerNum==1 才会走到这
+mc2_context.cpp:174 GetNetLayers
+mc2_context.cpp:160 GetHcclCommLink       ✗ No matching protocol, protocol is 6
+```
+
+`GetCommProtocol` 的实现：
+
+```cpp
+HcclRankGraphGetLayersFunc(commHandle, &layerList, &layerNum);
+if (layerNum == HCCL_COMM_LAYERS_MTE_CCU) {   // == 1
+    GetRankSizePerServer(commHandle, rankNumPerUbDomain_);
+    return;                                   // ← 直接返回，protocol 未做任何校验/改写
+}
+CheckProtocolSupport(commHandle, layerList, layerNum, protocol);  // ← 唯一能改写协议的地方
+```
+
+**日志里出现 `GetRankSizePerServer` ⇒ 走的就是 `layerNum == 1` 分支 ⇒ `CheckProtocolSupport` 未被调用**
+⇒ `protocol` 停在调用方给的初值（`commAlg != "urma"` ⇒ `COMM_PROTOCOL_UB_MEM` = **6**）
+⇒ `InitHcclChannel` 中 `netLayerNum == 1` ⇒ `layerId = netLayerList[0]`
+⇒ `GetHcclCommLink` 要求该层链路 `linkProtocol` **精确等于 6**，而实测该层链路是 **UB_CTP** ⇒ **errno 561000**。
+
+**五条证据**：① 日志里 `GetRankSizePerServer` 被调用（实测）；② 失败时 protocol=6（实测）；
+③ 该分支 return 前不改 protocol（源码 `comm_context.cpp:456`）；
+④ **物理接口同时支持 `{UB_CTP, UB_MEM}`**（HCCL `phy_topo.cc` 实测日志）；
+⑤ `GetHcclCommLink` 精确匹配、无候选回退（源码 `comm_context.cpp:586`）。
+
+> 与 vllm-ascend issue **#5674** 同类：MC2 假定某种链路能力、拓扑给不了时**框架没有优雅回退**。
+> 该 issue 的绕行（强制 `MoECommType.ALLGATHER`）对本场景同样适用。
+
+### 回退验证：8 卡强制 ALLGATHER
+
+本分支加了 env 门控开关 `MOONEP_FORCE_ALLGATHER=1`（默认关，见
+`vllm_ascend/ascend_forward_context.py::_select_a5_moe_comm_method`）。
+
+| 配置 | 路线 | decode tok/s | prefill tok/s | TTFT p50 | TPOT p50 | 结果 |
+|---|---|---|---|---|---|---|
+| DP4 | MC2 | **1192.0** | 76,141 | **210.5** | **48.7** | ✅ |
+| DP4 | ALLGATHER | 1071.0（−10.1%）| 75,329（−1.1%）| 219.9（+4.5%）| 54.2（**+11.3%**）| ✅ |
+| **DP8** | **MC2** | — | — | — | — | ❌ **errno 561000** |
+| **DP8** | **ALLGATHER** | 984.3 | 61,880 | 326.3 | 58.6 | ✅ |
+
+（同配置：`N_SEQ=64`、`GEN=32`、`MBT=2048`、`PROMPT_LEN=256`，64 条全部完成、无抢占。）
+
+**结论**：
+1. **EP8 上 MC2 不可用，ALLGATHER 可以**——回退开关实测有效，8 卡能正常服务；
+2. **回退的代价约 10%**（同卡数 DP4 下 decode −10.1%、TPOT +11.3%）—— 比预想的温和；
+3. 要 MC2 在 EP8 真正可用，需 CANN 修 `GetCommProtocol` 的 `layerNum==1` 早退（应同样做协议
+   校验/回退），或让 `GetHcclCommLink` 接受协议候选集。
