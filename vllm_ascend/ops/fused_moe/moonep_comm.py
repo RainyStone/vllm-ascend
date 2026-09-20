@@ -80,6 +80,7 @@ import atexit
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
+from vllm_ascend.ops.fused_moe.moe_par_stats import note_compute_load as _note_compute_load
 from vllm_ascend.ops.fused_moe.moe_par_stats import note_route_counts as _note_route_counts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchInput,
@@ -125,6 +126,20 @@ _SLOT_STATS = {"calls": 0, "with_slots": 0, "slot_rows": 0, "prefetch_experts": 
 # optional per-rank MoE load accounting (MOONEP_BALANCE_STATS=1)
 _BALANCE_STATS_ON = os.environ.get("MOONEP_BALANCE_STATS", "0") == "1"
 _BALANCE_STATS = {"calls": 0, "tokens": 0, "local_rows": 0, "all_rows": 0, "pad_rows": 0}
+# MOONEP_BALANCE_STATS_EVERY=N: also print the (cumulative) ledger every N dispatch
+# calls, i.e. every N MoE layers of this rank. 0 = only at process exit.
+#
+# The exit print is what the counter would like to be its only output, but it is an
+# ``atexit`` handler and a served engine does not always let a worker reach it: the
+# API server stops its EngineCores with ``shutdown_timeout=0``, which force-kills the
+# tree (``Process manager: force killing remaining processes``), and the workers --
+# children of those EngineCores -- go with it. Nothing in that path runs ``atexit``,
+# so a service run would otherwise leave no balance line at all. Printing every N
+# layers keeps a near-final ledger in the log whatever the shutdown looks like; at
+# the exit (offline runs, graceful stops) the same line is printed once more, so the
+# last line in the file is always the fullest one. N = the model's MoE layer count
+# makes it one line per step.
+_BALANCE_EVERY = int(os.environ.get("MOONEP_BALANCE_STATS_EVERY", "0") or 0)
 
 
 def _dump_balance_stats():
@@ -643,9 +658,28 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # load-balance path: rows for prefetched (slot) experts stay local
             slot_counts = counts[E:].contiguous()
             local_counts = torch.cat((local_counts, slot_counts))
-        if _BALANCE_STATS_ON:
+        # The other half of the load accounting: the rows this rank is about to
+        # *compute*, i.e. the receive side -- ``local_counts`` is what the grouped
+        # matmul below will walk -- folded back onto global expert ids by the
+        # recorder. Slot groups included, so a row the plan relocated to this rank
+        # counts against this rank and not against the expert's owner. The pads stay
+        # in: on this side a pad row is indistinguishable from a real row of the same
+        # expert, which is why the routing note above (which knows exactly how many
+        # pads this rank injected) carries them separately.
+        _note_compute_load(
+            local_counts,
+            home_first=rank * epn,
+            epn=epn,
+            slot_experts=plan.experts_to_copy[rank] if slot_counts is not None else None,
+        )
+        if _BALANCE_STATS_ON and not _EXTRA_CTX.in_profile_run:
             # per-rank (token, expert) entries: what this rank computes vs the
             # full step. Opt-in: reading the counts back costs a host sync.
+            #
+            # Profile/dummy forwards are skipped exactly as the load recorder skips
+            # them (moe_par_stats._in_profile_run): they compute a full-capacity
+            # batch that belongs to no step of the measured run, so counting them
+            # here would make this ledger miss the dump by one whole batch of rows.
             stat = _BALANCE_STATS
             stat["rank"] = get_ep_group().rank_in_group
             stat["calls"] += 1
@@ -653,6 +687,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             stat["local_rows"] += int(local_counts.sum().item())
             stat["all_rows"] += int(counts[:E].sum().item())
             stat["pad_rows"] += (capacity - T) * K
+            if _BALANCE_EVERY and stat["calls"] % _BALANCE_EVERY == 0:
+                _dump_balance_stats()
         if os.environ.get("MOONEP_SLOT_STATS", "0") == "1" and slot_counts is not None:
             # debug only: this host read re-introduces the per-layer sync
             s = _SLOT_STATS

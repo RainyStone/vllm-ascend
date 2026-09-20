@@ -22,9 +22,12 @@ than a report weeks later. Everything runs on CPU -- the recorder touches device
 memory only to buffer the counts, and a CPU tensor exercises the same code.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import re
+import shutil
 import tempfile
 import types
 import unittest
@@ -105,13 +108,22 @@ class MoeParStatsTestCase(TestBase):
         moe_par_stats._slot = 0
         moe_par_stats._step_base = 0
         moe_par_stats._meta_written = False
+        moe_par_stats._partial_steps = 0
         moe_par_stats._current_method = "?"
         moe_par_stats._route_note = None
+        moe_par_stats._route_pairs_total = 0
         moe_par_stats._pad_pairs_subtracted = 0
         moe_par_stats._pad_notes_used = 0
         moe_par_stats._pad_notes_misplaced = 0
         moe_par_stats._pad_expert_used = None
         moe_par_stats._negative_cells = 0
+        moe_par_stats._compute_note = None
+        moe_par_stats._buf_compute = None
+        moe_par_stats._compute_ords.clear()
+        moe_par_stats._compute_rows_total = 0
+        moe_par_stats._compute_pairs_total = 0
+        moe_par_stats._pad_rows.clear()
+        moe_par_stats._pad_rows_total = 0
         moe_par_stats._scopes.clear()
         moe_par_stats._tail_at = None
         if moe_par_stats._out is not None:
@@ -392,12 +404,15 @@ class TestRouteNote(MoeParStatsTestCase):
         moe_par_stats.note_route_counts(hist, 6, 2)
         moe_par_stats.record(self.l0, None, 1, "MoonEPCommImpl")
         self.assertEqual(int(hist[2]), 10, "the dispatcher's own histogram must be left as it was")
-        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 6)
+        # The pad is announced here but its row lives in the window, so it is not in
+        # the ledger yet: the total follows the rows that got written.
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 0)
         for layer in (self.l1, self.l0):  # the repeat closes step 0
             self._dispatch(layer, [0, 0, 0, 0, 0, 0, 0, 0])
         moe_par_stats._shutdown()
         body = [ln for ln in self._read_dump() if ln.startswith("step=")]
         self.assertTrue(any("counts=[1,0,4,0,0,0,0,0]" in ln for ln in body), body)
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 6)
 
     def test_a_pad_index_outside_the_histogram_is_reported(self):
         # The dispatcher names the pad expert in the histogram's own space; an index
@@ -502,8 +517,11 @@ class TestSummaryLineSurvivesWithoutAnExitHook(MoeParStatsTestCase):
         self._two_steps([4, 0, 0, 0, 0, 0, 0, 0], pad_pairs=5, pad_index=0)
         second = self._tails()
         self.assertEqual(len(second), 1, second)
-        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 16)
-        self.assertIn("pad_pairs_subtracted=16", second[0])
+        # Eleven of the sixteen announced pairs: the third pad of this pair of steps is
+        # still in the window, and the ledger counts the rows the dump holds (the
+        # invariant itself is pinned in TestPadLedgerFollowsTheRows).
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 11)
+        self.assertIn("pad_pairs_subtracted=11", second[0])
         # The rows written before the second flush survive the rewrite.
         body = [ln for ln in self._read_dump() if ln.startswith("step=")]
         self.assertTrue(any(ln.startswith("step=1 ") for ln in body), body)
@@ -514,6 +532,151 @@ class TestSummaryLineSurvivesWithoutAnExitHook(MoeParStatsTestCase):
         self._two_steps([1, 1, 0, 0, 0, 0, 0, 0])
         steps = sorted({int(re.match(r"step=(\d+)", ln).group(1)) for ln in self._read_dump() if ln.startswith("step=")})
         self.assertEqual(steps, [0, 1, 2, 3], steps)
+
+
+class TestPadLedgerFollowsTheRows(MoeParStatsTestCase):
+    """``pad_pairs_subtracted`` counts the pad rows the dump holds, not the notes.
+
+    It used to be accrued when the dispatcher announced the pad -- one layer ahead of
+    the flush that writes it -- so the total ran ahead of the ``scope=pad`` rows by the
+    layer still in flight and the analysis cross-check flagged a dump that was exact.
+    """
+
+    flush_every = 1
+
+    def setUp(self):
+        super().setUp()
+        self.l0 = _fake_layer(51, 4, 8, ep_rank=0, ep_size=2)
+        self.l1 = _fake_layer(52, 4, 8, ep_rank=0, ep_size=2)
+
+    def _dispatch(self, layer, pad_pairs=0, pad_index=-1):
+        moe_par_stats.note_route_counts(
+            torch.tensor([9, 2, 0, 0, 0, 0, 0, 0], dtype=torch.int32), pad_pairs, pad_index
+        )
+        moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
+
+    def _pad_pairs_written(self):
+        total = 0
+        for line in self._read_dump():
+            if "scope=pad " in line:
+                total += sum(int(v) for v in re.search(r"counts=\[([^\]]*)\]", line).group(1).split(","))
+        return total
+
+    def _meta_total(self):
+        tails = [ln for ln in self._read_dump() if ln.startswith("# meta partial_steps=")]
+        if not tails:
+            return None
+        return int(re.search(r"pad_pairs_subtracted=(\d+)", tails[-1]).group(1))
+
+    def test_a_pad_is_not_counted_before_its_row_is_written(self):
+        self._dispatch(self.l0, pad_pairs=5, pad_index=0)
+        self.assertEqual(self._read_dump(), [], "the window has not been flushed")
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 0)
+        self._dispatch(self.l0, pad_pairs=0)  # the repeat closes the step and flushes
+        self.assertEqual(self._pad_pairs_written(), 5)
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 5)
+        self.assertEqual(self._meta_total(), 5)
+
+    def test_the_total_never_runs_ahead_of_the_rows(self):
+        for i, pads in enumerate((4, 5, 6, 3, 2, 1)):
+            self._dispatch((self.l0, self.l1)[i % 2], pad_pairs=pads, pad_index=0)
+            written = self._pad_pairs_written()
+            self.assertEqual(moe_par_stats._pad_pairs_subtracted, written, f"after dispatch {i}")
+            meta = self._meta_total()
+            if meta is not None:
+                self.assertEqual(meta, written, f"the # meta line disagrees after dispatch {i}")
+        moe_par_stats._shutdown()
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, self._pad_pairs_written())
+        self.assertEqual(self._pad_pairs_written(), sum((4, 5, 6, 3, 2, 1)))
+
+
+class TestLedgerLine(MoeParStatsTestCase):
+    """``MOONEP_BALANCE_STATS=1`` prints the ledger the dump itself holds.
+
+    A served run is force-killed, so its workers never reach an exit hook: this line
+    is the only ledger left in the log. It is printed from ``_flush`` out of the same
+    totals the ``# meta`` line carries, so the log cannot disagree with the dump.
+    """
+
+    flush_every = 1
+
+    def setUp(self):
+        super().setUp()
+        self._patch(moe_par_stats, "_BALANCE_ON", True)
+        self._patch(moe_par_stats, "_BALANCE_EVERY", 1)
+        self.l0 = _fake_layer(61, 2, 8, ep_rank=0, ep_size=4)
+        self.l1 = _fake_layer(62, 2, 8, ep_rank=0, ep_size=4)
+
+    def _dispatch(self, layer):
+        """One layer: 13 real pairs sent, 4 pad pairs, 17 (token, expert) pairs run.
+
+        The rank keeps experts 0 and 1, and prefetches expert 2 into a slot, so its
+        compute row is ``[9, 2, 6]`` home-first -- the pads land on its own expert 0,
+        which is what the dispatcher's home-first padding does.
+        """
+        moe_par_stats.note_route_counts(torch.tensor([9, 2, 6, 0, 0, 0, 0, 0], dtype=torch.int32), 4, 0)
+        moe_par_stats.note_compute_load(
+            torch.tensor([9, 2, 6], dtype=torch.int32), 0, 2, torch.tensor([2], dtype=torch.int64)
+        )
+        moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
+
+    def _steps(self, count):
+        """``count`` complete steps of two layers; the third dispatch closes a step."""
+        for _ in range(count):
+            self._dispatch(self.l0)
+            self._dispatch(self.l1)
+
+    def _ledger(self, buf):
+        return [ln for ln in buf.getvalue().splitlines() if ln.startswith("[moe-par-ledger")]
+
+    def _fields(self, line):
+        """The line's ``key=value`` pairs, ignoring the ``(N/layer)`` annotations."""
+        return {m.group(1): int(m.group(2)) for m in re.finditer(r"([a-z_]+)=(\d+)", line)}
+
+    def test_the_line_carries_the_dumps_own_totals(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self._steps(2)
+            moe_par_stats._shutdown()
+        lines = self._ledger(buf)
+        self.assertEqual(len(lines), 2, lines)
+        # One step's worth: 2 layers x (13 rows, 4 pads, 17 compute).
+        self.assertEqual(self._fields(lines[0]), {"steps": 1, "rows": 26, "pads": 8, "compute": 34})
+        self.assertEqual(self._fields(lines[1]), {"steps": 2, "rows": 52, "pads": 16, "compute": 68})
+        self.assertNotIn("dropped=", lines[1], "every pair that was sent was computed")
+        # And the same totals are the ones the dump ends with.
+        tail = next(ln for ln in self._read_dump() if ln.startswith("# meta partial_steps="))
+        self.assertIn("pad_pairs_subtracted=16", tail)
+        self.assertIn("compute_rows_total=4 compute_pairs_total=68", tail)
+        rows = sum(
+            sum(int(v) for v in re.search(r"counts=\[([^\]]*)\]", ln).group(1).split(","))
+            for ln in self._read_dump()
+            # The primary rows: the routing left after the pad block came out.
+            if ln.startswith("step=") and "scope=compute" not in ln and "scope=pad" not in ln
+        )
+        self.assertEqual(rows, 52)
+        self.assertEqual(moe_par_stats._route_pairs_total, rows)
+
+    def test_the_interval_is_layers_and_not_steps(self):
+        # MOONEP_BALANCE_STATS_EVERY is documented in layers, because that is the unit
+        # the operator sees in the model; 4 layers of a 2-layer step is every 2 steps.
+        with patch.object(moe_par_stats, "_BALANCE_EVERY", 4):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self._steps(2)
+                moe_par_stats._shutdown()
+        lines = self._ledger(buf)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(self._fields(lines[0])["steps"], 2)
+
+    def test_nothing_is_printed_unless_asked(self):
+        for name, value in (("_BALANCE_ON", False), ("_BALANCE_EVERY", 0)):
+            self._reset()
+            buf = io.StringIO()
+            with patch.object(moe_par_stats, name, value), contextlib.redirect_stdout(buf):
+                self._steps(2)
+                moe_par_stats._shutdown()
+            self.assertEqual(self._ledger(buf), [], f"{name}={value} must stay quiet")
 
 
 class TestAnalyzer(TestBase):
@@ -836,6 +999,362 @@ class TestGlobalScopeRoundTrip(MoeParStatsTestCase):
         # The report reads the flag off the payload, so it has to be in there.
         payload = self.mod.build_payload([run])["runs"][0]
         self.assertTrue(payload["pad"]["tail_missing"])
+
+
+class TestComputeNote(MoeParStatsTestCase):
+    """The receive-side row: the rows a rank ran, as opposed to the ones routed to it.
+
+    MoonEP hands the recorder its own counts, laid out as ``[home experts | prefetch
+    slot groups]``. The row has to come out in global expert coordinates, or the two
+    accounting views could not be compared expert for expert.
+    """
+
+    global_experts = 8
+    local_experts = 2
+
+    def setUp(self):
+        super().setUp()
+        self.layer = _fake_layer(400, self.local_experts, self.global_experts, ep_rank=0, ep_size=4)
+
+    def _note(self, counts, home_first=0, slots=None):
+        moe_par_stats.note_compute_load(
+            torch.tensor(counts, dtype=torch.int32),
+            home_first,
+            self.local_experts,
+            None if slots is None else torch.tensor(slots, dtype=torch.int64),
+        )
+
+    def _step(self, hist, compute, pads=0, pad_expert=-1, slots=None, home_first=0, received=None):
+        """One layer the way MoonEP drives it: what it sent, and what it ran."""
+        moe_par_stats.note_route_counts(torch.tensor(hist, dtype=torch.int32), pads, pad_expert)
+        self._note(compute, home_first, slots)
+        moe_par_stats.record(
+            self.layer,
+            torch.tensor(received or hist[: self.local_experts], dtype=torch.int32),
+            1,
+            "MoonEPCommImpl",
+        )
+
+    def _rows(self, scope):
+        return [ln for ln in self._read_dump() if f"scope={scope} " in ln]
+
+    def _values(self, line):
+        return [int(v) for v in line.split("counts=[", 1)[1].rstrip("]").split(",")]
+
+    def test_the_row_is_what_this_rank_ran_in_global_coordinates(self):
+        self._step([4, 4, 4, 4, 0, 0, 0, 0], [4, 4])
+        self._step([4, 4, 4, 4, 0, 0, 0, 0], [4, 4])
+        moe_par_stats._shutdown()
+
+        rows = self._rows("compute")
+        self.assertEqual(len(rows), 2, "one compute row per layer the rank ran")
+        self.assertEqual(self._values(rows[0]), [4, 4, 0, 0, 0, 0, 0, 0])
+
+    def test_a_slot_group_lands_on_the_expert_it_carries(self):
+        # Slot b holds whichever expert the plan pulled in -- a global id, not a
+        # position -- and an empty slot (-1) carries nothing.
+        self._step([0, 0, 0, 0, 0, 0, 0, 0], [2, 1, 9, 5, 0], slots=[6, 3, -1])
+        moe_par_stats._shutdown()
+        self.assertEqual(self._values(self._rows("compute")[0]), [2, 1, 0, 5, 0, 0, 9, 0])
+
+    def test_the_pads_are_not_subtracted_from_the_rows_that_ran(self):
+        # The routing row is real traffic, so its pads come out; the compute row is
+        # the rows the matmul saw, and a pad row is one of them.
+        self._step([15, 8, 0, 0, 0, 0, 0, 0], [15, 8], pads=3, pad_expert=0)
+        moe_par_stats._shutdown()
+        self.assertEqual(self._values(self._rows("global")[0]), [12, 8, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(self._values(self._rows("compute")[0]), [15, 8, 0, 0, 0, 0, 0, 0])
+        # And the pads are their own row, so the split is exact in the dump itself.
+        self.assertEqual(self._values(self._rows("pad")[0]), [3, 0, 0, 0, 0, 0, 0, 0])
+
+    def test_the_note_is_consumed_once(self):
+        hist = torch.tensor([1, 1, 0, 0, 0, 0, 0, 0], dtype=torch.int32)
+        moe_par_stats.note_route_counts(hist, 0, -1)
+        self._note([5, 5])
+        moe_par_stats.record(self.layer, None, 1, "MoonEPCommImpl")
+        # The next step announces its routing again but not its work, and a note is
+        # per record: nothing is carried over to a layer that did not announce.
+        moe_par_stats.note_route_counts(hist, 0, -1)
+        moe_par_stats.record(self.layer, None, 1, "MoonEPCommImpl")
+        moe_par_stats._shutdown()
+        rows = self._rows("compute")
+        self.assertEqual(len(rows), 1, "one announcement, one row")
+        self.assertEqual(self._values(rows[0]), [5, 5, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(len(self._rows("global")), 2, "the routing rows are both there")
+
+    def test_a_note_is_snapshotted_not_held(self):
+        # The caller goes on to hand the same tensor to the grouped matmul as its
+        # group_list; a kernel rewriting it in place must not change what was recorded.
+        counts = torch.tensor([3, 2], dtype=torch.int32)
+        moe_par_stats.note_route_counts(torch.tensor([3, 2, 0, 0, 0, 0, 0, 0], dtype=torch.int32), 0, -1)
+        moe_par_stats.note_compute_load(counts, 0, self.local_experts)
+        counts.fill_(99)
+        moe_par_stats.record(self.layer, None, 1, "MoonEPCommImpl")
+        moe_par_stats._shutdown()
+        self.assertEqual(self._values(self._rows("compute")[0]), [3, 2, 0, 0, 0, 0, 0, 0])
+
+    def test_a_home_block_that_does_not_fit_is_reported_not_guessed(self):
+        self._step([0] * 8, [5, 5], home_first=7)
+        moe_par_stats._shutdown()
+        self.assertEqual(self._rows("compute"), [])
+        # The routing row is unaffected, and the problem is said out loud once.
+        self.assertEqual(len(self._rows("global")), 1)
+        self.assertIn("compute-geometry", moe_par_stats._warned)
+
+    def test_a_profile_run_records_no_compute_row(self):
+        context = types.SimpleNamespace(in_profile_run=True)
+        with patch.object(moe_par_stats, "_EXTRA_CTX", context):
+            self._step([1, 1, 0, 0, 0, 0, 0, 0], [1, 1])
+        self.assertEqual(self._read_dump(), [])
+
+    def test_the_header_names_the_pair_of_views_and_the_exit_line_counts_them(self):
+        self._step([1, 1, 0, 0, 0, 0, 0, 0], [3, 4])
+        self._step([1, 1, 0, 0, 0, 0, 0, 0], [8, 6], pads=3, pad_expert=1)
+        moe_par_stats._shutdown()
+        lines = self._read_dump()
+        header = [ln for ln in lines if ln.startswith("# meta")][0]
+        self.assertIn("counts_scope=global+compute", header)
+        self.assertIn("scope=global", self._rows("global")[0], "the primary rows are named when the dump is not")
+        tail = [ln for ln in lines if ln.startswith("# meta partial_steps=")][0]
+        self.assertIn("compute_rows_total=2", tail)
+        self.assertIn("compute_pairs_total=21", tail)
+        # The pad counters sit in the same line, next to the compute ones.
+        self.assertIn("pad_pairs_subtracted=3", tail)
+        self.assertIn("pad_rows_total=1", tail)
+
+    def test_the_counts_of_a_rank_that_ran_only_slots_still_add_up(self):
+        # The rank holds nothing of its home experts this step -- all of its work came
+        # in through the slots. That is a legitimate row and must not look empty.
+        self._step([0] * 8, [0, 0, 6, 6, 0], slots=[5, 7, -1], pads=2, pad_expert=1)
+        moe_par_stats._shutdown()
+        self.assertEqual(self._values(self._rows("compute")[0]), [0, 0, 0, 0, 0, 6, 0, 6])
+
+
+class TestTwoViewRoundTrip(MoeParStatsTestCase):
+    """A MoonEP dispatch whose plan relocated rows, so the two views must differ.
+
+    The construction is fixed by hand, which is the point: every number asserted below
+    is arithmetic on this doctring's own setup rather than a re-derivation by the code
+    under test. Per (step, layer), over ``n_ranks = 4`` ranks holding 2 experts each:
+
+    - 128 pairs are routed, 44 of them to expert 2 -- rank 1's expert, and expert 2 is
+      the hotspot that makes the routing view skewed;
+    - 20 of expert 2's rows were pulled into prefetch slots held by ranks 0, 2 and 3
+      (7, 7 and 6 rows), so three ranks run work that expert 2's owner is credited for;
+    - 5 pairs of expert 4 (rank 2's) fell to the capacity envelope and were never run;
+    - every rank pads its own first expert (0, 2, 4, 6) with 6 pairs per layer.
+
+    So the routing view totals 24/56/24/24 per layer and the compute view 37/42/32/36:
+    relocation flattens the hotspot, which is exactly what the report is to show.
+    """
+
+    n_ranks = 4
+    global_experts = 8
+    local_experts = 2
+    topk = 2
+    n_layers = 3
+    n_steps = 5
+    tokens = 64
+    pads = 6
+    routed = (12, 12, 44, 12, 12, 12, 12, 12)
+    moved = {0: 7, 2: 7, 3: 6}  # rank -> rows of the hot expert pulled into its slot
+    drop = 5  # pairs the capacity envelope rejected
+    hot_expert = 2  # rank 1's: the rank that owns it is not the one that runs all of it
+    dropped_expert = 4  # rank 2's
+
+    @property
+    def step_layers(self):
+        return self.n_steps * self.n_layers
+
+    def _receive(self, rank):
+        """The counts this rank runs: its home block, minus what left, plus its slots."""
+        home = rank * self.local_experts
+        counts = [self.routed[home] + self.pads, self.routed[home + 1]]
+        if home == self.hot_expert:
+            # The hot expert's owner runs whatever the plan did not relocate.
+            counts[0] -= sum(self.moved.values())
+        if home == self.dropped_expert:
+            counts[0] -= self.drop
+        slots = []
+        if rank in self.moved:
+            counts.append(self.moved[rank])
+            slots.append(self.hot_expert)
+        if rank == self.n_ranks - 1:
+            counts.append(0)  # the plan left this slot empty
+            slots.append(-1)
+        return counts, (slots or None)
+
+    def _write_all_ranks(self):
+        layers = [
+            _fake_layer(500 + i, self.local_experts, self.global_experts, ep_rank=0, ep_size=self.n_ranks,
+                        topk=self.topk)
+            for i in range(self.n_layers)
+        ]
+        for rank in range(self.n_ranks):
+            self._reset()
+            with patch.object(moe_par_stats, "_rank_id", lambda r=rank: r):
+                for layer in layers:
+                    layer._expert_map = torch.tensor(
+                        [g - rank * self.local_experts
+                         if rank * self.local_experts <= g < (rank + 1) * self.local_experts else -1
+                         for g in range(self.global_experts)], dtype=torch.int32)
+                for step in range(self.n_steps):
+                    for layer in layers:
+                        home = rank * self.local_experts
+                        # The sending side: `topk_c` splits a step's routing over the
+                        # ranks, so the sum over the ranks is the step's routing again.
+                        split = np.tile(np.array(self.routed, dtype=np.int64) // self.n_ranks,
+                                        (self.n_ranks, 1))
+                        split[0] += np.array(self.routed) - split.sum(axis=0)
+                        padded = split[rank].copy()
+                        padded[home] += self.pads
+                        counts, slots = self._receive(rank)
+                        moe_par_stats.note_route_counts(torch.tensor(padded, dtype=torch.int32), self.pads, home)
+                        moe_par_stats.note_compute_load(
+                            torch.tensor(counts, dtype=torch.int32),
+                            home,
+                            self.local_experts,
+                            None if slots is None else torch.tensor(slots, dtype=torch.int64),
+                        )
+                        moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
+                moe_par_stats._shutdown()
+
+    def test_the_two_views_differ_by_exactly_the_relocated_rows(self):
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+
+        self.assertEqual(run.scope, "global+compute")
+        self.assertEqual(run.primary, "global")
+        self.assertTrue(run.has_compute)
+        self.assertTrue(run.checks["flat"], f"the join must still reconcile: {run.checks}")
+        self.assertEqual(run.checks["missing_cells"], 0)
+
+        sl = self.step_layers
+        # Routing view: expert 2 is rank 1's, so all 44 of it lands on rank 1 -- even
+        # the 20 rows three other ranks actually ran. This is the upper bound.
+        np.testing.assert_allclose(run.rank_total, [24 * sl, 56 * sl, 24 * sl, 24 * sl])
+        self.assertAlmostEqual(run.par_whole, 56 / 32)
+        # Compute view: whoever ran the row carries it.
+        np.testing.assert_allclose(run.compute["rank_total"], [37 * sl, 42 * sl, 32 * sl, 36 * sl])
+        self.assertAlmostEqual(run.compute["par_whole"], 42 / (147 / 4))
+        # The whole point of the pair: relocation flattened the hotspot, and only the
+        # compute view shows it.
+        self.assertLess(run.compute["par_whole"], run.par_whole)
+
+    def test_the_experts_own_ledger_splits_exactly(self):
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+        sl = self.step_layers
+
+        # Per expert, in both views: 计算 = 真实路由 + pad - 丢弃.
+        for expert in range(self.global_experts):
+            routed = run.layer_expert[:, expert].sum()
+            pads = run.pad_layer_expert[:, expert].sum()
+            computed = run.compute_layer_expert[:, expert].sum()
+            dropped = self.drop * sl if expert == 4 else 0
+            self.assertAlmostEqual(routed, self.routed[expert] * sl, msg=f"expert {expert} routing")
+            self.assertEqual(pads, self.pads * sl if expert % 2 == 0 else 0, f"expert {expert} pads")
+            self.assertAlmostEqual(computed, routed + pads - dropped, delta=1e-6, msg=f"expert {expert} compute")
+        # The expert dimension is where the split is exact: the pads of the hot expert
+        # are known even though three ranks ran part of it.
+        self.assertAlmostEqual(run.compute_layer_expert[:, 2].sum(), 44 * sl + self.pads * sl)
+
+    def test_the_rank_ledger_is_exact_where_it_can_be_and_an_estimate_where_it_cannot(self):
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+        ledger = run.ledger
+        sl = self.step_layers
+
+        self.assertAlmostEqual(ledger["route_total"], 128 * sl)
+        self.assertAlmostEqual(ledger["pad_total"], self.n_ranks * self.pads * sl)
+        self.assertAlmostEqual(ledger["sent_total"], ledger["route_total"] + ledger["pad_total"])
+        self.assertAlmostEqual(ledger["compute_total"], 147 * sl)
+        self.assertAlmostEqual(ledger["dropped"], self.drop * sl)
+
+        by_rank = {entry["rank"]: entry for entry in ledger["per_rank"]}
+        # Routing view, per rank: the pads are the rank's own, so 真实 + pad is exact.
+        np.testing.assert_allclose([by_rank[r]["route"] for r in range(4)], [24 * sl, 56 * sl, 24 * sl, 24 * sl])
+        np.testing.assert_allclose([by_rank[r]["pad"] for r in range(4)], [self.pads * sl] * 4)
+        for rank in range(4):
+            self.assertAlmostEqual(by_rank[rank]["sent"], by_rank[rank]["route"] + by_rank[rank]["pad"])
+        # Compute view, per rank: exact, because it is the row the rank wrote.
+        np.testing.assert_allclose([by_rank[r]["compute"] for r in range(4)], [37 * sl, 42 * sl, 32 * sl, 36 * sl])
+
+        # The one thing the data cannot say: how many of expert 2's pads rank 1 ran
+        # itself (it ran 30 of the expert's 50 rows a layer) and how many came with
+        # the slots. The estimate spreads them by the share each rank ran.
+        pad_est = {rank: by_rank[rank]["pad_est"] for rank in range(4)}
+        self.assertAlmostEqual(pad_est[1], 90 * 30 / 50, places=6)
+        self.assertAlmostEqual(pad_est[0], 90 + 90 * 7 / 50, places=6)
+        self.assertAlmostEqual(pad_est[3], 90 + 90 * 6 / 50, places=6)
+        # Expert 4's pads follow the rows that were dropped, and the drops are what
+        # makes the estimate miss the pad total -- in the one direction that is safe.
+        self.assertAlmostEqual(pad_est[2], 90 * 13 / (12 + self.pads) + 90 * 7 / 50, places=6)
+        total = sum(pad_est.values())
+        self.assertLess(total, ledger["pad_total"])
+        # real_est is the computed total with the estimated padding taken back out.
+        for rank in range(4):
+            self.assertAlmostEqual(by_rank[rank]["real_est"], by_rank[rank]["compute"] - by_rank[rank]["pad_est"])
+
+    def test_the_payload_carries_both_views(self):
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+        payload = self.mod.build_payload([run])["runs"][0]
+
+        self.assertEqual(payload["scope"], "global+compute")
+        self.assertEqual(payload["primary"], "global")
+        self.assertTrue(payload["has_compute"])
+        self.assertIsNotNone(payload["compute"])
+        self.assertEqual(len(payload["compute"]["rank_total"]), self.n_ranks)
+        self.assertEqual(np.shape(payload["compute"]["layer_expert"]), (self.n_layers, self.global_experts))
+        self.assertEqual(np.shape(payload["compute"]["rank_expert"]), (self.n_ranks, self.global_experts))
+        # The pad ledger reaches the report on its own, so 计算 can be split there.
+        self.assertAlmostEqual(payload["ledger"]["compute_total"], 147 * self.step_layers)
+        self.assertAlmostEqual(payload["ledger"]["pad_total"], run.pad_subtracted)
+        self.assertEqual(payload["pad"]["rows"], self.n_ranks * self.step_layers)
+        self.assertAlmostEqual(payload["pad"]["pairs"], run.pad_subtracted)
+
+    def test_an_old_dump_still_has_no_compute_view(self):
+        # Backwards compatibility: a dump recorded before the second view existed must
+        # read exactly as it did, with nothing invented for it.
+        layer = _fake_layer(600, self.local_experts, self.global_experts, ep_rank=0, ep_size=self.n_ranks,
+                            topk=self.topk)
+        for _ in range(4):
+            moe_par_stats.note_route_counts(torch.zeros(self.global_experts, dtype=torch.int32), 0, -1)
+            moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
+        moe_par_stats._shutdown()
+        run = self.mod.Run("old", self.tmpdir).finalize()
+        self.assertEqual(run.scope, "global")
+        self.assertFalse(run.has_compute)
+        self.assertIsNone(run.compute)
+        self.assertIsNone(run.ledger["compute_total"])
+        payload = self.mod.build_payload([run])["runs"][0]
+        self.assertFalse(payload["has_compute"])
+        self.assertIsNone(payload["compute"])
+
+
+class TestReportJavaScript(TestBase):
+    """The report is one HTML string carrying its own script, and nothing parses it.
+
+    A stray brace in the template leaves every panel blank in the browser while the
+    analyzer still exits 0 and writes the file -- the HTML itself stays well-formed,
+    so no other check in this suite can see it. Hence a test rather than a comment.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_analyzer()
+
+    @unittest.skipUnless(shutil.which("node"), "node 不在 PATH 上；报告本身不依赖它，跳过这一项")
+    def test_the_template_parses(self):
+        self.assertEqual(self.mod.report_js_problems(self.mod._TEMPLATE), [])
+
+    @unittest.skipUnless(shutil.which("node"), "node 不在 PATH 上；报告本身不依赖它，跳过这一项")
+    def test_a_stray_brace_in_the_template_is_caught(self):
+        broken = self.mod._TEMPLATE.replace("function renderAll() {", "function renderAll() { {")
+        problems = self.mod.report_js_problems(broken)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("白屏", problems[0])
 
 
 if __name__ == "__main__":

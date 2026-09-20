@@ -33,6 +33,10 @@ is independent of EPLB (``dynamic_eplb`` may stay off).
 ``VLLM_ASCEND_MOE_PAR_STATS_DIR``         output directory, default ``/tmp/moe_par_stats``
 ``VLLM_ASCEND_MOE_PAR_STATS_TAG``         run label in the filename, default ``run``
 ``VLLM_ASCEND_MOE_PAR_FLUSH_EVERY``       steps buffered per ``.cpu()``, default ``16``
+``MOONEP_BALANCE_STATS=1``                also log the running ledger every
+``MOONEP_BALANCE_STATS_EVERY=N``          ``N`` layers (0 = exit only). The ledger
+line comes from this module's own host-side totals, so it can never disagree with
+the dump, and it is the only ledger a force-killed service leaves in the log.
 
 Dump format, one file per rank named ``moe_par_{TAG}_rank{RANK}.log``::
 
@@ -74,6 +78,32 @@ Two counting scopes are dumped, named by ``counts_scope`` in the header:
     entirely). The sending-side histogram the dispatcher hands over through
     ``note_route_counts()`` is exact by construction -- one histogram per layer,
     counted before the plan -- and the pads are subtracted where they were counted.
+
+MoonEP additionally writes a second row per (step, layer), marked ``scope=compute``,
+and the header then says ``counts_scope=global+compute``. Both rows span the model's
+experts; they differ in *what they are attributed to*:
+
+* the ``global`` row is the routing: which logical experts the gate chose. The
+  analysis attributes it to the ranks that *hold* those experts, so a row a slot
+  moved to another rank still counts against the owner -- that is the view that
+  answers "where would the load have gone without relocation", and it is an upper
+  bound on the real imbalance.
+* the ``compute`` row is the work: which rows this rank actually ran. It is the
+  dispatcher's receive-side counts (``local_counts``, including the slot groups a
+  prefetch created) folded back onto global expert ids through
+  ``note_compute_load()``, so a row kept local and computed against a prefetched
+  weight lands on the rank that computed it -- "who is busy", which is what a
+  peak-to-average ratio over ranks is supposed to measure.
+
+One (token, expert) pair is counted once in each row: the expert's own column sums
+across the ranks give the load of that logical expert, and a rank's row sums give
+what that rank computed, so ``sum_experts == sum_ranks == computed pairs`` holds
+inside the compute view. The two views differ only in the rank dimension (the
+expert dimension agrees up to the rows the capacity envelope drops). The compute
+row keeps the capacity pads, because on the receiving side a pad row is
+indistinguishable from a real row of the same expert and may be computed by any
+rank that prefetched that expert; the pad block is accounted for by the ``global``
+row's ledger (``pad_pairs_subtracted``), and the analysis reports both numbers.
 """
 
 from __future__ import annotations
@@ -95,6 +125,14 @@ _ENABLED = envs.VLLM_ASCEND_MOE_PAR_STATS
 _DIR = envs.VLLM_ASCEND_MOE_PAR_STATS_DIR
 _TAG = envs.VLLM_ASCEND_MOE_PAR_STATS_TAG
 _FLUSH_EVERY = max(1, envs.VLLM_ASCEND_MOE_PAR_FLUSH_EVERY)
+
+# MOONEP_BALANCE_STATS=1: log a ``[moe-par-ledger]`` line every
+# MOONEP_BALANCE_STATS_EVERY layers (0 = never, the dump is the only output). The
+# line mirrors the dump's own host-side totals -- see _ledger_line -- so the served
+# leg gets the same per-step ledger the MoonEP dispatcher prints, from the one
+# source both legs already agree on.
+_BALANCE_ON = os.environ.get("MOONEP_BALANCE_STATS", "0") == "1"
+_BALANCE_EVERY = int(os.environ.get("MOONEP_BALANCE_STATS_EVERY", "0") or 0)
 
 # Layers are numbered by first sight, so neither the layer count nor the layer
 # order is assumed anywhere.
@@ -131,15 +169,42 @@ _partial_steps = 0
 # the dispatch, which carries MoonEP's capacity pads and misses rows the dispatch
 # dropped) and carries the pad block to remove: (histogram, pad_pairs, pad_expert).
 _route_note: tuple[Any, int, int] | None = None
+# Ledger totals, accrued in _flush from the rows actually written rather than from
+# the notes that announced them: the note of the layer that closes a step arrives
+# before that step is flushed, so a note-time total runs one layer ahead of the
+# dump and the analysis cross-check (pad rows vs pad total) would fire on it.
 _pad_pairs_subtracted = 0
+_route_pairs_total = 0
 _pad_notes_used = 0
 _pad_notes_misplaced = 0
 _pad_expert_used: int | None = None
 _negative_cells = 0
 
+# The rows this rank is about to *compute* for the layer whose dispatch just
+# finished, announced through ``note_compute_load()`` and consumed by the
+# ``record()`` that follows it -- same one-shot contract as the routing note. The
+# payload is (counts, home_first, epn, slot_experts) and is expanded to a row of
+# global expert ids when the layer is recorded, because only then is the model's
+# expert count known: (counts, home_first, epn, slot_experts).
+_compute_note: tuple[Any, int, int, Any] | None = None
+_buf_compute: torch.Tensor | None = None  # [window, layers, global_experts] int32, on device
+_compute_ords: list[set[int]] = []  # window slot -> layer ords that have a compute row
+_compute_rows_total = 0
+_compute_pairs_total = 0
+
+# The pad block the routing notes carried, one (slot, layer_ord, expert, pairs) per
+# layer that padded. Host-side ints only -- the note knows them already, so pads
+# need no device buffer -- and they let the dump show padding as its own ledger
+# instead of only as a scalar in the tail.
+_pad_rows: list[tuple[int, int, int, int]] = []
+_pad_rows_total = 0
+
 # ``global`` for a run whose rows are index by global expert id, ``local`` for one
-# index by local slot. A run that used both is recorded as ``mixed``: the analysis
-# would be reading one of the two widths wrong, so it must not guess.
+# index by local slot, ``compute`` for the extra rows MoonEP writes for the work
+# this rank actually ran. A run that used both ``global`` and ``local`` is recorded
+# as ``mixed``: the analysis would be reading one of the two widths wrong, so it
+# must not guess. ``global`` + ``compute`` is not a mix -- both rows span the model
+# and each has a single meaning -- so it gets its own name.
 _scopes: set[str] = set()
 
 
@@ -171,6 +236,51 @@ def note_route_counts(histogram: torch.Tensor, pad_pairs: int, pad_index: int) -
         _route_note = None
         return
     _route_note = (histogram, max(0, int(pad_pairs)), int(pad_index))
+
+
+def note_compute_load(
+    counts: torch.Tensor,
+    home_first: int,
+    epn: int,
+    slot_experts: torch.Tensor | None = None,
+) -> None:
+    """Announce the rows this rank is about to *compute*, by global expert id.
+
+    MoonEP hands over its own receive-side counts -- what it is going to run, as
+    opposed to what the gate routed. They are laid out as ``[epn home experts |
+    B prefetch slot groups]``: the home block covers the contiguous global expert
+    range starting at ``home_first``, and group ``b`` holds the experts this rank
+    pulled into slot ``b`` (``slot_experts[b]``, a global expert id, ``-1`` for an
+    empty slot). Owner mode has no slots and passes ``None``.
+
+    Recording this row is what makes "who is actually busy" measurable: the row is
+    attributed to the rank that wrote it, so a row the plan relocated to another
+    rank counts against *that* rank, unlike the routing row, which is attributed to
+    the expert's owner. The two rows are the two accounting views of the same
+    dispatch, and the analysis reports both.
+
+    The counts include the capacity pads, because on the receiving side a pad row
+    is a row like any other: it sits in the same slot as the expert's real rows and
+    the plan may hand it to any rank that holds that expert, so it cannot be told
+    apart here. The pads are therefore also announced *apart* -- the routing note
+    carries them, and the recorder writes them as their own rows (``scope=pad``) --
+    so the report can split "computed" into real work and padding.
+
+    Overwrites rather than accumulates, exactly like ``note_route_counts()``: the
+    ``record()`` of the same layer consumes it once.
+    """
+    global _compute_note
+    if not _ENABLED:
+        return
+    if counts is None or counts.numel() == 0 or epn <= 0:
+        _compute_note = None
+        return
+    # Snapshot, don't hold: the caller goes on to hand these counts to the grouped
+    # matmul as its `group_list`, and the recorder reads the note only after that.
+    # A count vector that a kernel rewrote on the way would silently misreport the
+    # load -- the one failure a measuring tool must not have. A few dozen ints, so
+    # the copy is a rounding error next to the layer it measures.
+    _compute_note = (counts.detach().clone(), int(home_first), int(epn), slot_experts)
 
 
 def _in_profile_run() -> bool:
@@ -214,18 +324,62 @@ def _take_route_note() -> tuple[Any, int, int] | None:
     return note
 
 
-def _counts_from_route_note(note: tuple[Any, int, int] | None) -> torch.Tensor | None:
-    """The note's histogram with this rank's pad block removed, or None.
+def _take_compute_note() -> tuple[Any, int, int, Any] | None:
+    """Consume the pending compute note, so a note is never applied twice."""
+    global _compute_note
+    note, _compute_note = _compute_note, None
+    return note
+
+
+def _expand_compute(note: tuple[Any, int, int, Any], width: int) -> torch.Tensor | None:
+    """Fold a compute note onto one row of ``width`` global expert ids, or None.
+
+    The home block is a contiguous global range, so it is a slice copy; the slot
+    groups are scattered (each holds whichever experts the plan pulled in), so they
+    need a scatter-add. Both happen on device -- the mapping is a tensor, and the
+    whole point of the row is to not depend on the analysis guessing the plan.
+    """
+    counts, home_first, epn, slot_experts = note
+    if home_first < 0 or home_first + epn > width:
+        _warn_once(
+            "compute-geometry",
+            "[moe-par] MoonEP compute note: home block [%d,%d) does not fit a %d-expert row; "
+            "skipping the compute row of that layer",
+            home_first,
+            home_first + epn,
+            width,
+        )
+        return None
+    row = torch.zeros(width, dtype=torch.int32, device=counts.device)
+    row[home_first : home_first + epn] = counts[:epn].to(torch.int32)
+    slots = counts[epn:]
+    if slot_experts is not None and slot_experts.numel() and slots.numel():
+        targets = slot_experts.reshape(-1)[: slots.numel()].to(torch.int64)
+        # A slot the plan left empty (-1) received nothing and must not land on an
+        # expert; clamping the index keeps the scatter in range and the value is
+        # zeroed with it.
+        keep = ((targets >= 0) & (targets < width)).to(torch.int32)
+        row.index_add_(0, targets.clamp_(0, width - 1), slots.to(torch.int32) * keep)
+    _scopes.add("compute")
+    return row
+
+
+def _counts_from_route_note(note: tuple[Any, int, int] | None) -> tuple[torch.Tensor | None, tuple[int, int] | None]:
+    """The note's histogram with this rank's pad block removed, plus which pads.
 
     The histogram is this rank's exact sending side, so the pads come off where
     they were counted and the subtraction can never leave a negative amount of real
     traffic -- unlike a subtraction against the receiving side, whose pad rows
     share a slot with real rows of the same expert. One device-side subtraction per
     layer: no host sync, no collective.
+
+    Returns ``(counts, pad)`` where ``pad`` is the removed ``(expert, pairs)`` block
+    (None when the layer did not pad), so the caller can write the pads as their own
+    row instead of losing them with the subtraction.
     """
-    global _pad_pairs_subtracted, _pad_notes_used, _pad_notes_misplaced, _pad_expert_used
+    global _pad_notes_used, _pad_notes_misplaced, _pad_expert_used
     if note is None:
-        return None
+        return None, None
     histogram, pairs, index = note
     # ``copy=True`` is load-bearing, not defensive: the dispatcher's histogram is
     # already int32, and ``to()`` returns the *same* tensor when the dtype matches,
@@ -235,16 +389,17 @@ def _counts_from_route_note(note: tuple[Any, int, int] | None) -> torch.Tensor |
     counts = histogram.reshape(-1).to(torch.int32, copy=True)
     _pad_notes_used += 1
     _scopes.add("global")
+    pad = None
     if pairs:
         if 0 <= index < counts.numel():
             counts[index] -= pairs
-            _pad_pairs_subtracted += pairs
             _pad_expert_used = index
+            pad = (index, int(pairs))
         else:
             # The dispatcher names the pad expert in the histogram's own space, so
             # this means the two disagreed about the model's expert count.
             _pad_notes_misplaced += 1
-    return counts
+    return counts, pad
 
 
 def record(layer: Any, expert_tokens: torch.Tensor | None, group_list_type: int, method_name: str) -> None:
@@ -254,44 +409,68 @@ def record(layer: Any, expert_tokens: torch.Tensor | None, group_list_type: int,
     that histogram wins over ``expert_tokens`` because it is the *sending* side of
     the dispatch, exact by construction. Every other method reports its own real
     counts here, index by local expert slot.
+
+    The same dispatch may also have announced its receive-side counts through
+    ``note_compute_load()``. Those become the layer's second row -- what this rank
+    computed, as opposed to what was routed -- and the pad block the routing note
+    carried becomes a third, so the dump separates real routing, padding and work
+    instead of leaving the reader to guess which is which.
     """
     if not _ENABLED:
         return
     # Consumed even on the early returns below: a note must not outlive the layer
     # that produced it and be applied to an unrelated one.
     note = _take_route_note()
+    compute_note = _take_compute_note()
     if expert_tokens is None and note is None:
         return
     try:
         if _in_profile_run():
             # Profile and dummy forwards at startup would otherwise pollute the dump.
             return
-        counts = _counts_from_route_note(note)
+        counts, pad = _counts_from_route_note(note)
         if counts is None:
             counts = _to_counts(expert_tokens, group_list_type)
             _scopes.add("local")
-        _record(layer, counts, method_name)
+        _record(layer, counts, method_name, compute_note, pad)
     except Exception:
         if "record" not in _warned:
             _warned.add("record")
             logger.warning("[moe-par] dropped a sample: failed to record MoE load", exc_info=True)
 
 
+def _ensure_window(buf: torch.Tensor | None, width: int, device, layers: int) -> torch.Tensor:
+    """Allocate a device window on first use and widen it as new layers appear.
+
+    A row of a different width is not accommodated: the caller rejects that layer
+    (see :func:`_record`), because every row of a dump is read as one expert space.
+    """
+    if buf is None:
+        return torch.zeros((_FLUSH_EVERY, max(layers, 1), width), dtype=torch.int32, device=device)
+    if buf.shape[2] != width or buf.shape[1] >= layers:
+        return buf
+    grown = torch.zeros((_FLUSH_EVERY, layers * 2, buf.shape[2]), dtype=torch.int32, device=buf.device)
+    grown[:, : buf.shape[1], :] = buf
+    return grown
+
+
 def _ensure_buf(counts: torch.Tensor) -> None:
-    """Allocate the device window on first use and widen it as new layers appear."""
     global _buf
-    width = int(counts.numel())
-    if _buf is None:
-        _buf = torch.zeros((_FLUSH_EVERY, max(len(_ord_of), 1), width), dtype=torch.int32, device=counts.device)
-        return
-    if _buf.shape[2] != width or _buf.shape[1] >= len(_ord_of):
-        return
-    grown = torch.zeros((_FLUSH_EVERY, len(_ord_of) * 2, _buf.shape[2]), dtype=torch.int32, device=_buf.device)
-    grown[:, : _buf.shape[1], :] = _buf
-    _buf = grown
+    _buf = _ensure_window(_buf, int(counts.numel()), counts.device, len(_ord_of))
 
 
-def _record(layer: Any, counts: torch.Tensor, method_name: str) -> None:
+def _ensure_compute_buf(row: torch.Tensor) -> None:
+    global _buf_compute
+    _buf_compute = _ensure_window(_buf_compute, int(row.numel()), row.device, len(_ord_of))
+
+
+def _record(
+    layer: Any,
+    counts: torch.Tensor,
+    method_name: str,
+    compute_note: tuple[Any, int, int, Any] | None = None,
+    pad: tuple[int, int] | None = None,
+) -> None:
     global _slot, _current_method, _partial_steps
     key = _layer_key(layer)
     layer_ord = _ord_of.setdefault(key, len(_ord_of))
@@ -307,6 +486,10 @@ def _record(layer: Any, counts: torch.Tensor, method_name: str) -> None:
             width,
         )
         return
+    # Expanded only now: a layer is what gives the row its expert count, and a
+    # compute note whose geometry does not fit this dump's rows is dropped with the
+    # routing row below rather than written at a width of its own.
+    compute_row = _expand_compute(compute_note, width) if compute_note is not None else None
     _valid.add(layer_ord)
     _layers[layer_ord] = layer
 
@@ -328,7 +511,19 @@ def _record(layer: Any, counts: torch.Tensor, method_name: str) -> None:
         _current_method = method_name
     _step_seen.add(key)
 
+    # Every slot of the window gets an entry, whether or not this layer announced a
+    # compute row: _flush walks the slots, and a step whose layers computed nothing
+    # (a rank that was sent no work) must not be the one that indexes past the end.
+    while len(_compute_ords) <= _slot:
+        _compute_ords.append(set())
     _buf[_slot, layer_ord, :] = counts.to(torch.int32)
+    if compute_row is not None:
+        _ensure_compute_buf(compute_row)
+        if _buf_compute.shape[2] == compute_row.numel() and _buf_compute.shape[1] > layer_ord:
+            _buf_compute[_slot, layer_ord, :] = compute_row
+            _compute_ords[_slot].add(layer_ord)
+    if pad is not None:
+        _pad_rows.append((_slot, layer_ord, int(pad[0]), int(pad[1])))
 
 
 def _clamp_negatives(host: np.ndarray) -> np.ndarray:
@@ -354,6 +549,15 @@ def _summary_line() -> str:
     pad = f" pad_pairs_subtracted={_pad_pairs_subtracted}"
     if _pad_expert_used is not None:
         pad += f" pad_expert_global={_pad_expert_used}"
+    if _pad_rows_total:
+        # Written rows, not notes: a dump whose pads were subtracted but not written
+        # (an old dump) has the pairs and no rows, and the two are cross-checked.
+        pad += f" pad_rows_total={_pad_rows_total}"
+    if _compute_rows_total:
+        # Rows and the pairs they hold: the pair total is what reconciles with the
+        # whole-run counters the dispatch itself prints (``rows_local``), and the
+        # row count catches a duplicate or a lost line the pairs alone would not.
+        pad += f" compute_rows_total={_compute_rows_total} compute_pairs_total={_compute_pairs_total}"
     if _pad_notes_misplaced:
         pad += f" pad_notes_misplaced={_pad_notes_misplaced}"
     if _negative_cells:
@@ -402,26 +606,109 @@ def _rewind_tail(out) -> None:
 
 def _flush() -> None:
     """Copy the completed steps to host and append them to this rank's dump."""
-    global _slot, _step_base, _meta_written
+    global _slot, _step_base, _meta_written, _compute_rows_total, _compute_pairs_total, _pad_rows_total
+    global _pad_pairs_subtracted, _route_pairs_total
     if _slot == 0 or _buf is None:
         return
     host = _clamp_negatives(_buf[:_slot].cpu().numpy())
+    compute = None
+    if _buf_compute is not None and any(_compute_ords):
+        compute = _clamp_negatives(_buf_compute[:_slot].cpu().numpy())
     out = _open()
     if not _meta_written:
         _write_meta(out)
         _meta_written = True
     _rewind_tail(out)
+    # ``scope=`` on the primary rows only when the dump carries more than one kind of
+    # row: a single-scope dump keeps the format it has always had, and a reader that
+    # predates this field sees exactly what it saw before.
+    mark = _scope_marker()
+    # One numpy reduction over the host window, not a second device read: the rows
+    # written below are exactly this sum, split per layer.
+    _route_pairs_total += int(host[:_slot].sum())
     for i in range(_slot):
         method = _methods[i] if i < len(_methods) else "?"
         step = _step_base + i
         for layer_ord in sorted(_valid):
             row = host[i, layer_ord].tolist()
-            out.write(f"step={step} layer={layer_ord} method={method} counts=[{','.join(str(v) for v in row)}]\n")
+            out.write(
+                f"step={step} layer={layer_ord} method={method}{mark} "
+                f"counts=[{','.join(str(v) for v in row)}]\n"
+            )
+        if compute is not None:
+            for layer_ord in sorted(_compute_ords[i]):
+                row = compute[i, layer_ord].tolist()
+                out.write(
+                    f"step={step} layer={layer_ord} method={method} scope=compute "
+                    f"counts=[{','.join(str(v) for v in row)}]\n"
+                )
+                _compute_rows_total += 1
+                _compute_pairs_total += int(sum(row))
+    # Pads last: one sparse row per padded layer, so the block the routing rows had
+    # subtracted stays in the dump as its own ledger instead of only as a total.
+    for slot, layer_ord, expert, pairs in _pad_rows:
+        if slot >= _slot:
+            continue
+        step = _step_base + slot
+        method = _methods[slot] if slot < len(_methods) else "?"
+        row = [0] * _buf.shape[2]
+        row[expert] = pairs
+        out.write(
+            f"step={step} layer={layer_ord} method={method} scope=pad "
+            f"counts=[{','.join(str(v) for v in row)}]\n"
+        )
+        _pad_rows_total += 1
+        _pad_pairs_subtracted += pairs
     out.flush()
     _step_base += _slot
     _slot = 0
     _methods.clear()
+    _compute_ords.clear()
+    _pad_rows.clear()
     _rewrite_tail(out)
+    _print_ledger()
+
+
+def _ledger_line() -> str:
+    """The ``[moe-par-ledger]`` line: the dump's totals, in the dump's own units.
+
+    Fields follow the dump's scopes, so they mean the same thing in every leg:
+    ``rows`` is the primary row -- the real routing for a MoonEP dump (pads already
+    subtracted), this rank's computed rows for a ``local``-scope one -- ``pads``
+    the pad block taken out of it (0 outside MoonEP) and ``compute`` the work rows
+    MoonEP writes alongside. ``rows + pads == compute`` closes the ledger; the
+    residual is printed as ``dropped`` rather than hidden, because a dispatch that
+    lost rows to its capacity envelope would otherwise look like a bookkeeping bug.
+    """
+    layers = _step_base * max(1, len(_valid))
+    per = lambda v: f" ({v / layers:.0f}/layer)" if layers else ""
+    parts = [
+        f"[moe-par-ledger r{_rank_id()} tag={_TAG}] steps={_step_base}",
+        f"rows={_route_pairs_total}{per(_route_pairs_total)}",
+        f"pads={_pad_pairs_subtracted}{per(_pad_pairs_subtracted)}",
+    ]
+    if _compute_pairs_total:
+        parts.append(f"compute={_compute_pairs_total}{per(_compute_pairs_total)}")
+        dropped = _compute_pairs_total - (_route_pairs_total + _pad_pairs_subtracted)
+        if dropped:
+            parts.append(f"dropped={dropped}")
+    return " ".join(parts)
+
+
+def _print_ledger() -> None:
+    """Log the running ledger every ``MOONEP_BALANCE_STATS_EVERY`` layers.
+
+    A served run is stopped by a force-kill of the worker tree, so no exit hook
+    runs and this line is the log's only ledger; it is printed from _flush, i.e.
+    for the steps already in the dump, and its numbers come from the same totals
+    the dump's ``# meta`` line carries -- the two cannot disagree.
+    """
+    if not (_BALANCE_ON and _BALANCE_EVERY and _step_base):
+        return
+    every = max(1, _BALANCE_EVERY // max(1, len(_valid)))
+    if _step_base % every:
+        return
+    print(_ledger_line(), flush=True)
 
 
 def _open():
@@ -497,11 +784,43 @@ def _world_size() -> int:
     return -1
 
 
+def _primary_scope() -> str:
+    """What the *primary* rows -- the ones each method reported -- are index by."""
+    kinds = _scopes & {"global", "local"}
+    if len(kinds) == 1:
+        return next(iter(kinds))
+    return "mixed" if kinds else "local"
+
+
 def _scope_name() -> str:
-    """What this dump's rows are index by: ``global``, ``local`` or ``mixed``."""
-    if len(_scopes) == 1:
-        return next(iter(_scopes))
-    return "mixed" if _scopes else "local"
+    """What this dump's rows are index by, as a whole.
+
+    ``global``/``local`` alone when a dump carries one kind of row, ``mixed`` for a
+    dump that used both (see the note on ``_scopes``), and ``global+compute`` for
+    MoonEP's two-view dump: both of its kinds of row span the model's experts and
+    each has one meaning, so the pair is a nameable combination, not a mix.
+    """
+    kinds = _scopes & {"global", "local"}
+    if not kinds:
+        return "compute" if "compute" in _scopes else "local"
+    if len(kinds) == 1:
+        name = next(iter(kinds))
+        return f"{name}+compute" if "compute" in _scopes else name
+    return "mixed"
+
+
+def _scope_marker() -> str:
+    """The ``scope=`` field the primary rows carry, or nothing.
+
+    Only written when the dump holds more than one kind of row -- otherwise the
+    header already says what every row is, and the dump keeps its old shape. A mixed
+    dump gets no marker at all: its primary rows are not one scope, and ``mixed`` as
+    a row value would read as if they were.
+    """
+    if len(_scopes) <= 1:
+        return ""
+    primary = _primary_scope()
+    return f" scope={primary}" if primary in ("global", "local") else ""
 
 
 def _write_meta(out) -> None:

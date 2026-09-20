@@ -11,7 +11,7 @@
 
 | 问题 | 报告位置 |
 |---|---|
-| **负载口径是什么**——每个量数的是什么、数据从哪来、不含什么 | 报告最上的「口径与统计 · 先读这里」面板 |
+| **负载口径是什么**——每个量数的是什么、数据从哪来、不含什么；「谁持有」与「谁真的算了」两套口径差在哪 | 报告最上的「口径与统计 · 先读这里」面板 + 「负载账本（分层）」 |
 | **峰均比（PAR）** 有多大——最忙的 rank 比平均忙多少 | KPI 卡片、PAR 折线、箱线对比 |
 | **token 在专家上的分布**——哪些专家是热点 | 层 × 逻辑专家热力图、专家负载剖面、单步专家剖面 |
 | **token 在 rank 上的分布**——哪张卡扛得多 | 每 rank 负载柱状图、各 rank 负载随步折线 |
@@ -50,7 +50,7 @@
 | `vllm_ascend/envs.py` | 修改（+4 个变量） | 集中定义 `VLLM_ASCEND_MOE_PAR_*` 开关（AGENTS.md 要求所有环境变量定义在此） |
 | `vllm_ascend/ops/fused_moe/fused_moe_0_23_0.py` | 修改（+调用点） | vllm 0.23.0 实际生效的 `AscendFusedMoE`，在 EPLB 计数点旁挂上打点 |
 | `vllm_ascend/ops/fused_moe/fused_moe.py` | 修改（+调用点） | 其它 vllm 版本的兼容分支，同样挂上打点 |
-| `vllm_ascend/ops/fused_moe/moonep_comm.py` | 修改（+调用点） | MoonEP 调度器把 plan 之前的发送侧直方图 `tpe` 连同 pad 对数/落点交给打点（`note_route_counts`），引擎行为不变 |
+| `vllm_ascend/ops/fused_moe/moonep_comm.py` | 修改（+调用点） | MoonEP 调度器把 plan 之前的发送侧直方图 `tpe` 连同 pad 对数/落点交给打点（`note_route_counts`），plan 定稿后再把本 rank 真算的 `local_counts` 交给打点（`note_compute_load`，写出第二套口径）；引擎行为不变 |
 | `scripts/moe_par/moe_par_bench.py` | **新增** | 驱动：跑数据集 → 写 dump + `bench.json`（含逐请求 TTFT/TPOT 与吞吐） |
 | `scripts/moe_par/analyze_moe_par.py` | **新增** | 分析器：多份 dump → 三种 PAR + 中文自包含 HTML 报告 |
 | `tests/ut/ops/test_moe_par_stats.py` | **新增** | CPU 可跑的 UT，同时覆盖打点写入与解析读出两侧 |
@@ -240,6 +240,12 @@ python scripts/moe_par/moe_par_bench.py --help
   `tpe = torch.histc(topk_c, bins=全局专家数)` 交给 `moe_par_stats.note_route_counts(...)`，
   由它替代方法返回的接收侧 `expert_tokens`，并按全局专家 id 扣掉 pad。这一路径同样**不上通信**：
   `tpe` 是设备侧已有的一张向量，交接只是把已有张量的引用传过去（记录时才 `.cpu()`）。
+- **MoonEP 一次派发写两行**：同一步同一层，除了上面那行「路由」（发送侧、扣过 pad），
+  `moonep_comm.py` 还会把 **plan 定稿之后的 `local_counts`** 交给
+  `note_compute_load(...)`，写成同一 (步, 层) 的另一行（`scope=compute`）——那是**本 rank 真要算的行**，
+  按全局专家 id 记、**含 pad**。两行是同一批 token 的两套归属口径（见 §6「两套 rank 口径」）。
+  它同样是设备侧已有张量的快照（`.detach().clone()`，几十个整数），**不上通信**；
+  只对 MoonEP 这一步多一次拷贝，非 MoonEP 的 method 不写这一行。
 
 ---
 
@@ -263,7 +269,7 @@ python scripts/moe_par/moe_par_bench.py --help
 | `ep_rank` / `ep_size` | 本 rank 在 EP 组内的序号与 EP 组大小 |
 | `moe_layers` | MoE 层数（本模型 48） |
 | `topk` | 每个 token 每层选几个专家（本模型 8） |
-| `counts_scope` | **数列的口径**：`global` = 发送侧、按逻辑专家 id、宽 = `global_experts`；`local` = 接收侧、按本地槽位、宽 = `local_experts`。分析器据此分流 |
+| `counts_scope` | **数列的口径**：`global` = 发送侧、按逻辑专家 id、宽 = `global_experts`；`local` = 接收侧、按本地槽位、宽 = `local_experts`；`global+compute` = 同时带「路由」与「实际计算」两套行（见 §6「两套 rank 口径」）。分析器据此分流 |
 | `global_experts` | 全局（= 逻辑）专家数（本模型 128） |
 | `local_experts` | **本 rank 上**的专家槽位数 = `global_experts ÷ ep_size`（本模型 64） |
 | `redundant_experts` | 冗余专家数；本工程不开 EPLB，恒为 0 |
@@ -296,7 +302,13 @@ step=0 layer=0 method=MC2CommImpl counts=[12,0,45,...]
 | `step` | 服务过程中的第几步（0 起，连续编号；一步 = 引擎的一次 forward） |
 | `layer` | 层序号，对应 `# layer` 里的 `layer_ord` |
 | `method` | 本步实际使用的通信实现类名（见下表） |
-| `counts` | 整数数组，含义由头部的 `counts_scope` 决定（见上表）：`global` = 本 rank 在 dispatch **之前**按逻辑专家 id 数出的路由直方图，长度 = `global_experts`；`local` = 本 rank 各本地槽位收到的 token-专家对数，长度 = `local_experts` |
+| `scope` | **可选**，只在 dump 里同时有两种口径时才写：`global` = 路由行、`compute` = 实际计算行、`pad` = pad 行。单口径 dump 不写这个字段（头部已经说清每行是什么），形状与旧版完全一致 |
+| `counts` | 整数数组，含义由头部的 `counts_scope`（必要时再叠加行上的 `scope=`）决定（见上表）：`global` = 本 rank 在 dispatch **之前**按逻辑专家 id 数出的路由直方图，长度 = `global_experts`；`local` = 本 rank 各本地槽位收到的 token-专家对数，长度 = `local_experts`；`compute` = 本 rank 这一步**实际要算的行**（`[epn 本地专家 \| B 个预取槽]` 折叠成全局专家 id、**含 pad**），长度 = `global_experts` |
+
+**`scope=pad` 行是稀疏的**：只有真的注入了 pad 的 (步, 层) 才写，一行就是「这个 rank 在这一层
+往哪个专家塞了多少对 pad」——宽 = `global_experts`，除了那一格全是 0。它把「从路由行里扣掉的那一块」
+作为账目留在 dump 里，而不是只留一个总数。所以同一个 (步, 层) 里，一个 rank 最多三行：
+`global`（路由）/ `compute`（实际计算）/ `pad`（注入的 pad）。
 
 `method` 的取值与报告里的显示名：
 
@@ -386,7 +398,8 @@ MoonEP 是**插在最前面的覆盖**：只要条件成立就选它，连 A3 �
 - 一次运行里出现多种 `method=` 是正常的（不开 moonep 的一次实跑里同时出现过
   `AllGatherCommImpl` 与 `MC2CommImpl`，逐 step 交替）；报告按 step 列出通信方式，三种 PAR 口径也按 step 分组；
 - **负载口径跟着 `method=` 走**：只有 MoonEP 的计数含容量 pad、只有 MoonEP 的 dump 是
-  `counts_scope=global`，其余都是接收侧本地槽位口径（见下一节）。
+  `counts_scope=global` 或 `global+compute`（后者多一套「实际计算」行），其余都是接收侧本地槽位口径
+  （见下一节）。
 
 ### 负载口径：数的是什么
 
@@ -408,6 +421,53 @@ MoonEP 是**插在最前面的覆盖**：只要条件成立就选它，连 A3 �
   本模型 `topk × moe_layers = 8 × 48 = 384`。
 - 逐层对数 = 该步 token 数 × `topk`，**与层无关**——这是「层间平坦」自查的依据。
 - `Σ_r rank负载[r,t,l]` 也与层无关；各 rank 之和 = 全部真实路由（每个对恰好归属一个持有者）。
+
+### 两套 rank 口径：路由归属 vs 实际计算
+
+上一节那张表的 rank 负载是**路由归属**口径：它按「谁**持有**这个逻辑专家」记账。
+这在只有整行搬迁、没有冗余副本时是准的，但**一旦 plan 把某些行搬到别的 rank 上去算**
+（MoonEP 的预取槽 / 专家副本），它就不再等于「谁真的忙」：一个 token 分给专家 A、专家 A 的属主是
+rank 0，可它是**在 rank 1 上算的**——按持有关系记在 rank 0 头上，rank 1 白干。
+
+所以 MoonEP 的 dump 里同时记两套 rank 口径（头部写 `counts_scope=global+compute`），
+**报告并列给出、以「实际计算」为主、以「路由归属」为参照**：
+
+| 口径 | rank 负载怎么记 | 回答什么问题 | 边界 |
+|---|---|---|---|
+| **路由归属**（发送侧，`scope=global`） | 按**属主**：`(token, 专家)` 对记在**持有该专家**的 rank 上 | 「gate 把负载分给了谁」——决定 EPLB 该搬谁的量；也是 plan 的**输入** | **上界**：行被搬到别处算时，它仍记在原属主头上，所以真实的 rank 间差异只会比它**更平** |
+| **实际计算**（接收侧，`scope=compute`） | 按**写者**：哪个 rank 算的，就记哪个 rank | 「谁真的在忙」——直接对应同步屏障前各 rank 的等待 | 这里**才是实测值**；含 pad（见下），且依赖 plan 把「搬到哪去了」如实交出来 |
+
+**搬迁不影响专家维度**：行被搬到哪个 rank 上算，它算的都是**逻辑专家 A**，所以两套口径在专家轴上是
+同一批流量、同一个热点形状；两者的专家负载只差 pad 那一块（计算的含 pad，路由的不含），
+差额就是报告专家表里的 `计算量 = 真实 + pad − 丢弃`。**口径差异只发生在 rank 轴上**。
+
+#### 分层账：发送量 = 真实路由 + pad，计算量 = 发送量 − 丢弃
+
+pad 的零行**同样进 matmul、同样占算力**，所以「实际计算量」里有它们的一份。报告不把 pad 混进
+真实负载，而是把总量分层摆开（`renderLedger`，只在两套口径的 dump 上出现）：
+
+| 量 | 怎么来的 | 精确性 |
+|---|---|---|
+| **真实路由** | gate 选出的 `(token, 专家)` 对 = 发送侧直方图（已扣 pad） | 精确 |
+| **pad 计算量** | MoonEP 为对齐容量注入的零行，由 `scope=pad` 行给出 | 精确（专家维度也精确） |
+| **发送量** | 真实路由 + pad | 精确 |
+| **丢弃** | `发送量 − 计算量`：容量包络在派发途中丢掉的对，**只能作为残差知道** | 精确（前提是两套打点都对得上） |
+| **实际计算量** | 各 rank 写下的 `scope=compute` 行之和 | 精确（专家维度）；**rank 维度的 pad/真实拆分是估计** |
+
+两个恒等式，报告里逐 rank 给出：
+
+- `实际计算[r] = 归属真实[r] + 归属pad[r] + 净搬入[r] − 被丢弃[r]`，
+  等价的读法是报告「净差」列：`实际计算 − 归属合计 = 净搬入 − 被丢弃`。
+  净差为负 = 搬迁把行从忙的 rank 挪给了闲的（这正是 slot 模式想要的效果）。
+- `Σ_e 计算量[e] = Σ_e 真实[e] + Σ_e pad[e] − 丢弃`，逐专家精确。
+
+**唯一估的一处**：某一行是 pad 还是真实 token，**写下来的时候分不出来**（pad 行和真实行同槽，
+plan 还可能把它搬到别的 rank）。所以 rank 维度的「这里面有多少 pad」只能按行数比例摊：
+`pad_est[r] = Σ_e 该 r 在专家 e 上的计算行数 × (pad[e] / 发送[e])`——即「专家 e 的 pad 均匀摊在
+它被发送的每一行上」。把各 rank 加回去只得到**活下来的 pad**（≤ `pad[e]`），
+所以它只会少算、不会凭空造出 pad；`真实_est[r] = 计算量[r] − pad_est[r]`。
+**总量、专家维度、净差都是精确的，只有 rank 维度的这个拆分是估计**——报告里这一列的列名
+就写着「（估）」。想让它更准就把 pad 比例压低（pad 一多，估计的方差就大）。
 
 ### MoonEP 的容量 pad：为什么 moonep 运行的 counts 会虚高，以及怎么扣干净
 
@@ -471,24 +531,38 @@ tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计�
 各 rank 的发送侧直方图按 `(step, layer)` 相加 = 这一步的**真实全局路由** `c[t,l,e]`，然后：
 
 - 专家负载 = `c` 按逻辑专家求和（副本算同一个专家）；
-- rank 负载 = 把 `c` 按 `expert_map` 归属到「谁持有这个逻辑专家」（`einsum("tle,le->tl", c, mask_r)`）。
+- rank 负载（**路由归属**）= 把 `c` 按 `expert_map` 归属到「谁持有这个逻辑专家」
+  （`einsum("tle,le->tl", c, mask_r)`）。
 
-每份 dump 的头部会写明数列口径：`counts_scope=global`（发送侧，MoonEP 新 dump）或
-`counts_scope=local`（接收侧，其它 method 与旧 dump）。分析器按这个字段分流，
+如果 dump 里还有 `scope=compute` 行（MoonEP 的两套口径），再算一遍第二套：
+
+- 计算行已经按**全局专家 id** 摊好（`[epn 本地专家 | B 个预取槽]` 折叠过），
+  所以按 (步, 层) 把各 rank 的**写者**加起来就是 `compute[t,l,e]`；
+- rank 负载（**实际计算**）= 直接取写者的行和——谁写的记谁，不再查 `expert_map`；
+- 专家负载（计算口径）= `compute` 按逻辑专家求和，含 pad；
+- 逐专家核对 `计算 = 真实 + pad − 丢弃`，逐 rank 核对 `净差 = 净搬入 − 被丢弃`（见上一节）。
+
+每份 dump 的头部会写明数列口径：`counts_scope=global`（发送侧，MoonEP 新 dump）、
+`counts_scope=global+compute`（发送侧 + 实际计算，MoonEP 的两套口径）、
+或 `counts_scope=local`（接收侧，其它 method 与旧 dump）。分析器按这个字段分流，
 旧 dump 仍按本地槽位解读、并用下面的指纹识别告警。
 
 收尾行会带上扣除记录：`# meta partial_steps=0 pad_pairs_subtracted=NNN pad_expert_global=I`
 （每个 rank 只记自己扣掉的那部分；报告 T6 表按 rank 列出，并在报告最上方的「口径与统计」面板里
-给出总量与占比）。
+给出总量与占比；两套口径的 dump 另有三项对账计数，见上一节末尾）。
+这个总数**只累计已经落盘的那些行**（和 `pad_rows_total` 一样在落盘时结算），所以它和
+「所有 `scope=pad` 行的和」按定义相等，分析器的对账不会因为「note 比落盘早一层」而报假警。
 
 两条边界：
 
 1. **`MOONEP_PAD_EXPERT0=1` 时**pad 全部发给全局 0 号专家，只有 rank 0 收得到；其它 rank 的直方图里
    没有这一桶，扣除会落到不存在的格子上，打点侧记 `pad_notes_misplaced` 并在报告里告警。
    要精确计数就用默认的 pad 落点（别设这个变量）。
-2. **冗余专家/预取槽**：真有副本时，副本各自处理多少只在接收侧可见。报告把负载记在一个持有者头上、
-   不去猜分摊，因此此时的 **PAR 是上界**（真实分摊只会让各 rank 更平）。报告会在「口径与统计」面板
-   和每处 PAR 结论标注这一点。
+2. **冗余专家/预取槽**：真有副本时，副本各自处理多少在**路由归属**口径里不可见（发送侧只知道
+   「这个专家被路由了多少」，不知道副本各摊了多少），报告因此把负载记在一个持有者头上、
+   不去猜分摊，所以**路由归属口径的 PAR 是上界**；而**实际计算口径记的就是各 rank 真算的量**，
+   不受这个限制——这正是它存在的理由。只带一套口径的旧 dump 只能用上界那一套，
+   报告会在「口径与统计」面板和每处 PAR 结论标注这一点。
 
 分析器还会对**没有扣除记录的旧 dump**做指纹识别：全部 step 都走 MoonEP、没有任何
 `pad_pairs_subtracted`、且「每行最忙的本地专家占比中位数 > 0.5」同时成立时，报告会明确写出
@@ -503,6 +577,17 @@ tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计�
   分析脚本读到这一行会在报告里给出提示。
 - 同一条收尾行里还会带上 MoonEP 的 pad 扣除记录（`pad_pairs_subtracted` / `pad_expert_global`，
   必要时还有 `pad_notes_misplaced` / `negative_cells_clamped`），见上一小节。
+- 两套口径的 dump 还会多三项：`pad_rows_total`（写了几行 `scope=pad`，只在有 pad 行时写）、
+  `compute_rows_total` / `compute_pairs_total`（写了几行 `scope=compute`、共多少对）。
+  **它们存在的意义是与数据行对账**：分析器把它们和真正读到的行数/对数比对，
+  不一致就告警（「打点侧说写了 N 行、dump 里只读到 M 行」）——同一 (步, 层) 的第二行会覆盖第一行、
+  窗口没落盘会整批少行，这两种损坏只有行数能看出来，只看总量发现不了。
+  `compute_pairs_total` 可以和 `[moe-par-ledger] … compute=…`（记录器自己打的，按定义一致）
+  以及派发侧的 `[moonep-balance] … rows_local=…` 对上，用来确认打点看到的计算量就是派发真的算了的量。
+  和派发侧那行对账前要先对齐**覆盖范围**：两边都逐层累计，行里的 `layers=` 和 dump 的
+  `compute_rows_total`（÷ 每步层数）各自说明覆盖到哪一步；服务化腿里 dump 常常比它少**正好一步**
+  ——那一步在停服时还在飞行中（见下），差一步以内是收尾差而不是打点错。旧 dump 没有这三项，
+  缺失不等于有问题。
 - 旧 dump 里若出现 `model=unknown`，说明是「从 layer 读模型名」这个修复之前的产物，**不影响分析**
   （报告不使用该字段）。
 
@@ -524,6 +609,28 @@ tpe = torch.histc(topk_c, bins=E, min=0, max=E-1)   # 按逻辑专家 id 统计�
 **「不可知」**：T2 的 ③⑤ 两格、以及 T6 表在整个运行上的判定都会变成「不可知（dump 里没有退出汇总行）」，
 `pad` 总数也不显示。对账那一格则给出解释：dump 结束在一个 flush 边界上，缺失的是「未落盘的整批」，
 需要 spawn（或 `--flush-every 1`）重跑。
+
+**服务化的停服路径还有一层：连 spawn 也救不回来。** `vllm serve` 的 API server 用
+`shutdown_timeout=0` 收 EngineCore（`Process manager: force killing remaining processes`），
+worker 是它们的子进程，一起被 SIGKILL 掉——不是 fork 的 `os._exit()` 问题，而是根本没走到解释器退出，
+所以 worker 里所有 `atexit` 打点（`[moonep-balance]`、`[moonep-stats]`、`[moonep-tstats]`）在服务化
+这条腿上**一行都不会出现**。两个对策：
+
+- dump 侧：`--flush-every 1`（工作区脚本 `start_service_mode.sh` 的负载腿已默认设成 1）。
+  每步落盘后，SIGKILL 丢掉的就从「不足一整批」缩到「**最后那一步**」——它是唯一还没收尾的一步，
+  换谁来杀都留不下。
+- 账目侧：`MOONEP_BALANCE_STATS_EVERY=<层数>` 让账目行不再只在退出时打，而是**每 N 层打一行累计账**
+  （0 = 只在退出时打）。设为模型的 MoE 层数（DSV4-Flash 是 43）就是「一步一行」。这条变量下有
+  两本互补的账：
+  - `[moe-par-ledger r0 tag=…] steps=… rows=… pads=… compute=…`：**记录器自己**打的（两条腿都有），
+    数字全部来自落盘行在主机侧的累计，所以它和 dump 的 `# meta` 行**按定义一致**，没有覆盖差。
+    `rows` 的含义跟着口径走：MoonEP 腿是扣掉 pad 的真实路由，local 口径的腿就是本 rank 算的行。
+    `rows + pads − dropped = compute` 一眼可见。
+  - `[moonep-balance r0] layers=… tokens=… rows_local=… rows_all=… pad_rows=…`：**派发侧**打的
+    （只有 MoonEP 腿），覆盖它真正 dispatch 过的每一层，因此天然比 dump 多出「还在飞行中、没落盘」
+    的那一步 —— `layers=` 与 dump 的 `compute_rows_total` 一比就知道少了哪一步。它**和 dump 一样跳过
+    profile/dummy 前向**（否则会正好差一个满容量批），这是两本账能对上的前提。
+  两本账的 `rows_local` 与 `compute` 是同一个量，直接可比。
 
 ---
 
@@ -550,9 +657,27 @@ python scripts/moe_par/analyze_moe_par.py --run <名字>=<目录> [--run <名字
 [moe-par] wrote moe_par_report.html (2914 KiB)
 ```
 
-- `counts global (logical experts)` / `counts local (local slots)`：这份 dump 的数列口径，
-  取自头部 `counts_scope`。前者是 MoonEP 的发送侧直方图（按逻辑专家 id），后者是各 method
-  上报的接收侧本地计数。
+两套口径的 dump（`counts_scope=global+compute`）不再打一行，而是把同一份数据的两套 PAR 并排打两条
+（下面的数字只示意格式，行在终端里会自然折行）：
+
+```
+[moe-par] serve_slot: 8 ranks x 64 steps x 43 layers | counts global+compute (logical experts)
+          | cross-rank join flat (spread 0.00e+00) | MoonEP pads subtracted 14843460 (global ids)
+[moe-par] serve_slot (实际计算·主): PAR per-layer mean 1.062 max 1.165 | PAR per-step (whole step)
+          mean 1.016 | PAR whole run 1.004 | 计算量 15920000 = 真实 14435660 + pad 1484340 - 丢弃 12000
+          (pad 占发送量 9.3%)
+[moe-par] serve_slot (路由归属·参照): PAR per-layer mean 1.079 max 1.203 | PAR per-step (whole step)
+          mean 1.024 | PAR whole run 1.010  [被搬到别处算的行仍记属主，故 rank 维度上是上界]
+```
+
+- `counts global (logical experts)` / `counts global+compute` / `counts local (local slots)`：
+  这份 dump 的数列口径，取自头部 `counts_scope`。第一种是 MoonEP 的发送侧直方图（按逻辑专家 id），
+  第二种在它之外还带一套「实际计算」行，第三种是各 method 上报的接收侧本地计数。
+- 两套口径时的第二、三行：`(实际计算·主)` 与 `(路由归属·参照)` 各给一组 PAR，
+  后者行尾明写它是上界。`计算量 = 真实 + pad − 丢弃` 那一段就是分层账的入口
+  （`pad 占发送量` = pad ÷ (真实 + pad)，不是占真实路由）。
+- 还有一条只在旧 dump 上出现的告警：**汇总行说扣了 pad、但 dump 里没有 pad 行**（旧版打点只记总数），
+  这时「真实路由」是准的，而 `发送量 = 真实路由 + pad` 里的 pad **不可拆分**——不要当成 0。
 - `cross-rank join flat / NOT FLAT`：检查每个 (步, 层) 在各 rank 上是否**收齐**了（`flat` = 收齐；
   `NOT FLAT` 说明有 rank 的 dump 缺行，通常是采集没跑完或层宽不一致被跳过）。
 - 结尾的 `| MoonEP pads subtracted N (global ids)` 表示这份 moonep dump 已扣掉 N 个容量 pad
@@ -565,6 +690,10 @@ python scripts/moe_par/analyze_moe_par.py --run <名字>=<目录> [--run <名字
   并提示用 `spawn`（或 `--flush-every 1`）重跑（见 §6「收尾与边界情况」）。
 - `PAR` 至少需要两个 rank；只有一个 rank 时显示 `n/a`。
 - 没有 `--check` 之类的开关，校验是自动做的，结论直接打进报告。
+- 报告本身也自查一次：写盘前把 HTML 里那一段 JS 交给 `node --check` 解析（PATH 上有 node 时），
+  解析不过就打一条 `warning: 报告的 JS 第 N 块解析不过（浏览器里会白屏）`。模板里多一个花括号
+  就是这样——HTML 本身完全合法、分析器照样退出 0，只有浏览器里是一片空白，所以必须单独查一次；
+  机器上没有 node 时这一项静默跳过（报告本身不依赖 node）。
 
 ---
 
@@ -582,21 +711,50 @@ python scripts/moe_par/analyze_moe_par.py --run <名字>=<目录> [--run <名字
 倾斜方向不一致，加总时会互相抵消。报告里 KPI 卡片、三口径表旁边都给出「均衡度 = 1 ÷ PAR」，
 可读作最忙那张卡的利用率上限。
 
-三者的分子分母都按 §6「负载口径」数：**专家按逻辑专家、rank 按实际落到它所持专家上的对数、不含 pad**。
-有冗余专家（副本）时，副本的分摊在发送侧不可见，报告把负载记在一个持有者头上，此时 **PAR 是上界**。
+三者的分子分母都按 §6「负载口径」数：**专家按逻辑专家，rank 视口径而定**（见下）。
 
 注意：PAR 是**路由（gate）的性质**，不是通信方式的性质——同一批 token 无论由哪个 all-to-all 承载，
 都会去同一批专家。两次运行之间的 PAR 差异主要来自 batch 组成（每步多少 token），所以报告专门画了
 「PAR 与每步 token 数的关系」。
 
-### 8.2 图表清单
+### 8.2 两套口径怎么并列读
+
+MoonEP 的两套口径 dump（`counts_scope=global+compute`）里，上表每一个 PAR 都有**两个值**，
+报告并列给出（KPI 卡片、各口径对照表、逐 rank 表都分两段）：
+
+| | 实际计算（**主**） | 路由归属（参照） |
+|---|---|---|
+| rank 负载 | 谁算的记谁（含 pad），是**实测** | 谁持有专家记谁（不含 pad），是**上界** |
+| 回答什么 | 谁在同步屏障前等；搬迁（slot）到底把负载搬平了没有 | gate 把负载分给了谁；EPLB 该搬谁 |
+| 报告里的位置 | 主行、主柱、主结论 | 参照列/参照行，**差 = 主 − 参照** 一列 |
+
+读法：**先看「实际计算」的 PAR**（那是要解释的现象），再看「路由归属」的 PAR（那是 gate 给出的、
+EPLB 会去优化的形状），两者之差就是**搬迁**的贡献。`实际计算 < 路由归属` 说明搬迁把行从忙的 rank
+挪给了闲的（逐 rank 的「净差」列会给出具体是谁挪给谁）。两者相等则说明这一步没有搬迁、
+或者搬了但净效果为零。
+
+**但要注意 pad 会把这个比值钉在 1.000**：池化容量对所有 rank 是对称的，pad 把每个 rank 补齐到同一个数，
+所以只要 pad 占计算量大头，「实际计算」的逐层/整步/全程 PAR 就都精确等于 1.000——
+那不是「负载均衡」，而是容量对齐的**构造结果**，真实路由的差额全被 pad 抹平了。
+这种情况下负载差异只在「路由归属」那一套、以及分层账 T2 的「净差」与 T3 的专家行里可见。
+DP8 小 batch 实测（`--max-num-batched-tokens 16384`、每步约 1 个 token、43 层）：每 rank 每层恰好
+算 768 对 = 128（池化容量下限）× 6（topk），pad 占计算量 **97.0%**，于是实际计算 PAR = 1.000，
+而路由归属逐层 PAR 均值 2.287、全程 1.073——**两套一比，pad 与搬迁各改写掉多少就一目了然**。
+
+分层账要在「负载账本（分层）」面板里读：**总发送量 = 真实路由 + pad**，
+**总计算量 = 总发送量 − 丢弃**；专家维度三个数都精确，rank 维度只有总量精确、
+其中 pad 的拆分是估计（列名带「（估）」）。**pad 算计算量**——它是零行，但零行同样进 matmul、
+同样占算力，所以要单独列出来看清楚它占了多少，而不是把它藏进「实际计算」里。
+
+### 8.3 图表清单
 
 | 图 | 回答什么 |
 |---|---|
-| **口径与统计 · 先读这里** | 报告最上的面板：T1 负载口径表（每个量数的是什么、数据从哪来、不含什么）、运行级口径徽标、冗余边界、T2 统计与自查表、T6 pad 记账表 |
-| KPI 卡片 | 结论速览：逐层/整步/全程 PAR、均衡度、每步 token 数、rank × 专家规模 |
-| 怎么读这份报告 · 术语表 | 报告里出现的**每一个词**的说明，外加「报告地图」——想看什么该看哪张图 |
-| 每个 rank 的负载（跨步均值） | 各 rank 平均扛了多少；虚线是均值，峰值与均值之比就是整步 PAR。表里另有「所持逻辑专家」与「相对最忙」两列 |
+| **口径与统计 · 先读这里** | 报告最上的面板：T0 两套口径说明（路由归属 vs 实际计算，含算例）、T1 负载口径表（每个量数的是什么、数据从哪来、不含什么）、运行级口径徽标、冗余边界、T2 统计与自查表、T6 pad 记账表 |
+| KPI 卡片 | 结论速览：逐层/整步/全程 PAR、均衡度、每步 token 数、rank × 专家规模；两套口径时分两段给（实际计算·主 / 路由归属·参照），另有一张「计算量分层」卡片（真实 + pad − 丢弃） |
+| **负载账本（分层）** | 只在两套口径的 dump 上出现：T1 总账（真实路由 / pad / 发送量 / 丢弃 / 实际计算量）、T2 按 rank（两套归属 + 计算量的 pad/真实拆分，净差 = 净搬入 − 被丢弃）、T3 按专家（计算量 = 真实 + pad − 丢弃，逐专家精确） |
+| 怎么读这份报告 · 术语表 | 报告里出现的**每一个词**的说明（含「路由归属口径」「实际计算口径」「发送量/计算量」「pad 计算量」「丢弃」「预取槽」），外加「报告地图」——想看什么该看哪张图 |
+| 每个 rank 的负载（跨步均值） | 各 rank 平均扛了多少；虚线是均值，峰值与均值之比就是整步 PAR。表里另有「所持逻辑专家」与「相对最忙」两列；两套口径时以**实际计算**为主图，并加「路由归属」「净差」两列 |
 | 各 rank 负载随步变化 | 每条线一个 rank；最高线与最低线之差 = 同步屏障要为此付的代价 |
 | 逐层 PAR / 整步 PAR 折线 | PAR 随步的波动；两条线之间的差距就是层间倾斜被抵消掉的部分 |
 | 整个服务过程（全程累计） | 全程总账柱状图 + 三口径并排对照表 |
@@ -604,8 +762,8 @@ python scripts/moe_par/analyze_moe_par.py --run <名字>=<目录> [--run <名字
 | 层 × 逻辑专家 | 同样的流量按层拆开：某层的深色带说明它主导了逐层 PAR |
 | 专家负载剖面：单层（可选层） | 单层内按负载降序排列的专家柱状图，颜色按「高于/低于该层均值」发散着色，表里给出持有 rank、占该层比例与「热点/正常/偏冷」判定 |
 | 专家负载剖面：单步（可选步） | 单步内的同类视图，标题里给出该步 token 数与通信方式 |
-| 每个专家住在哪个 rank | 专家放置矩阵：每个（层, 专家）归属哪个 rank。无副本时这是一个划分，正是 EPLB 会去搬动的形状；有副本时报告会标注 PAR 是上界 |
-| 各运行的峰均比 | 多份 dump 的箱线对比（逐层 / 整步）+ 汇总表；结论：PAR 相同时说明差异来自 batch 组成而非通信方式 |
+| 每个专家住在哪个 rank | 专家放置矩阵：每个（层, 专家）归属哪个 rank。无副本时这是一个划分，正是 EPLB 会去搬动的形状；有副本时报告会标注**路由归属口径**的 PAR 是上界 |
+| 各运行的峰均比 | 多份 dump 的箱线对比（逐层 / 整步）+ 汇总表，以及两套口径的逐项对照（怎么算 / 实际计算 / 路由归属 / 差 / 均衡度）；结论：PAR 相同时说明差异来自 batch 组成而非通信方式 |
 | 性能：TTFT / TPOT / 吞吐 | 见下节 |
 | 数据 | 逐 step 表（含每步通信方式）、每 rank 表、逐层表——图里画的东西全都能查到原始数字 |
 
@@ -689,8 +847,15 @@ MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间�
 「note 为 0 时仍然替换计数」「pad 索引越界只记账不扣减」「扣出负数时夹到 0 并计数」几种边界。
 另有一组 4-rank 的合成往返用例：把真实路由拆成各 rank 的发送侧直方图 + pad 后写出，
 再由分析器拼回来，断言 `layer_expert` / `rank_expert` / `pad_subtracted` 全部精确复原。
+同一组用例还覆盖**两套口径**：写出带搬迁（部分行落到别的 rank）与丢弃的接收侧计数，
+断言「路由归属」的 PAR 是上界、「实际计算」的 PAR 更小且等于逐 rank 真算的和、
+逐专家 `计算 = 真实 + pad − 丢弃` 成立、`Σ pad_est ≤ pad 总量`（估计只会少算、不会造出 pad）、
+以及收尾行的 `compute_rows_total` / `compute_pairs_total` 与真正读到的行数对数一致。
 还有一组专门盯「没有退出钩子」的用例：只靠一次 flush 就能写出收尾行、重复 flush 是**改写**而非追加、
 改写不会吃掉已写的数据行；分析器一侧则有用例断言「没有收尾行」时报告给的是「不可知」而不是 0。
+最后还有一组盯**报告模板本身**的用例（PATH 上有 node 时才跑）：模板里的 JS 必须能过 `node --check`，
+并且故意往模板里插一个多余的花括号时必须被抓住——HTML 合法但 JS 少一个花括号，浏览器里是一片空白，
+分析器却会照样退出 0，所以这条只能靠用例守（见 §7 末尾）。
 
 实跑一次之后，可以从这几处确认采集是干净的：
 
@@ -700,10 +865,18 @@ MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间�
    （这一行缺失意味着 dump 不完整，见 §6「收尾与边界情况」）；
 4. 报告里没有 `NOT FLAT` 告警，说明各 rank 的步/层收齐了；
 5. 报告的「与 bench.json 对账」一节两边数字相等；
-6. 走 moonep 的 dump 应是 `counts_scope=global`，收尾行里出现 `pad_pairs_subtracted=`（数值 ≥ 0），
-   且**不应**出现 `pad_notes_misplaced=`；报告最上方的「口径与统计」面板里，T2 的自查 ①②③④ 全绿、
-   T6 表给出每个 rank 的 pad 占比。若报告反而出现「成因是 MoonEP 的容量 pad」那条告警，
-   说明这份 dump 是**修正前**的产物，绝对负载与 PAR 不可用，必须重跑。
+6. 走 moonep 的 dump 应是 `counts_scope=global` 或 `global+compute`，收尾行里出现
+   `pad_pairs_subtracted=`（数值 ≥ 0），且**不应**出现 `pad_notes_misplaced=`；报告最上方的
+   「口径与统计」面板里，T2 的自查 ①②③④ 全绿、T6 表给出每个 rank 的 pad 占比。
+   若报告反而出现「成因是 MoonEP 的容量 pad」那条告警，说明这份 dump 是**修正前**的产物，
+   绝对负载与 PAR 不可用，必须重跑。
+7. 两套口径的 dump 另有三项对账：收尾行 `pad_rows_total` / `compute_rows_total` /
+   `compute_pairs_total` 应与报告「负载账本」里的行数、对数一致（不一致分析器会告警）；
+   逐专家的 `计算量 = 真实 + pad − 丢弃` 应逐行成立；rank 维度的 `净差` 列应等于
+   `净搬入 − 被丢弃`（slot 模式下它是负的还是 0，就是搬迁有没有把负载搬平的判据）。
+   `compute_pairs_total` 还可以和 `[moe-par-ledger] … compute=…`（应与收尾行严格相等）以及
+   派发侧打印的 `[moonep-balance] … rows_local=…` 对上（和派发侧对账前先按行里的 `layers=`
+   对齐覆盖到第几步，见 §6）。
 
 ---
 
@@ -715,9 +888,11 @@ MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间�
 3. **`MOONEP_SLOT_MODE` / `MOONEP_DISABLE_UDMA` 不进 tag**：两次都开 `--moonep`、只差 slot 模式的运行
    会得到同样的 tag，从而写进同一个 dump 目录。要么显式 `--tag`，要么给 `--dump-dir`。
 4. **报告体量**：2–3 MB 的内联数据，浏览器打开正常，但不要放进聊天工具里逐条 diff。
-5. **本工具不开启、也不修改 EPLB**。`dynamic_eplb` 保持关闭。冗余专家（副本）会在**两个**方面影响
-   解读：专家的负载仍按逻辑专家记（副本算同一个专家），但副本**各自**处理了多少只在接收侧可见，
-   报告不去猜分摊、把负载记在一个持有者头上，所以此时的 **PAR 是上界**；报告会在口径面板和
+5. **本工具不开启、也不修改 EPLB**。`dynamic_eplb` 保持关闭。冗余专家（副本）会影响解读：
+   专家的负载仍按逻辑专家记（副本算同一个专家），但副本**各自**处理了多少在发送侧不可见，
+   报告不去猜分摊、把负载记在一个持有者头上，所以 **「路由归属」口径的 PAR 是上界**；
+   **「实际计算」口径记的是各 rank 真算的量，不受这个限制**（这正是两套口径并存的意义）。
+   只带一套口径的 dump（旧 dump、非 MoonEP 的 method）只能用上界那一套，报告会在口径面板和
    相关结论处标注。
 6. **pad 的扣除只发生在 dump 侧**：走 moonep 时 EPLB 看到的 `moe_load` 仍然含容量 pad（
    见 §6「MoonEP 的容量 pad」）。也就是说报告的绝对负载是真实路由，而 EPLB 优化的是含 pad 的那个量；
@@ -728,6 +903,11 @@ MoonEP 的发送侧直方图路径（`note_route_counts` → 全局专家空间�
    丢了多少本地不可知。所以 `local` 口径只用于「实收」的近似观察，`global`（发送侧）才是精确的
    路由账。本 build 的 plan 也不做跨 rank 搬行（`CAP = NvS`，`balance ≤ 0` 直接 `break`），
    预取槽 `experts_to_copy ≡ -1`，`cu[E:]` 全 0。
+   **在这种 build 上，「实际计算」只比「路由归属」多两件事**：pad 算进来、丢弃扣出去——
+   逐 rank 的净差只会 ≤ 0（净搬入恒为 0，差额全部由丢弃解释），量级通常很小。
+   也就是说 rank 轴上两套口径的差别**只有 pad 与丢弃**，报告会如实显示成这样。
+   只有 slot 模式（`MOONEP_SLOT_MODE=1`，`experts_to_copy != -1`）才会出现由搬迁带来的情形，
+   那时 compute 行才真正带来「谁被搬平了」的新信息。
 8. 采集期间**不要同时改 `--flush-every` 之外的打点参数**（tag、目录）；它们只在进程启动时生效。
 9. **fork 出来的 worker 不执行 `atexit`**：`multiprocessing` 的 fork 子进程以 `os._exit()` 结束，
    绕过所有 atexit 钩子，于是「退出时刷最后一批」不会发生——dump 会缺收尾汇总行和最后不足
