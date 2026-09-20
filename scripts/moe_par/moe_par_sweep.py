@@ -341,15 +341,30 @@ def memory_span(bench_json):
 
 
 def par_from_payload(payload, name):
+    """三本账各自的 PAR：真实行 / pad 行 / 合计行，住在 ``compute.<账本>`` 下。
+
+    合计在 MoonEP 腿上恒为 1.000（容量对称的构造结果），所以表里主看真实行；
+    off 腿没有 compute 视图，pad 全空（读出来是 None），真实行 == 合计行。
+    """
     for run in (payload or {}).get("runs", []):
         if run.get("name") != name:
             continue
-        steps = [v for v in (run.get("par_by_step") or []) if isinstance(v, (int, float))]
-        agg = [v for v in (run.get("par_agg") or []) if isinstance(v, (int, float))]
+        compute = run.get("compute") or {}
+
+        def ledger(kind):
+            view = compute.get(kind) or {}
+            steps = [v for v in (view.get("par_by_step") or []) if isinstance(v, (int, float))]
+            agg = [v for v in (view.get("par_agg") or []) if isinstance(v, (int, float))]
+            return {
+                "par_whole": view.get("par_whole"),
+                "par_by_step_mean": sum(steps) / len(steps) if steps else None,
+                "par_agg_mean": sum(agg) / len(agg) if agg else None,
+            }
+
         return {
-            "par_whole": run.get("par_whole"),
-            "par_by_step_mean": sum(steps) / len(steps) if steps else None,
-            "par_agg_mean": sum(agg) / len(agg) if agg else None,
+            "real": ledger("real"),
+            "pad": ledger("pad"),
+            "total": ledger("total"),
             "n_steps": run.get("n_steps"),
             "n_ranks": run.get("n_ranks"),
             "checks": run.get("checks"),
@@ -401,9 +416,10 @@ def write_markdown(rows, sweep_dir, args):
         f"batch={args.max_num_seqs}，max_tokens={args.max_tokens}）",
         f"- cards: `{args.cards}`，gpu_mem_util={args.gpu_mem_util}",
         "",
-        "| leg | wall_s | out tok/s | TTFT p50 / p90 (ms) | TPOT p50 (ms) | 全程 PAR | "
+        "| leg | wall_s | out tok/s | TTFT p50 / p90 (ms) | TPOT p50 (ms) | 全程 PAR（真实行） | "
+        "全程 PAR（pad 行） | 全程 PAR（合计行） | "
         "weights/non-torch (GiB) | KV tokens | slot rows | 准确率 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         memory = row["memory"]
@@ -411,10 +427,12 @@ def write_markdown(rows, sweep_dir, args):
         non_torch = memory.get("non_torch_gib") or {}
         kv = memory.get("kv_tokens") or {}
         par = row["par"] or {}
+        real, pad, total = par.get("real") or {}, par.get("pad") or {}, par.get("total") or {}
         lines.append(
             f"| {row['leg']} | {fmt(row['wall_s'], 1)} | {fmt(row['output_tok_s'])} | "
             f"{fmt(row['ttft_p50_ms'], 1)} / {fmt(row['ttft_p90_ms'], 1)} | "
-            f"{fmt(row['tpot_p50_ms'], 2)} | {fmt(par.get('par_whole'), 3)} | "
+            f"{fmt(row['tpot_p50_ms'], 2)} | {fmt(real.get('par_whole'), 3)} | "
+            f"{fmt(pad.get('par_whole'), 3)} | {fmt(total.get('par_whole'), 3)} | "
             f"{fmt(weights.get('max'))} / {fmt(non_torch.get('max'))} | "
             f"{kv.get('min', 'n/a')} | {memory.get('slot_rows_min', '-')} | "
             f"{fmt(row['accuracy'], 3)} |")
@@ -423,6 +441,12 @@ def write_markdown(rows, sweep_dir, args):
         "口径：wall_s 是**最慢 rank** 的 generate 窗口（不是父进程墙钟，模型加载占了大部分）；"
         "tok/s 是各 rank 输出 token 之和除以该窗口；PAR 来自 analyze_moe_par.py 的 payload"
         "（全程 PAR = 所有 rank 所有层的峰值/均值）。",
+        "",
+        "PAR 分三本账：**真实行**（这批 token 真正路由出来的 (token, 专家) 对）、"
+        "**pad 行**（MoonEP 为对齐池化容量注入的零行，同样进 grouped matmul）、"
+        "**合计行** = 真实 + pad。MoonEP 腿上每个 rank 每 (步, 层) 恰好算 `capacity × K` 行，"
+        "所以**合计行的全程 PAR 恒为 1.000——这是容量对称的构造结果，不是均衡的证据**；"
+        "真实行与 pad 行各自有多不匀，才是要看的东西。off 腿没有 pad（显示 n/a），真实行 == 合计行。",
         "",
         "- `KV tokens` 是该 leg 中最小的 KV 池（tokens），`kv_check.ok=false` 说明这个池子装不下"
         "一个整批或一个满长度请求，引擎会靠抢占推进，负载与延迟数字描述的是抢占而不是 MoE 通信。",

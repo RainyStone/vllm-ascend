@@ -24,76 +24,54 @@ files back together across ranks -- the one thing the recorder deliberately does
 not do, because the peak-to-average ratio is a cross-rank quantity and the hot
 path has to stay free of collectives.
 
-Three ratios are reported, and they differ only in how much is summed before the
-peak-over-mean:
+The load is counted in (token, expert) pairs: one token routed to topk experts in
+one MoE layer is topk pairs. One load, two dimensions:
 
-``PAR (per-layer)``
-    EPLB's own definition, the one ``EplbWorker._compute_imbalance`` computes:
-    per layer ``max_r(load[r]) / mean_r(load[r])``, then averaged over the layers
-    of a step. One value per step. The right unit when layers are scheduled
-    independently.
+* **专家维度** -- each **logical** expert's load: the pairs that arrived at it,
+  with MoonEP's capacity pads subtracted where they were counted, so a replicated
+  expert stays one expert. This is a property of the batch: which experts are hot
+  and how concentrated the traffic is.
+* **rank 维度** -- each rank's **实际计算** load: the rows that rank computed,
+  whoever's experts they were. This is what a peak-to-average ratio over ranks is
+  for -- it decides who waits at the barrier.
 
-``PAR (per-step, whole step)``
-    ``max_r(sum_l load[r, l]) / mean_r(sum_l load[r, l])`` -- each rank's *total*
-    work for one step, which is what decides who waits at the barrier. One value
-    per step; the layer dimension is summed, time is not.
+The rank dimension is split into two ledgers, because a MoonEP dispatch carries
+both:
 
-``PAR (whole run)``
-    The same ratio over each rank's load summed across every step and layer. One
-    value for the entire run: a figure of merit for the placement, not a
-    predictor of any single wait.
+真实行 (real rows)
+    The rows that came out of the gate: one per (token, expert) pair it chose, and
+    every one of them is computed exactly once, by some rank. Their total equals
+    the routing total.
 
-All three live in ``[1, num_ranks]``; 1 is perfectly balanced, and they shrink as
-the summing scope widens because layer-to-layer and step-to-step tilts cancel.
-The gate routes the same tokens to the same experts whichever all-to-all carries
-them, so the *routing* view of a run is a property of the batch, not of the
-method. A ratio that is meant to describe how busy the ranks were, however, has
-to be read on the *compute* view: MoonEP's slot mode relocates rows, and that
-relocation is exactly what changes who waits at the barrier.
+pad 行 (padding)
+    The rows MoonEP writes to fill a step's dispatch up to its pooled capacity.
+    No token rides on them, but they are not free: they go through the grouped
+    matmul like any other row. On the reference run they are **97%** of all rows
+    computed. Because the capacity is identical on every rank, every rank
+    computes exactly ``capacity x topk`` rows per (step, layer), so the **合计**
+    (total) PAR is 1.000 *by construction* -- it is not evidence of balance, and
+    the report says so wherever that number appears. The real/pad split is where
+    the signal is.
 
-The load itself is defined once, and the report says so before any chart: an
-*expert* load counts the (token, expert) pairs that **logical** expert received
-(so a replicated expert stays one expert), and a *rank* load counts the pairs
-that rank is answerable for -- which pairs those are is what the two views
-disagree about (the holder of the expert for 路由归属, the rank that ran the row
-for 实际计算). Padding is counted in the compute view and carved out of the
-routing view; both are reported side by side rather than netted off, so the
-reader can see how much of a difference is work and how much is padding. How a
-dump delivers a row depends on its ``counts_scope``:
+How a dump delivers a row depends on its ``counts_scope``:
 
 ``local``
-    The row is index by this rank's own expert slots (every method but MoonEP),
-    so a row is one rank's own work and the rows are summed after being mapped
-    back onto the global expert grid.
+    The row is index by this rank's own expert slots (every method but MoonEP).
+    It is already the rank's 实际计算 load -- one rank, one row -- with no
+    padding to split out.
 
 ``global``
     The row already spans the model's whole expert space, index by logical id
-    (MoonEP: the dispatcher's sending-side histogram). The ranks of one (step,
-    layer) are summed into the step's real routing, and only then is each
-    expert's load credited to the rank that holds it. This is the scope that
-    survives MoonEP's capacity padding -- the pads are subtracted where they were
-    counted, before the row is written -- and a replicated expert, which a single
-    rank can no longer see, is still counted once.
+    (MoonEP: the dispatcher's sending-side histogram, pads subtracted where they
+    were counted). The ranks of one (step, layer) are summed into that step's
+    real routing: that sum is the 专家维度 exactly, and the pads are exact too.
 
-MoonEP runs carry **two views of the same dispatch**, and this script reports both:
-
-* 路由归属 (routing / owner attribution) -- where the gate sent the tokens. Built
-  from the ``global`` rows above, credited to the rank that *holds* the expert.
-  Exact, and an upper bound on the real imbalance: relocation can only flatten it.
-* 实际计算 (actual work) -- which ranks ran the rows. Built from the extra
-  ``scope=compute`` rows MoonEP writes alongside, credited to the rank that
-  *wrote* them, so a row the plan moved to another rank counts against the rank
-  that computed it. This is the view a peak-to-average ratio over ranks is trying
-  to measure, and the one the report leads with.
-
-Both views separate the same three ledgers, so a difference can be attributed
-instead of guessed (see ``_finalize_ledger``): 真实路由 (the gate's pairs), pad
-(MoonEP's capacity padding), and 丢弃 (rows the capacity envelope dropped). The
-``scope=pad`` rows carry the pads -- they are subtracted from the routing rows to
-keep those exact, and written separately so the report can show padding as its
-own quantity rather than folding it into either view. The compute rows keep their
-pads, because on the receiving side a pad row is indistinguishable from a real
-row of the same expert and may be computed by any rank that holds that expert.
+A MoonEP dump adds a ``scope=compute`` row per (step, layer) -- the rows this rank
+ran, pads included, because on the receiving side a pad row sits in the same slot
+as a real row of the same expert -- and ``scope=pad`` rows, which carry the pads
+as their own quantity. Those two rows are what makes the rank dimension exact up
+to one documented convention; see :meth:`Run._split_compute` for the rule, its
+one assumption, and the self-check that bounds the error.
 
 Usage::
 
@@ -156,12 +134,15 @@ _SRC_EXPERT_MAP = "expert_map"
 _SRC_IDENTITY = "ep_rank*local_experts + slot"
 _SRC_WHOLE = "every expert is local"
 
-# The two accounting views MoonEP makes measurable, and what each one says.
-_VIEW_LABELS = {_SCOPE_ROUTE: "路由归属", _SCOPE_COMPUTE: "实际计算"}
-_VIEW_HINTS = {
-    _SCOPE_ROUTE: "按专家属主记（谁持有这个专家，负载就算谁的）",
-    _SCOPE_COMPUTE: "按实际计算记（谁算了这些行，负载就算谁的）",
-}
+# The three ledgers of the rank dimension, all in the *compute* view (who ran the
+# row). 合计 = 真实 + pad is the whole of it: nothing else is computed. The names
+# double as the payload's keys (``run.compute[<key>]``), so the report can switch
+# between them with one string.
+_LEDGER_REAL = "real"
+_LEDGER_PAD = "pad"
+_LEDGER_TOTAL = "total"
+_LEDGER_KEYS = (_LEDGER_REAL, _LEDGER_PAD, _LEDGER_TOTAL)
+_LEDGER_LABELS = {_LEDGER_REAL: "真实行", _LEDGER_PAD: "pad 行", _LEDGER_TOTAL: "合计行"}
 
 
 # --------------------------------------------------------------------------- #
@@ -348,17 +329,17 @@ def _loc2glob(
     return identity, _SRC_IDENTITY
 
 
-def _owned_mask(
+def _held_mask(
     layer: dict | None, local_experts: int, global_experts: int, ep_rank: int
 ) -> tuple[np.ndarray, str]:
     """Which global experts this rank holds, read off the same ``expert_map``.
 
     The map is indexed by global (logical) expert id and holds the local slot that
     serves it, ``-1`` for experts living elsewhere, so "this rank holds it" is
-    simply "the entry is not -1". That reading stays correct under redundancy --
-    a replicated expert shows up as held by two ranks, which is exactly the fact
-    the rank-level split has to respect -- while the inverse used for local-scope
-    dumps cannot be built at all (two global ids would claim one slot).
+    simply "the entry is not -1". That reading stays correct under redundancy -- a
+    replicated expert shows up as held by two ranks, which is exactly the fact the
+    expert table has to show -- while the inverse used for local-scope dumps
+    cannot be built at all (two global ids would claim one slot).
 
     The contiguous fallback (rank ``ep_rank`` holds slot ``ep_rank`` of the
     partition) is the only sane guess when the map is absent, and it is flagged.
@@ -424,10 +405,10 @@ def _par_pack(
 ) -> dict:
     """The three PAR scopes and the rank-load tables of one ``[R, T, L]`` load view.
 
-    One function for both views on purpose: 路由归属 and 实际计算 differ only in the
-    load they are handed, and running the two through the same arithmetic is what
-    makes a difference between the reported series a difference in the data rather
-    than a difference in how it was reduced.
+    One function for all three ledgers on purpose: 真实行 / pad 行 / 合计行 differ only
+    in the load they are handed, and running them through the same arithmetic is
+    what makes a difference between the reported series a difference in the data
+    rather than a difference in how it was reduced.
     """
     # EPLB's per-layer balance: max over ranks of one layer's load, over the
     # mean of that layer. Averaged over layers, exactly as _compute_imbalance does.
@@ -454,6 +435,10 @@ def _par_pack(
     # more work overall", which is *not* what decides a barrier wait -- that is
     # per step -- but it is the figure of merit for a placement or a plan.
     rank_total = _nansum(step_sum, axis=1)
+    # A rank with no cell at all is missing, not zero: `nansum` of an empty row is 0,
+    # and a column of zeros reads as "this rank did nothing" when the truth is that
+    # the dump never said. Same convention as per_rank_mean/per_rank_max.
+    rank_total = np.where(np.isfinite(step_sum).any(axis=1), rank_total, np.nan)
     whole_peak = _nanmax(rank_total, axis=0)
     whole_mean = _nanmean(rank_total, axis=0)
     step_pairs = np.where(present.any(axis=2), step_sum, 0.0).sum(axis=0)
@@ -593,14 +578,19 @@ class Run:
         if self.local_experts <= 0 and self.ep_size > 0 and self.global_experts > 0:
             self.local_experts = max(1, self.global_experts // self.ep_size)
 
-        # load[r, t, l] = token-expert pairs rank r handled in layer l at step t
+        # load[r, t, l] = token-expert pairs rank r counted in layer l at step t.
+        # For a local-scope dump this *is* the rank's 实际计算 load; a global-scope
+        # dump leaves it empty and fills ``load_compute`` instead, because a global
+        # row is one rank's sending side rather than one rank's work.
         self.load = np.full((self.n_ranks, self.n_steps, self.n_layers), np.nan, dtype=np.float64)
         # Share of the single busiest local expert in each (rank, step, layer) row.
         # MoonEP's capacity padding lands in one slot, so this is what tells a
-        # padded dump apart from a real hotspot or a broken join.
+        # padded dump apart from a real hotspot or a broken join. Local scope only.
         self.top_share = np.full_like(self.load, np.nan)
-        self.rank_expert = np.zeros((self.n_ranks, self.global_experts), dtype=np.float64)
         self.rank_expert_seen = np.zeros(self.n_ranks, dtype=bool)
+        # Who ran which expert, for a local-scope dump: its own rows are its work,
+        # so ``_fold_row`` fills this straight from them.
+        self.rank_expert_local = np.zeros((self.n_ranks, self.global_experts), dtype=np.float64)
         self.layer_expert = np.zeros((self.n_layers, self.global_experts), dtype=np.float64)
         self.step_expert = np.zeros((self.n_steps, self.global_experts), dtype=np.float64)
         self.method_of_step = [""] * self.n_steps
@@ -609,54 +599,45 @@ class Run:
         self.whole_rows = 0
         self.truncated_rows = 0
         self.methods_seen: set[str] = set()
-        # Pairs each rank counted in its own rows, before anything is attributed to
-        # anyone: the denominator of the pad-accounting table.
+        # Pairs each rank counted in its own rows, before any attribution: the
+        # neutral 发送量 reference of the ledger's rank table.
         self.sent_by_rank = np.zeros(self.n_ranks, dtype=np.float64)
 
-        # -- the actual-work view, from MoonEP's ``scope=compute`` rows ---------- #
-        # The same dispatch read the other way: the rows each rank ran, attributed
-        # to the rank that wrote them rather than to the expert's holder. Only a
-        # two-view dump has these, and they are the view a rank-level ratio should
-        # be read on -- relocation is precisely what moves work between ranks.
+        # -- the rank dimension, from MoonEP's ``scope=compute`` rows ------------ #
+        # The rows each rank ran, by global expert id -- the receiving side, which
+        # keeps MoonEP's pads because there a pad row is a row like any other. The
+        # real/pad split happens once, on the finished matrix, in _split_compute.
         self.compute_seen = np.zeros(self.n_ranks, dtype=bool)
         self.load_compute = np.full((self.n_ranks, self.n_steps, self.n_layers), np.nan, dtype=np.float64)
         self.compute_rank_expert = np.zeros((self.n_ranks, self.global_experts), dtype=np.float64)
-        self.compute_layer_expert = np.zeros((self.n_layers, self.global_experts), dtype=np.float64)
-        self.compute_step_expert = np.zeros((self.n_steps, self.global_experts), dtype=np.float64)
 
         # -- the padding ledger, from the ``scope=pad`` rows -------------------- #
         # What MoonEP padded the dispatch with. The routing rows had it subtracted
         # (so they are real routing) and the compute rows still carry it (on the
         # receiving side it is not separable), so it is kept here as its own
-        # quantity: 总量 = 真实 + pad is then answerable at every level, which is
+        # quantity: 合计 = 真实 + pad is then answerable at every level, which is
         # what turns "these two ranks differ" into "by how much real work".
         #
-        # Held in the routing's own [T, L, E] shape because that is what the owner
-        # attribution consumes; ``pad_pairs_by_rank`` is the injector's own view,
-        # which is a different question (who wrote the pads, not who owns them).
+        # Held in the routing's own [T, L, E] shape -- its non-zero columns name the
+        # pad experts, which is what _split_compute reads to place the pads.
         self.pad_routing = np.zeros((self.n_steps, self.n_layers, self.global_experts), dtype=np.int32)
         self.pad_pairs_by_rank = np.zeros(self.n_ranks, dtype=np.float64)
         self.pad_rows = 0
-        # Filled from ``pad_routing`` after the fold for every scope; only a global
-        # run can go on to attribute them to a rank (see _attribute_global).
-        self.pad_layer_expert = np.zeros((self.n_layers, self.global_experts), dtype=np.float64)
-        self.pad_step_expert = np.zeros((self.n_steps, self.global_experts), dtype=np.float64)
-        self.load_pad = np.zeros((self.n_ranks, self.n_steps, self.n_layers), dtype=np.float64)
-        self.rank_pad = np.zeros(self.n_ranks, dtype=np.float64)
 
-        self.unowned_slots = 0
         self.partial_steps = 0
         # Whether the dump carries the exit-summary line the recorder writes at the
         # end of the file. Without it the counters that live only there -- incomplete
         # steps and subtracted pads -- are unknown rather than zero.
         self.tail_missing = False
         if self.global_scope:
-            self._prepare_ownership()
             # The summed routing of every (step, layer). A global row is one rank's
-            # sending side, so it is the *sum* over ranks that is the run's routing;
-            # holding it costs less than the text it was parsed from and lets the
-            # attribution run once, on the finished vector.
+            # sending side, so it is the *sum* over ranks that is the run's routing,
+            # and that sum is the expert dimension outright.
             self.routing = np.zeros((self.n_steps, self.n_layers, self.global_experts), dtype=np.int32)
+        else:
+            # A local-scope row carries no expert id, so there is no joint routing to
+            # keep; _split_compute says what it does when such a dump also has pads.
+            self.routing = None
         self._build_holders()
 
         for dump in dumps:
@@ -711,56 +692,195 @@ class Run:
         self.pad_layer_expert = self.pad_routing.astype(np.float64).sum(axis=0)  # [L, E]
         self.pad_step_expert = self.pad_routing.astype(np.float64).sum(axis=1)  # [T, E]
 
+        if self.global_scope:
+            # The expert dimension is the summed routing, and nothing else: it does
+            # not depend on where the experts live or on who ran what.
+            self.layer_expert = self.routing.astype(np.float64).sum(axis=0)  # [L, E]
+            self.step_expert = self.routing.astype(np.float64).sum(axis=1)  # [T, E]
+
         if self.has_compute and not self.compute_seen.any():
-            # The header promised a second view and none was written. Reporting the
-            # view as present and empty would read as "no rank computed anything".
+            # The header promised the second row and none was written. The rank
+            # dimension would then be empty, which reads as "no rank computed
+            # anything" -- so fall back to the legacy reading and say so.
             self.has_compute = False
             self.warnings.append(
-                "头部写的是两套口径（counts_scope=" + self.scope + "），但 dump 里没有一行 scope=compute；"
-                "实际计算口径按缺失处理，只出路由归属口径"
+                "头部写的是 counts_scope=" + self.scope + "，但 dump 里没有一行 scope=compute；"
+                "rank 维度退回本地计数解读，算不出「多少是 pad」"
             )
         if self.has_compute and not self.compute_seen.all():
-            # The work view is complete only if every rank wrote it; a rank that did
-            # not is missing work, not idle, and zero would say the wrong thing.
+            # The rank dimension is complete only if every rank wrote it; a rank
+            # that did not is missing work, not idle, and zero would say the wrong
+            # thing.
             idle = [self.rank_ids[i] for i in np.flatnonzero(~self.compute_seen)]
             self.load_compute[~self.compute_seen, :, :] = np.nan
             self.compute_rank_expert[~self.compute_seen] = 0.0
             self.warnings.append(
                 "rank " + "、".join(str(r) for r in idle) + " 没有任何 scope=compute 行；"
-                "实际计算口径里这几个 rank 显示为缺失（缺失不等于没干活）"
+                "rank 维度里这几个 rank 显示为缺失（缺失不等于没干活）"
+            )
+        if not self.has_compute and not self.rank_expert_seen.all():
+            # Every rank's row is part of the sum that makes a step's routing whole,
+            # so a rank that never wrote one leaves a hole no other rank can fill.
+            idle = [self.rank_ids[i] for i in np.flatnonzero(~self.rank_expert_seen)]
+            self.load[~self.rank_expert_seen, :, :] = np.nan
+            self.warnings.append(
+                "rank " + "、".join(str(r) for r in idle) + " 没有任何 dump 行；本地口径只能按行相加，"
+                "缺了行的部分既不是 0 也推不回来——这几个 rank 在图表里显示为缺失"
             )
 
-        if self.global_scope:
-            self._attribute_global()
-            if not self.rank_expert_seen.all():
-                # Every rank's row is part of the sum that makes a step's routing
-                # whole, so a rank that never wrote one leaves a hole no other rank
-                # can fill.
-                idle = [self.rank_ids[i] for i in np.flatnonzero(~self.rank_expert_seen)]
-                self.load[~self.rank_expert_seen, :, :] = np.nan
-                self.rank_expert[~self.rank_expert_seen] = 0.0
-                self.warnings.append(
-                    "rank " + "、".join(str(r) for r in idle) + " 没有任何 dump 行；全局口径必须把各 rank 的"
-                    "行相加才是完整路由，缺了行的部分既不是 0 也推不回来——这几个 rank 在图表里显示为缺失"
-                )
+        self._split_compute()
 
-    def _prepare_ownership(self) -> None:
-        """Work out which rank holds each logical expert, for a global-scope run.
+    def _split_compute(self) -> None:
+        """Split each rank's computed rows into 真实行 and pad 行, per (step, layer).
 
-        Global rows do not say where their experts live: the routing space is the
-        logical one, and a rank's own row counts the tokens *it* sent, not the work
-        *it* got. Ownership is therefore read from ``expert_map``, and the load of a
-        replicated expert is credited to the lowest-numbered rank holding it rather
-        than split by a rule nobody recorded. That keeps ``sum_r load == pairs``
-        exact and makes the ratio an *upper bound*: real sharing can only flatten it.
+        The receiving side cannot tell a pad row from a real row -- MoonEP writes
+        the pads as ordinary rows aimed at one of the injector's own experts -- so
+        the split is rebuilt here from what the dump *does* record, all of it
+        exact:
+
+        * ``compute[r, e]`` -- the rows rank ``r`` ran of expert ``e`` (the
+          ``scope=compute`` rows; a local-scope dump's own rows stand in, and it
+          has no pads to split out);
+        * ``tot[e]`` -- the real routing each expert received (the ``scope=global``
+          rows summed over ranks, pads already subtracted by the recorder), which
+          is the 专家维度 outright;
+        * the pad columns -- the ``scope=pad`` rows name the experts the pads went
+          to (MoonEP aims a rank's whole pad block at its own first home expert, so
+          they are non-zero on at most a handful of experts).
+
+        The rule, per (step, layer), for a **pad expert** ``e``: every real row of
+        ``e`` is credited to the rank that *holds* ``e`` (the lowest-numbered
+        holder -- a holder list is all the placement data there is), and whatever
+        that column has left over is pad. For every other expert -- the
+        overwhelming majority -- the rank that ran the row is the only sensible
+        answer, so ``real = compute`` and ``pad = 0``.
+
+        That leaves exactly one assumption: a real row of a *pad* expert that was
+        relocated to a second holder of that expert is credited to the first
+        holder. It is measurable and measured -- 43 pairs of 247 164 on the
+        reference run (0.02%), 0.1% on the whole-run PAR -- and the totals that do
+        not depend on it (``sum_r 真实 == 路由总量``, ``sum_r 合计 == capacity x topk``)
+        are the report's self-check. A column that comes out negative *is* that
+        relocation case, and is counted rather than clamped: the compensating
+        positive sits on the rank that ran the rows, so the totals stay right.
         """
-        self.owner = np.full((self.n_layers, self.global_experts), -1, dtype=np.int64)
-        self.owner_masks: list[np.ndarray] = []  # one [L, E] mask per rank
-        held = [np.zeros((self.n_layers, self.global_experts), dtype=bool) for _ in range(self.n_ranks)]
+        n_r, n_t, n_l = self.n_ranks, self.n_steps, self.n_layers
+        self.pad_experts = [int(e) for e in np.flatnonzero(self.pad_routing.any(axis=(0, 1)))]
+        self.pad_negative_cells = 0
+        self.pad_negative_pairs = 0.0
+        self.rank_expert_pad = np.zeros((n_r, self.global_experts), dtype=np.float64)
+
+        if not self.has_compute:
+            # No separate compute row: a local dump's own rows *are* the work its
+            # rank ran, and nothing on that path pads, so 合计 = 真实. The three
+            # ledgers stay present anyway -- the report then has one code path --
+            # and the 发送量 column of the rank table collapses onto them.
+            if self.global_scope:
+                # A global dump without compute rows says what was routed, not what
+                # was run. The rank dimension is reported as missing rather than
+                # reconstructed from who holds which expert: that reconstruction is
+                # exactly the owner attribution this view replaced, and it would read
+                # as measured load when it is only placement.
+                self.warnings.append(
+                    "这份 dump 只有发送侧路由行、没有 scope=compute 行：专家维度照常可用，"
+                    "但 rank 维度无从得知（本工具只按「谁算的」记账，不按专家属主分摊）——"
+                    "要用 rank 维度就重跑一次带计算行的打点"
+                )
+            self.load_total = self.load.copy()
+            self.load_real = self.load.copy()
+            self.load_pad = np.zeros_like(self.load)
+            self.load_pad[np.isnan(self.load)] = np.nan
+            self.rank_expert_real = self.rank_expert_local.copy()
+            # ``compute_rank_expert`` is only filled on the compute-row path; here the
+            # local rows are the rank's work, so they are what "who ran what" means.
+            self.compute_rank_expert = self.rank_expert_local.copy()
+            return
+
+        self.load_total = self.load_compute.copy()
+        self.rank_expert_real = self.compute_rank_expert.copy()
+        holders = np.array(
+            [(h[0] if h else -1) for h in self.expert_holders], dtype=np.int64
+        ) if self.expert_holders else np.zeros(0, dtype=np.int64)
+        pad_cells = self._fold_pad_columns()  # [R, T, L, P], P = len(pad_experts)
+        pad_rows = np.zeros((n_r, n_t, n_l), dtype=np.float64)  # [R] per cell, seen as pad
+        derived = self.routing is None and len(self.pad_experts) > 0
+        if derived:
+            # A local-scope dump has no joint routing to read, but if it wrote pad
+            # rows then MoonEP was on the link and its compute rows are in global
+            # expert space. The real routing of a pad expert is then recoverable as
+            # "what was computed on it, minus the pads aimed at it" -- exactly, as
+            # long as no *pad* row was relocated, which is the same assumption the
+            # split already makes for real rows and is stated in the report.
+            self.warnings.append(
+                "这份 dump 是本地口径却又带 pad 行：pad 专家上的真实路由由「该列的计算行减去落在它上面的 "
+                "pad」反推（假设 pad 没有被搬到别的持有者上）——专家总量与三条恒等式仍然成立，"
+                "但这一列的真实/pad 分界比全局口径的 dump 弱一档"
+            )
+        for p, expert in enumerate(self.pad_experts):
+            # [T, L]: the real routing to this expert, per step *and* layer. Both
+            # axes are needed -- a step's row count varies step to step, so a
+            # [L]-only total broadcast over the step axis would credit every step
+            # with the run's per-layer sum.
+            if derived:
+                per_cell = pad_cells[:, :, :, p].sum(axis=0) - self.pad_routing[:, :, expert]
+            else:
+                per_cell = self.routing[:, :, expert]
+            owner = int(holders[expert]) if holders.size == self.global_experts else -1
+            cell = pad_cells[:, :, :, p] if pad_cells.size else np.zeros((n_r, n_t, n_l))
+            if owner < 0:
+                # No placement record for this expert: the only honest fallback is
+                # "whoever ran it ran a real row", which leaves pad = 0 there.
+                continue
+            real = np.zeros_like(cell)  # [R, T, L]
+            real[owner] = per_cell  # the holder is credited every real row of e
+            pad_rows += cell - real
+            self.rank_expert_real[:, expert] = per_cell.sum() * (np.arange(n_r) == owner)
+            self.rank_expert_pad[:, expert] = cell.sum(axis=(1, 2)) - self.rank_expert_real[:, expert]
+            negative = cell - real < -1e-9
+            self.pad_negative_cells += int(np.sum(negative))
+            self.pad_negative_pairs += float(np.sum(np.where(negative, real - cell, 0.0)))
+        self.load_real = self.load_total - pad_rows
+        self.load_pad = pad_rows
+        # A cell nobody wrote stays missing rather than becoming a split of zero.
+        missing = ~np.isfinite(self.load_total)
+        for array in (self.load_real, self.load_pad):
+            array[missing] = np.nan
+
+    def _fold_pad_columns(self) -> np.ndarray:
+        """The compute rows restricted to the pad experts, as ``[R, T, L, P]``.
+
+        A second pass over the parsed rows, because which experts are pad experts
+        is only known once the ``scope=pad`` rows have all been folded. It is a
+        scan over an in-memory list, and it runs only for a dump that has both
+        kinds of row.
+        """
+        n_r, n_t, n_l, n_p = self.n_ranks, self.n_steps, self.n_layers, len(self.pad_experts)
+        cells = np.zeros((n_r, n_t, n_l, n_p), dtype=np.float64)
+        if not n_p:
+            return cells
         for dump in self.dumps:
             rank_row = self.rank_ix[dump.rank]
-            for li, layer_id in enumerate(self.layer_ids):
-                mask, source = _owned_mask(
+            for index, (step, layer, counts) in enumerate(zip(dump.steps, dump.layer_ids, dump.counts)):
+                if dump.row_kind(index) != _SCOPE_COMPUTE or len(counts) != self.global_experts:
+                    continue
+                si, li = self.step_ix[step], self.layer_ix[layer]
+                for p, expert in enumerate(self.pad_experts):
+                    cells[rank_row, si, li, p] += counts[expert]
+        return cells
+
+    def _build_holders(self) -> None:
+        """Which ranks hold each logical expert, for the report's expert table.
+
+        Read from the same ``expert_map`` in both scopes, so the table can show a
+        replicated expert as held by several ranks -- the one place the report says
+        anything about placement, and the source of the "first holder" rule that
+        :meth:`_split_compute` uses for the pad experts.
+        """
+        self.expert_holders: list[list[int]] = [[] for _ in range(self.global_experts)]
+        for dump in self.dumps:
+            rank_row = self.rank_ix[dump.rank]
+            for layer_id in self.layer_ids:
+                mask, source = _held_mask(
                     dump.layers.get(layer_id), self.local_experts, self.global_experts, dump.ep_rank
                 )
                 if source == _SRC_EXPERT_MAP:
@@ -769,49 +889,26 @@ class Run:
                     self.whole_rows += 1
                 else:
                     self.identity_rows += 1
-                held[rank_row][li] |= mask
-                claim = self.owner[li]
-                claim[mask & (claim < 0)] = rank_row
-        if self.identity_rows:
-            self.warnings.append(
-                f"有 {self.identity_rows} 个 (rank, 层) 没有可用的 expert_map，"
-                f"按连续布局（{_SRC_IDENTITY}）推断归属；当每个 rank 持有等长且有序的一段时成立"
-            )
-        self.unowned_slots = int(np.sum(self.owner < 0))
-        if self.unowned_slots:
-            self.warnings.append(
-                f"有 {self.unowned_slots} 个 (层, 专家) 没有任何 rank 声明持有；"
-                "落在这些专家上的 token-专家对不计入任何 rank 的负载，各 rank 之和会小于路由总量"
-            )
-        self.owner_masks = held
-
-    def _build_holders(self) -> None:
-        """Which ranks hold each logical expert, for the report's expert table.
-
-        Read from the same ``expert_map`` in both scopes, so the table can show a
-        replicated expert as held by several ranks even though the local-scope
-        attribution cannot split its load between them.
-        """
-        self.expert_holders: list[list[int]] = [[] for _ in range(self.global_experts)]
-        for dump in self.dumps:
-            rank_row = self.rank_ix[dump.rank]
-            for layer_id in self.layer_ids:
-                mask, _ = _owned_mask(
-                    dump.layers.get(layer_id), self.local_experts, self.global_experts, dump.ep_rank
-                )
                 for expert in np.flatnonzero(mask):
                     holders = self.expert_holders[int(expert)]
                     if rank_row not in holders:
                         holders.append(rank_row)
         self.duplicated_experts = sum(1 for holders in self.expert_holders if len(holders) > 1)
+        if self.identity_rows:
+            self.warnings.append(
+                f"有 {self.identity_rows} 个 (rank, 层) 没有可用的 expert_map，"
+                f"按连续布局（{_SRC_IDENTITY}）推断专家归属；当每个 rank 持有等长且有序的一段时成立"
+            )
 
     def _fold_global_row(self, rank_row: int, si: int, li: int, counts: list[int]) -> None:
         """Add one global-scope row to the step's routing.
 
-        Nothing is attributed here. A global row is one rank's sending side, and
-        what decides a rank's load is the vector those rows sum to -- not which rank
-        contributed which part of it -- so the attribution happens once, on the
-        finished sum, in ``_attribute_global``.
+        Nothing is attributed here. A global row is one rank's *sending* side, and
+        the routing of a step is the vector those rows sum to -- so the sum, not
+        the individual rows, is what the expert dimension reports. ``sent_by_rank``
+        keeps each rank's own contribution as the ledger's neutral reference: it
+        says how much this rank put on the wire, which is a different question from
+        how much work it ended up with.
         """
         self.routing[si, li] += np.asarray(counts, dtype=np.int32)
         self.sent_by_rank[rank_row] += float(sum(counts))
@@ -820,77 +917,41 @@ class Run:
         """Fold one ``scope=compute`` row: the work this rank actually ran.
 
         A compute row is the writer's own receiving side, index by global expert
-        id, so -- unlike a routing row -- it is *already* attributed: no summing
-        over ranks and no ownership lookup. A row the plan relocated to this rank
-        therefore counts against this rank, which is the whole difference between
-        the two views.
+        id, so it is already "谁算了谁背": no summing over ranks, no ownership
+        lookup. A row the plan relocated to this rank therefore counts against this
+        rank, which is exactly what the rank dimension is for.
 
-        It keeps MoonEP's capacity pads: on this side a pad row sits in the same
-        slot as a real row of the same expert and may be computed by any rank that
-        holds that expert, so it cannot be told apart here. ``_fold_pad_row``
-        carries the same pads as their own row, which is what lets the report split
-        the total into real work and padding where that split is knowable.
+        It keeps MoonEP's capacity pads -- on this side a pad row sits in the same
+        slot as a real row of the same expert -- and the split back into 真实行 /
+        pad 行 is ``_split_compute``'s job, run once on the finished matrices.
         """
         vector = np.asarray(counts, dtype=np.float64)
         self.load_compute[rank_row, si, li] = float(vector.sum())
         self.compute_rank_expert[rank_row] += vector
-        self.compute_layer_expert[li] += vector
-        self.compute_step_expert[si] += vector
 
     def _fold_pad_row(self, rank_row: int, si: int, li: int, counts: list[int]) -> None:
         """Fold one ``scope=pad`` row: the pads this rank wrote into the dispatch.
 
         The pad block was subtracted from the routing rows, so it is not in the
-        routing view; the compute rows still carry it, so it is in the work view.
-        Neither can show it as its own quantity, and it is neither real traffic nor
-        free -- the rows are still matmul'd -- so it is recorded separately.
-
-        The writer is the rank that *injected* the block, and MoonEP aims a rank's
-        pads at its own first home expert, so this row is also exactly where the
-        load would land under owner attribution. Attribution to a computing rank is
-        the one thing it cannot give (see :meth:`_finalize_ledger`).
+        expert dimension; the compute rows still carry it, so it is in the rank
+        dimension. Neither can show it as its own quantity, and it is neither real
+        traffic nor free -- the rows are still matmul'd -- so it is recorded
+        separately. Its non-zero column also *names* the pad experts, which is how
+        ``_split_compute`` knows which experts to split.
         """
         vector = np.asarray(counts, dtype=np.int32)
         self.pad_pairs_by_rank[rank_row] += float(vector.sum())
         self.pad_routing[si, li] += vector
         self.pad_rows += 1
 
-    def _attribute_global(self) -> None:
-        """Credit the run's routing to the ranks holding the experts it landed on.
-
-        An expert's load is its whole column of ``routing``; a rank's load is that
-        column restricted to the experts the rank holds. Under replication an expert
-        held by two ranks is credited to the first of them -- the share each replica
-        actually served is not recorded anywhere, and inventing a split would make
-        the rank totals an estimate. Crediting one holder keeps them exact and makes
-        the ratio an *upper bound*: real sharing can only flatten it.
-        """
-        self.layer_expert = self.routing.astype(np.float64).sum(axis=0)  # [L, E]
-        self.step_expert = self.routing.astype(np.float64).sum(axis=1)  # [T, E]
-        for rank_row, mask in enumerate(self.owner_masks):
-            self.load[rank_row] = np.einsum("tle,le->tl", self.routing, mask.astype(np.float64))
-            self.rank_expert[rank_row] = (self.layer_expert * mask).sum(axis=0)
-        # The same attribution for the padding, so the routing view can show
-        # 总路由负载 = 真实路由 + pad per rank, both exact. A rank's pads are aimed at
-        # its own first home expert, which it also owns, so this mostly returns the
-        # block to whoever wrote it -- but it is derived, not assumed: the rule is
-        # the same ownership rule as the routing's.
-        for rank_row, mask in enumerate(self.owner_masks):
-            self.load_pad[rank_row] = np.einsum("tle,le->tl", self.pad_routing, mask.astype(np.float64))
-            self.rank_pad[rank_row] = float((self.pad_layer_expert * mask).sum())
-        # Busiest single expert within each rank's slice, as a share of that rank's
-        # row. Chunked over steps: the intermediate is T x L x E wide, which is the
-        # same order as the routing itself and not worth holding all at once.
-        for rank_row, mask in enumerate(self.owner_masks):
-            for lo in range(0, self.n_steps, 256):
-                chunk = self.routing[lo : lo + 256]
-                peak = np.where(mask[None], chunk, 0).max(axis=2)
-                load = self.load[rank_row, lo : lo + 256]
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    self.top_share[rank_row, lo : lo + 256] = np.where(load > 0, peak / np.maximum(load, 1.0), np.nan)
 
     def _fold_row(self, dump: RankData, rank_row: int, si: int, li: int, counts: list[int]) -> None:
-        """Fold one (rank, step, layer) row into the global-expert accumulators."""
+        """Fold one (rank, step, layer) row into the global-expert accumulators.
+
+        This is the local-scope path -- the row is index by this rank's own expert
+        slots -- and it is the rank dimension as it stands: the row is this rank's
+        work, so putting it on the global expert grid is all the mapping it needs.
+        """
         loc2glob, source = _loc2glob(
             dump.layers.get(self.layer_ids[li]), self.local_experts, self.global_experts, dump.ep_rank
         )
@@ -906,7 +967,7 @@ class Run:
         valid = (loc2glob >= 0) & (loc2glob < self.global_experts)
         if not valid.any():
             return
-        np.add.at(self.rank_expert[rank_row], loc2glob[valid], vector[valid])
+        np.add.at(self.rank_expert_local[rank_row], loc2glob[valid], vector[valid])
         np.add.at(self.layer_expert[li], loc2glob[valid], vector[valid])
         np.add.at(self.step_expert[si], loc2glob[valid], vector[valid])
 
@@ -934,8 +995,8 @@ class Run:
             )
         self._finalize_pad()
         if not self.global_scope:
-            # A global-scope run counts its ownership once per (rank, layer) in
-            # _prepare_ownership and has already said what it had to assume.
+            # A global-scope run reads its placement once per (rank, layer) in
+            # _build_holders and has already said what it had to assume.
             placed = self.identity_rows + self.map_rows + self.whole_rows
             if self.identity_rows and placed > self.identity_rows:
                 self.warnings.append(
@@ -953,30 +1014,28 @@ class Run:
                     f"{self.global_experts} 项；以 map 为准"
                 )
 
-        present = ~np.isnan(self.load)
-        self.present = present
-        pack = _par_pack(self.load, present, self.n_steps, self.n_layers, self.n_ranks, self.topk)
-        self.par_layer = pack["par_layer"]
-        self.par_by_step = pack["par_by_step"]
-        self.par_agg = pack["par_agg"]
-        self.par_whole = pack["par_whole"]
-        self.rank_step_load = pack["rank_step_load"]
-        self.step_pairs = pack["step_pairs"]
-        self.tokens_per_step = pack["tokens_per_step"]
-        self.per_rank_mean = pack["per_rank_mean"]
-        self.per_rank_max = pack["per_rank_max"]
-        self.rank_total = pack["rank_total"]
+        # 专家维度：真实路由按逻辑专家记，pad 另行记账（它不计入路由量）。
+        # ``pad_experts`` is where the two meet: a pad is injected on exactly the
+        # experts the ledger saw, and nowhere else.
+        self.expert_total = self.layer_expert.sum(axis=0)  # [E]
+        self.expert_pad_total = self.pad_layer_expert.sum(axis=0)  # [E]
 
-        # The same three ratios over the work each rank actually ran -- the series
-        # the report leads with, because "who is busy" is what a rank-level ratio is
-        # for and relocation is exactly what changes it. Absent on a dump that only
-        # recorded routing.
-        self.present_compute = ~np.isnan(self.load_compute) if self.has_compute else None
-        self.compute = (
-            _par_pack(self.load_compute, self.present_compute, self.n_steps, self.n_layers, self.n_ranks, self.topk)
-            if self.has_compute
-            else None
-        )
+        # rank 维度：同一份负载量按三种加总算三遍。真实行是主口径 —— 它才是这批
+        # token 真正让各 rank 干活的量；pad 行与合计行并排给出，因为「合计恒等于
+        # 容量」是构造结果，而 pad 恰恰是那个构造。
+        self.present = ~np.isnan(self.load_real)
+        self.compute: dict[str, dict] = {}
+        self.load_view = {}
+        for key, array in (
+            (_LEDGER_REAL, self.load_real),
+            (_LEDGER_PAD, self.load_pad),
+            (_LEDGER_TOTAL, self.load_total),
+        ):
+            pack = _par_pack(array, ~np.isnan(array), self.n_steps, self.n_layers, self.n_ranks, self.topk)
+            self.compute[key] = pack
+            self.load_view[key] = array
+        self.step_pairs = self.compute[_LEDGER_REAL]["step_pairs"]
+        self.tokens_per_step = self.compute[_LEDGER_REAL]["tokens_per_step"]
         bench = self._read_bench()
         self.checks = self._self_check()
         self.bench = self._bench_check(bench)
@@ -1039,6 +1098,15 @@ class Run:
             [d.rank, _as_int(d.meta.get("pad_pairs_subtracted"), 0), float(self.sent_by_rank[self.rank_ix[d.rank]])]
             for d in self.dumps
         ]
+        for rank_row, pads in enumerate(self.pad_pairs_by_rank):
+            if pads > 0.5 and self.sent_by_rank[rank_row] <= 0:
+                # A pad block with nothing real under it is a step whose whole MoE
+                # input was padding, which cannot happen for a step that ran.
+                self.warnings.append(
+                    f"rank {self.rank_ids[rank_row]} 记了 {pads:.0f} 对 pad，却没有任何真实路由行；"
+                    "这份 dump 的 pad 与路由行对不上"
+                )
+                break
         if self.tail_missing:
             self.warnings.append(
                 "这份 dump 没有退出汇总行（文件末尾的 "
@@ -1075,116 +1143,103 @@ class Run:
             "misplaced": self.pad_misplaced,
             "negative": self.pad_negative,
             "expert": self.pad_expert,
+            "experts": [int(e) for e in self.pad_experts],
+            # The pads as the rows that carry them: exact totals, and the injector's
+            # own split (see Run._fold_pad_row). `by_rank` puts the injected count
+            # next to the real traffic the same rank sent.
             "by_rank": self.pad_by_rank,
-            # The same pads as the rows that carry them: exact totals, and the
-            # injector's own split (which is a different question from the owner's
-            # attribution above -- see Run._fold_pad_row).
             "rows": int(self.pad_rows),
             "pairs": float(self.pad_layer_expert.sum()),
             "injected_by_rank": [float(v) for v in self.pad_pairs_by_rank],
-            "owner_by_rank": [float(v) for v in self.rank_pad],
             "top_share": None if not np.isfinite(share) else round(share, 4),
             "suspect": self.pad_suspect,
             "tail_missing": self.tail_missing,
         }
 
     def _finalize_ledger(self) -> None:
-        """Lay the three quantities of a MoonEP dispatch side by side.
+        """Lay the run's quantities side by side, per rank and in total.
 
-        A dispatch moves three ledgers, and the two views see different ones:
+        Four quantities, all in (token, 专家) pairs:
 
         ``真实路由``
-            The (token, expert) pairs the gate chose. Exact in the routing view --
-            the sending-side histogram, with the pads subtracted where they were
-            counted, so this number is real traffic and nothing else.
+            What the gate chose. Exact: the sending-side histogram, with the pads
+            subtracted where they were counted, so this is real traffic and nothing
+            else.
         ``pad``
             The rows MoonEP wrote to fill the dispatch up to its pooled capacity.
-            Not real traffic, but not free either: they are matmul'd like any other
-            row. Exact, from the dispatcher's own pad block.
-        ``丢弃``
-            Pairs the capacity envelope dropped before they reached a slot. Only
-            knowable as a residual -- nothing else can remove a pair from the path,
-            so ``发送 = 真实路由 + pad`` and ``计算 = 发送 - 丢弃``.
-
-        At expert granularity all three are exact in both views, and per rank they
-        are exact in the routing view (pad is attributed by the same ownership rule
-        as the routing, so 总路由负载 = 真实 + pad holds per rank). The one number
-        the data cannot give is the rank dimension of the compute view: once a pad
-        row is in a slot it is a row like any other and the plan may hand it to any
-        rank holding that expert, so no rank can say how many pads it ran.
-        ``pad_est`` therefore credits each rank ``rows / sent_e`` of the padding of
-        every expert ``e`` it ran -- the pads of the expert spread evenly over the
-        rows that expert was sent -- and ``real_est`` is the computed total minus
-        that. Summing it back up returns only the pads that survived the drops, so
-        the estimate can under-count but never invent padding; the uncertainty is
-        bounded by the pad total, which is small next to it whenever padding is
-        working as intended (a few percent of the rows).
+            Not real traffic, but not free either: they go through the grouped
+            matmul like any other row.
+        ``发送``
+            The real routing this rank's own tokens produced, pads excluded. Kept as
+            the neutral reference: what a rank *asked for* is a different story from
+            what it *ran*, and the gap between the two is the point. A rank's pads
+            are the column next to it, not part of it -- they top the dispatch up to
+            the capacity, so folding them in would make every rank's sum the same
+            number and say nothing. ``发送量 = 真实路由 + pad`` is the run total.
+        ``实际计算``
+            What each rank ran, split into 真实行 and pad 行 (``Run._split_compute``).
+            This is the view the report is about. ``合计`` is capacity-pinned on a
+            MoonEP leg, so its PAR is 1.000 by construction - not evidence of
+            anything.
 
         Everything the dump itself says about these numbers is cross-checked here
         and reported, because a ledger that quietly disagrees with the rows it came
         from is worse than no ledger.
         """
-        route_total = float(_nansum(self.rank_total, axis=0))
+        route_total = float(np.sum(self.expert_total))
         pad_total = float(self.pad_layer_expert.sum())
         sent_total = route_total + pad_total
-        compute_total = float(_nansum(self.compute["rank_total"], axis=0)) if self.compute else float("nan")
-        dropped = sent_total - compute_total if np.isfinite(compute_total) else float("nan")
+        rank_real = self.compute[_LEDGER_REAL]["rank_total"]  # [R]
+        rank_pad = self.compute[_LEDGER_PAD]["rank_total"]
+        rank_compute = self.compute[_LEDGER_TOTAL]["rank_total"]
+        # The compute side of the ledger exists only if some rank wrote its rows. A
+        # sending-side-only dump has no 实际计算量 at all -- and 0 would read as "the
+        # ranks computed nothing", so it is reported as unknown instead.
+        rank_known = bool(np.isfinite(rank_compute).any())
+        compute_total = float(_nansum(rank_compute, axis=0)) if rank_known else None
 
         per_rank = []
         for rank_row, rank_id in enumerate(self.rank_ids):
-            route = self.rank_total[rank_row]
+            real = rank_real[rank_row]
+            total = rank_compute[rank_row]
             entry = {
                 "rank": int(rank_id),
-                "route": None if not np.isfinite(route) else float(route),
-                "pad": float(self.rank_pad[rank_row]),
-                "sent": None if not np.isfinite(route) else float(route) + float(self.rank_pad[rank_row]),
-                "compute": None,
-                "pad_est": None,
-                "real_est": None,
+                # The neutral reference: the real routing this rank's own tokens
+                # produced. Deliberately *not* counted together with the pads it
+                # injected -- those top the dispatch up to the capacity, so their sum
+                # is the same capacity on every rank and would say nothing. This is
+                # the "what the rank asked for" side, and it is what the placement
+                # cannot move.
+                "sent": float(self.sent_by_rank[rank_row]),
+                "injected": float(self.pad_pairs_by_rank[rank_row]),
+                "real": None if not np.isfinite(real) else float(real),
+                "pad": None if not np.isfinite(rank_pad[rank_row]) else float(rank_pad[rank_row]),
+                "total": None if not np.isfinite(total) else float(total),
+                "real_share": None if not np.isfinite(total) or total <= 0 else float(real) / float(total),
             }
             per_rank.append(entry)
-        if self.compute is not None:
-            sent_by_expert = self.layer_expert.sum(axis=0) + self.pad_layer_expert.sum(axis=0)  # [E]
-            pad_by_expert = self.pad_layer_expert.sum(axis=0)  # [E]
-            # The rank that ran a row is credited the padding that row could have
-            # carried: `pad_e / sent_e` per row of expert e. Summed over the ranks
-            # this returns `pad_e * computed_e / sent_e` -- every pad that was sent
-            # and survived the drops -- so a rank can never be credited padding that
-            # was not there, and a dropped pad is credited to no one.
-            with np.errstate(invalid="ignore", divide="ignore"):
-                pad_per_row = np.where(
-                    sent_by_expert > 0, pad_by_expert / np.maximum(sent_by_expert, 1e-12), 0.0
-                )
-            pad_est = self.compute_rank_expert @ pad_per_row  # [R]
-            for rank_row, entry in enumerate(per_rank):
-                total = self.compute["rank_total"][rank_row]
-                if not np.isfinite(total):
-                    continue
-                entry["compute"] = float(total)
-                entry["pad_est"] = float(pad_est[rank_row])
-                entry["real_est"] = float(total - pad_est[rank_row])
 
         # What the dump's own exit summary claims, against what its rows say. The
-        # counters only exist in dumps written by the two-view recorder, so their
-        # absence is not evidence of a problem -- it is an older dump.
+        # counters only exist in dumps written with a compute view, so their absence
+        # is not evidence of a problem -- it is an older dump.
         self.tail_compute_rows = sum(_as_int(d.meta.get("compute_rows_total"), 0) for d in self.dumps)
         self.tail_compute_pairs = sum(_as_int(d.meta.get("compute_pairs_total"), 0) for d in self.dumps)
         self.tail_pad_rows = sum(_as_int(d.meta.get("pad_rows_total"), 0) for d in self.dumps)
-        rows_read = int(np.sum(~np.isnan(self.load_compute))) if self.compute is not None else 0
-        pairs_read = float(self.compute_layer_expert.sum()) if self.compute is not None else float("nan")
+        rows_read = int(np.sum(np.isfinite(self.load_total)))
+        pairs_read = float(_nansum(rank_compute, axis=0))
 
-        if self.compute is not None and np.isfinite(dropped) and dropped < -0.5:
+        if rank_known and route_total > compute_total + 0.5:
             self.warnings.append(
-                f"实际计算量比发送量还多 {-dropped:.0f} 对 (token, 专家)：容量包络只能丢行、不能凭空多出来，"
-                "所以要么同一对被两个 rank 各算了一遍（副本被重复计算），要么两套打点对不上——"
-                "这份 dump 的「实际计算」偏高"
+                f"实际计算量 {compute_total:.0f} 对比真实路由量 {route_total:.0f} 还少 "
+                f"{route_total - compute_total:.0f} 对 (token, 专家)：每个真实行都必须有人算，"
+                "少了说明有层没落盘，或者这份 dump 的计算视图不完整——真实/pad 拆分因此偏小"
             )
         if self.tail_compute_rows and self.tail_compute_rows != rows_read:
             self.warnings.append(
                 f"打点侧记了自己写过 {self.tail_compute_rows} 行「实际计算」行，dump 里只读到 {rows_read} 行"
                 "（同一 (step, 层) 的第二行会覆盖第一行，窗口没落盘也会少行）；这份 dump 的计算口径不完整"
             )
-        if self.tail_compute_pairs and np.isfinite(pairs_read) and abs(self.tail_compute_pairs - pairs_read) > 0.5:
+        if self.tail_compute_pairs and abs(self.tail_compute_pairs - pairs_read) > 0.5:
             self.warnings.append(
                 f"打点侧记的实际计算总量是 {self.tail_compute_pairs} 对，dump 里的计算行加起来是 "
                 f"{pairs_read:.0f} 对；两者应当相等，差额说明有行没被读进来"
@@ -1209,33 +1264,52 @@ class Run:
                 "里的 pad 这一项在这里不可拆分，不要把它当成 0"
             )
 
+        sent_by_rank_only = np.asarray([entry["sent"] for entry in per_rank], dtype=np.float64)  # [R]
+        sent_mean = float(_nanmean(sent_by_rank_only, axis=0))
+        sent_peak = float(_nanmax(sent_by_rank_only, axis=0))
+        sent_par = sent_peak / sent_mean if sent_mean > 0 else float("nan")
+
         self.ledger = {
             "route_total": route_total,
             "pad_total": pad_total,
             "sent_total": sent_total,
-            "compute_total": None if not np.isfinite(compute_total) else compute_total,
-            "dropped": None if not np.isfinite(dropped) else dropped,
-            "dropped_fraction": (dropped / sent_total) if np.isfinite(dropped) and sent_total > 0 else None,
+            "compute_total": compute_total,
+            "real_total": float(_nansum(rank_real, axis=0)) if rank_known else None,
+            "compute_pad_total": float(_nansum(rank_pad, axis=0)) if rank_known else None,
+            # The spread of what each rank *sent*, next to the spread of what each
+            # rank *ran*. On a dispatching MoE these are different stories by
+            # design, and this pair of numbers is the shortest way to say it.
+            "sent_par": None if not np.isfinite(sent_par) else sent_par,
             "per_rank": per_rank,
             "tail_compute_rows": self.tail_compute_rows,
             "tail_compute_pairs": self.tail_compute_pairs,
             "tail_pad_rows": self.tail_pad_rows,
             "compute_rows_read": rows_read,
-            "compute_pairs_read": None if not np.isfinite(pairs_read) else pairs_read,
+            "compute_pairs_read": pairs_read,
             "pad_rows_read": int(self.pad_rows),
+            "has_compute": bool(self.has_compute),
         }
-        if self.compute is not None and self.ledger["dropped"] is not None and abs(self.ledger["dropped"]) > 0.5:
-            where = "丢弃" if self.ledger["dropped"] > 0 else "重复计算"
-            self.notes.append(
-                f"发送 {sent_total:.0f} 对 = 真实路由 {route_total:.0f} + pad {pad_total:.0f}，"
-                f"实际计算 {compute_total:.0f} 对，差 {abs(self.ledger['dropped']):.0f} 对（{where}，"
-                f"占发送的 {abs(self.ledger['dropped_fraction']):.1%}）"
+        self.notes.append(
+            f"发送量 {sent_total:.0f} 对 = 真实路由 {route_total:.0f} + pad {pad_total:.0f}（这是各 rank "
+            f"「送出/注入」了多少）"
+            + (
+                f"；实际计算合计 {compute_total:.0f} 对，其中真实行 "
+                f"{self.ledger['real_total']:.0f}、pad 行 {self.ledger['compute_pad_total']:.0f}"
+                if rank_known else
+                "；这份 dump 没有计算行，实际计算量、真实行 / pad 行的拆分都无从得知"
             )
-        if self.ledger["per_rank"] and any(entry["pad_est"] for entry in self.ledger["per_rank"]):
+        )
+        if self.pad_experts:
             self.notes.append(
-                "逐 rank 的「实际计算」含 pad，而 pad 落到哪个 rank 上是无法从 dump 里读出来的（pad 行与真实"
-                "行同槽、且可能被预取到别的 rank）；pad_est 是按「该 expert 各行里由本 rank 计算的比例」摊分"
-                "出来的估计，误差不超过 pad 总量"
+                f"pad 行全部落在 {len(self.pad_experts)} 个逻辑专家上（{'、'.join(str(e) for e in self.pad_experts)}）——"
+                "也就是各 rank 自己注入 pad 时选的那个专家；这些专家上的**真实**行按「归该专家的首个持有者」"
+                "记账，与按持有量摊的结果在本例里相差不到 0.2%（见 docs/moe_par.md「已知边界」）"
+            )
+        if np.isfinite(sent_par) and rank_known:
+            self.notes.append(
+                f"同一批 token 的两端：各 rank **送出**的真实路由 PAR 是 {sent_par:.3f}，"
+                f"落到**实际计算**的真实行 PAR 是 {self.compute[_LEDGER_REAL]['par_whole']:.3f}——"
+                "前者说这批输入在各 rank 上本来有多不均匀，后者说派发之后每张卡实际要干多少活"
             )
 
     def _self_check(self) -> dict:
@@ -1243,9 +1317,12 @@ class Run:
 
         The stitch is the only place the ranks meet, so this is the one check
         that can catch a broken join. Every MoE layer of a forward sees the same
-        tokens, so ``sum_r load[r, t, l]`` has to be flat in ``l``.
+        tokens, so ``sum_r load_real[r, t, l]`` has to be flat in ``l``. The 合计
+        ledger would be flat by construction even if the join were broken, so the
+        check reads the 真实行 ledger -- the one quantity that only adds up when
+        every rank's rows were placed in the right layer.
         """
-        per_layer_total = np.where(self.present, self.load, np.nan).sum(axis=0)  # [T, L]
+        per_layer_total = np.where(self.present, self.load_real, np.nan).sum(axis=0)  # [T, L]
         full = np.sum(self.present, axis=0) == self.n_ranks  # [T, L]
         checked = 0
         worst = 0.0
@@ -1257,15 +1334,84 @@ class Run:
             median = float(np.median(values))
             if median > 0:
                 worst = max(worst, float(np.max(np.abs(values - median)) / median))
+        # A rank axis is what this check sums over, so a dump without one -- sending
+        # side only -- has nothing to check here. It says so instead of reporting the
+        # spread of an empty axis as a failed join.
+        rank_axis = bool(np.isfinite(self.load_real).any())
+        # The three identities the split rests on. Each one says the same thing from
+        # a different side: the rows a rank ran are real routing plus injected pads,
+        # and nothing is invented or lost in between. They are checked here rather
+        # than assumed because a broken join shows up as a small residual long before
+        # it shows up as a wrong PAR.
+        #
+        # They need a rank dimension to sum over: a routing-only dump has none (there
+        # is nothing to check, and `sum_r` of an empty axis is 0, which would read as
+        # a catastrophic failure instead of "not asked").
+        rank_known = rank_axis
+        route_total = float(np.sum(self.expert_total))
+        pad_injected = float(np.sum(self.pad_layer_expert))
+        real_sum = float(_nansum(self.load_real, axis=None))
+        pad_sum = float(_nansum(self.load_pad, axis=None))
+        # ①② are exact when nothing was dropped, and a dropped row lands in exactly
+        # one of them (real vs pad) -- which class it belonged to is not in the dump,
+        # so neither row of the table can be checked to zero on a run that drops. What
+        # *is* exact, always, is the pair: real + pad sums to the computed rows, so
+        # real_error + pad_error == compute - sent == -丢弃, and both errors are <= 0.
+        # That is the identity the report checks when the drops are nonzero.
+        sent_total = route_total + pad_injected
+        compute_total_all = float(_nansum(self.load_total, axis=None))
+        drop_total = sent_total - compute_total_all
+        real_error = real_sum - route_total
+        pad_error = pad_sum - pad_injected
+        # 合计 per (rank, step, layer) is the dispatch's capacity x topk, which MoonEP
+        # pins to the same value on every rank -- that is the property to test, and it
+        # is *not* evidence of balance (see the report). It is what makes the 合计
+        # ledger's PAR 1.000 by construction, so the number has to be one every rank
+        # holds, not a sum over ranks: a local leg's cells also add up to a constant
+        # (every layer sees the same tokens) while its ranks sit at different loads.
+        cells = np.where(self.present, self.load_total, np.nan)
+        pinned = cells[np.isfinite(cells)]
+        spread = (float(np.max(pinned)) - float(np.min(pinned))) if pinned.size else 0.0
         return {
             "steps_checked": checked,
             "max_layer_spread": worst,
             "missing_cells": int(np.sum(~self.present)),
             # With one rank there is nothing to reconcile: the sum over ranks is that
             # rank's own load, which is flat by construction. Say so instead of
-            # reporting a pass the check cannot earn.
-            "applicable": bool(self.n_ranks > 1),
-            "flat": bool(checked and worst < 1e-6),
+            # reporting a pass the check cannot earn. Same for a dump with no rank
+            # axis at all, which `identities.applicable` also carries.
+            "applicable": bool(rank_axis and self.n_ranks > 1),
+            "flat": bool(rank_axis and checked and worst < 1e-6),
+            "identities": {
+                # False when this dump carries no rank dimension at all (a
+                # routing-only MoonEP dump): the sums below are then not evidence of
+                # anything, and the report must not show them as a failed check.
+                "applicable": rank_known,
+                "route_total": route_total,
+                "real_sum": real_sum,
+                "real_error": real_error,
+                "pad_injected": pad_injected,
+                "pad_sum": pad_sum,
+                "pad_error": pad_error,
+                "compute_total": compute_total_all,
+                # The pair-wise identity that survives dropping rows (see above).
+                "sent_total": sent_total,
+                "drop_total": drop_total,
+                "error_sum": real_error + pad_error,
+                "drop_accounted": bool(
+                    real_error <= 0.5 and pad_error <= 0.5
+                    and abs(real_error + pad_error + drop_total) < 0.5
+                ),
+                # capacity = 每个格的合计 ÷ topk，即这个 rank 在这个 (步, 层) 上算的
+                # token 数；只有每个格都是同一个值（且每格都有数据、这份 dump 也有
+                # 计算行）时，它才是 MoonEP 那个「每 rank 每层算的行数完全相同」的构造。
+                "cell_total_min": None if not pinned.size else float(np.min(pinned)),
+                "cell_total_max": None if not pinned.size else float(np.max(pinned)),
+                "capacity_pinned": bool(
+                    self.has_compute and pinned.size and self.present.all() and spread < 0.5
+                ),
+                "capacity": None if not (pinned.size and self.topk) else float(np.median(pinned)) / self.topk,
+            },
         }
 
     def _read_bench(self) -> dict | None:
@@ -1452,6 +1598,23 @@ class Run:
             """Non-finite -> None, so the report can tell 'missing' from 'zero'."""
             return np.where(np.isfinite(array), array, None).tolist()
 
+        def pack(view: dict) -> dict:
+            """One ``_par_pack`` result as JSON: the same keys for all three ledgers."""
+            whole = view["par_whole"]
+            return {
+                "load": clean(view["load"]),  # R x T x L
+                "rank_step_load": clean(view["rank_step_load"]),  # R x T
+                "par_layer": clean(view["par_layer"]),  # T x L, EPLB's per-layer balance
+                "par_by_step": clean(view["par_by_step"]),  # T
+                "par_agg": clean(view["par_agg"]),  # T, whole step
+                "par_whole": None if not np.isfinite(whole) else float(whole),
+                "rank_total": clean(view["rank_total"]),  # R, whole run
+                "step_pairs": clean(view["step_pairs"]),  # T
+                "tokens_per_step": clean(view["tokens_per_step"]),  # T
+                "per_rank_mean": clean(view["per_rank_mean"]),  # R
+                "per_rank_max": clean(view["per_rank_max"]),  # R
+            }
+
         return {
             "name": self.name,
             "dir": self.dir,
@@ -1460,8 +1623,8 @@ class Run:
             "ep_size": self.ep_size,
             "world_size": self.world_size,
             "scope": self.scope,
-            # What the primary (routing) rows are index by, and whether the dump
-            # carries MoonEP's second view of the same dispatch.
+            # What the rows are index by, and whether the dump distinguishes the
+            # rows a rank ran from the rows it sent.
             "primary": self.primary,
             "has_compute": bool(self.has_compute),
             "global_experts": int(self.global_experts),
@@ -1470,58 +1633,50 @@ class Run:
             "topk": int(self.topk),
             "redundant": int(self.redundant),
             "duplicated_experts": int(self.duplicated_experts),
-            "unowned_slots": int(self.unowned_slots),
             "partial_steps": int(self.partial_steps),
             "flush_every": int(self.flush_every),
             "expert_holders": [list(h) for h in self.expert_holders],
             "rank_ids": [int(r) for r in self.rank_ids],
             "steps": [int(s) for s in self.steps],
+            # 每一步用的通信实现，逐条列出来（同一步里各层的实现可能不同）。
+            "methods_per_step": [_METHOD_LABELS.get(m, m.removesuffix("CommImpl")) for m in self.method_of_step],
             "n_steps": self.n_steps,
             "n_layers": self.n_layers,
             "n_ranks": self.n_ranks,
-            "load": clean(self.load),  # R x T x L
-            "rank_expert": clean(self.rank_expert),  # R x G
-            "rank_expert_seen": [bool(v) for v in self.rank_expert_seen],
+            # 专家维度: the routing each logical expert received, pads subtracted by
+            # the recorder where they were counted. This is the load question --
+            # how hot an expert is under this batch -- and it is exact.
             "layer_expert": clean(self.layer_expert),  # L x G
             "step_expert": clean(self.step_expert),  # T x G
-            "par_layer": clean(self.par_layer),  # T x L
-            "par_by_step": clean(self.par_by_step),  # T
-            "par_agg": clean(self.par_agg),  # T
-            "par_whole": None if not np.isfinite(self.par_whole) else float(self.par_whole),
-            "rank_total": clean(self.rank_total),  # R, summed over every step and layer
-            "rank_step_load": clean(self.rank_step_load),  # R x T
-            "per_rank_mean": clean(self.per_rank_mean),  # R
-            "per_rank_max": clean(self.per_rank_max),  # R
-            "tokens_per_step": clean(self.tokens_per_step),  # T
-            "methods_per_step": [_METHOD_LABELS.get(m, m.removesuffix("CommImpl")) for m in self.method_of_step],
-            # The second view: the same dispatch, attributed to the rank that ran
-            # each row. Same shape as the primary fields, so the report can put the
-            # two series side by side -- and leads with this one.
-            "compute": None
-            if self.compute is None
-            else {
-                "load": clean(self.compute["load"]),  # R x T x L, by computing rank
-                "rank_step_load": clean(self.compute["rank_step_load"]),  # R x T
-                "par_layer": clean(self.compute["par_layer"]),  # T x L
-                "par_by_step": clean(self.compute["par_by_step"]),  # T
-                "par_agg": clean(self.compute["par_agg"]),  # T
-                "par_whole": None if not np.isfinite(self.compute["par_whole"]) else float(self.compute["par_whole"]),
-                "rank_total": clean(self.compute["rank_total"]),  # R, whole run
-                "tokens_per_step": clean(self.compute["tokens_per_step"]),  # T, pads included
-                "per_rank_mean": clean(self.compute["per_rank_mean"]),  # R
-                "per_rank_max": clean(self.compute["per_rank_max"]),  # R
-                "rank_expert": clean(self.compute_rank_expert),  # R x E
-                "layer_expert": clean(self.compute_layer_expert),  # L x E
-                "step_expert": clean(self.compute_step_expert),  # T x E
+            "expert_total": clean(self.expert_total),  # G
+            "layer_expert_pad": clean(self.pad_layer_expert),  # L x G
+            "step_expert_pad": clean(self.pad_step_expert),  # T x G
+            "expert_pad_total": clean(self.expert_pad_total),  # G
+            # rank 维度: the one load, seen three ways. 合计 is capacity-pinned on a
+            # MoonEP leg, so its PAR is 1.000 by construction -- the information is
+            # in 真实行 / pad 行.
+            "compute": {
+                _LEDGER_REAL: pack(self.compute[_LEDGER_REAL]),
+                _LEDGER_PAD: pack(self.compute[_LEDGER_PAD]),
+                _LEDGER_TOTAL: pack(self.compute[_LEDGER_TOTAL]),
+                "rank_expert": clean(self.compute_rank_expert),  # R x E, compute rows only
+                "rank_expert_real": clean(self.rank_expert_real),  # R x E
+                "rank_expert_pad": clean(self.rank_expert_pad),  # R x E
+                # (rank, step, layer) cells that were actually read: the denominator
+                # of every average below, and the thing a missing window shrinks.
+                "cells_read": int(np.sum(np.isfinite(self.load_total))),
                 "seen": [bool(v) for v in self.compute_seen],
             },
-            # The padding as its own ledger, at expert granularity (exact in every
-            # scope) and per rank in the routing view (by the same ownership rule as
-            # the routing). The rank dimension of the compute view is the one place
-            # it cannot be exact -- see Run._finalize_ledger.
-            "layer_expert_pad": clean(self.pad_layer_expert),  # L x E
-            "step_expert_pad": clean(self.pad_step_expert),  # T x E
-            "rank_pad": clean(self.rank_pad),  # R, owner-attributed
+            # How the split was decided, and what it could not decide -- the report
+            # says this out loud rather than letting the numbers imply more precision
+            # than the dump carries (see Run._split_compute).
+            "split": {
+                "pad_experts": [int(e) for e in self.pad_experts],
+                "pad_experts_global": int(self.pad_expert),
+                "negative_cells": int(self.pad_negative_cells),
+                "negative_pairs": float(self.pad_negative_pairs),
+                "rule": "pad 专家上的真实行归该专家的首个持有者；其余专家谁算归谁",
+            },
             "ledger": self.ledger,
             "checks": self.checks,
             "pad": self.pad,
@@ -1625,7 +1780,6 @@ def main() -> int:
                 return "n/a"  # e.g. PAR with a single rank: no spread to measure
             return f"{getattr(kept, how)():.3f}"
 
-        whole = "n/a" if not np.isfinite(run.par_whole) else f"{run.par_whole:.3f}"
         pad = ""
         if run.pad["subtracted"]:
             pad = f" | MoonEP pads subtracted {run.pad['subtracted']} (global ids)"
@@ -1639,46 +1793,54 @@ def main() -> int:
         )
         print(
             f"[moe-par] {run.name}: {run.n_ranks} ranks x {run.n_steps} steps x {run.n_layers} layers{scope} | "
-            f"cross-rank join "
-            f"{'flat' if check['flat'] else 'NOT FLAT'} (spread {check['max_layer_spread']:.2e}){pad}",
+            "cross-rank join "
+            + (
+                f"{'flat' if check['flat'] else 'NOT FLAT'} (spread {check['max_layer_spread']:.2e})"
+                if check["applicable"] else "n/a (no rank axis to sum over)"
+            )
+            + pad,
             file=sys.stderr,
         )
-        # 两套口径：实际计算是主口径（屏障等的是它），路由归属作参照。没有第二套时
-        # 只打一行，语义与以前完全一致。
-        if run.compute is None:
+        # One 口径, three ledgers. 真实行 / pad 行 are the two halves of the work each
+        # rank actually ran; 合计 is their sum, and on a MoonEP leg it is
+        # capacity-pinned, so say so right where the number is rather than letting
+        # 1.000 read as a balance result.
+        for key in _LEDGER_KEYS:
+            view = run.compute[key]
+            whole = "n/a" if not np.isfinite(view["par_whole"]) else f"{view['par_whole']:.3f}"
+            # The ledger's amount comes from the rank axis too: summing an axis that
+            # is not there is 0, and "总量 0 对" would read as "no work at all".
+            volume = (
+                f"总量 {_nansum(view['rank_total'], axis=0):.0f} 对"
+                if check["identities"]["applicable"] else "总量 n/a（没有 rank 维度）"
+            )
+            tail = ""
+            if key == _LEDGER_TOTAL and check["identities"]["capacity_pinned"]:
+                tail = "  [容量对称的构造结果，不是均衡证据]"
+            if key == _LEDGER_PAD and not run.pad_rows:
+                tail = "  [这份 dump 没有 pad 行]"
             print(
-                f"[moe-par] {run.name} (路由归属): PAR per-layer mean "
-                f"{_stat(run.par_by_step, 'mean')} max {_stat(run.par_by_step, 'max')} | "
-                f"PAR per-step (whole step) mean {_stat(run.par_agg, 'mean')} | "
-                f"PAR whole run {whole}",
+                f"[moe-par] {run.name} ({_LEDGER_LABELS[key]}): PAR per-layer mean "
+                f"{_stat(view['par_by_step'], 'mean')} max {_stat(view['par_by_step'], 'max')} | "
+                f"PAR per-step (whole step) mean {_stat(view['par_agg'], 'mean')} | "
+                f"PAR whole run {whole} | {volume}{tail}",
                 file=sys.stderr,
             )
-        else:
-            compute_whole = (
-                "n/a" if not np.isfinite(run.compute["par_whole"]) else f"{run.compute['par_whole']:.3f}"
-            )
-            ledger = run.ledger
-            dropped = ledger["dropped"] or 0.0
-            share = ledger["pad_total"] / max(1.0, ledger["sent_total"])
-            split = f"真实 {ledger['route_total']:.0f} + pad {ledger['pad_total']:.0f}"
-            if abs(dropped) > 0.5:
-                split += f" - 丢弃 {dropped:.0f}"
-            print(
-                f"[moe-par] {run.name} (实际计算·主): PAR per-layer mean "
-                f"{_stat(run.compute['par_by_step'], 'mean')} "
-                f"max {_stat(run.compute['par_by_step'], 'max')} | "
-                f"PAR per-step (whole step) mean {_stat(run.compute['par_agg'], 'mean')} | "
-                f"PAR whole run {compute_whole} | 计算量 {ledger['compute_total']:.0f} = {split} "
-                f"(pad 占发送量 {share:.1%})",
-                file=sys.stderr,
-            )
-            print(
-                f"[moe-par] {run.name} (路由归属·参照): PAR per-layer mean "
-                f"{_stat(run.par_by_step, 'mean')} max {_stat(run.par_by_step, 'max')} | "
-                f"PAR per-step (whole step) mean {_stat(run.par_agg, 'mean')} | "
-                f"PAR whole run {whole}  [被搬到别处算的行仍记属主，故 rank 维度上是上界]",
-                file=sys.stderr,
-            )
+        ledger = run.ledger
+        sent_par = ledger["sent_par"]
+        print(
+            f"[moe-par] {run.name} 账本: 逐 rank 送出真实路由 {ledger['route_total']:.0f} 对"
+            + (f"（送出 PAR {sent_par:.3f}）" if sent_par is not None else "")
+            + (
+                f" → 实际计算 {ledger['compute_total']:.0f} 对 = 真实行 {ledger['real_total']:.0f}"
+                f" + pad 行 {ledger['compute_pad_total']:.0f}"
+                f" | pad 占计算量 {ledger['compute_pad_total'] / max(1.0, ledger['compute_total']):.1%}"
+                if check["identities"]["applicable"] else
+                f" | 这份 dump 没有计算行，实际计算量无从得知；打点侧扣掉的 pad 是 "
+                f"{ledger['pad_total']:.0f} 对（落在哪些专家上照常可知）"
+            ),
+            file=sys.stderr,
+        )
         for warning in run.warnings:
             print(f"[moe-par]   warning: {warning}", file=sys.stderr)
 
@@ -1822,6 +1984,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .scope .sbar i { display: block; height: 100%; border-radius: 3px; }
   .hero table { font-size: 12.5px; }
   .hero table td:last-child { font-size: 13.5px; font-weight: 620; white-space: nowrap; }
+  /* 每 rank 的真实行 / pad 行堆叠条：三段式（名字 | 条 | 数字），条上有一根竖线
+     标出「送出量」的均值，用来看这张卡算得比它送出的多还是少。 */
+  .rankstack { margin: 10px 0 4px; }
+  .rsrow { display: grid; grid-template-columns: 74px 1fr 190px; gap: 10px;
+           align-items: center; padding: 2px 0; }
+  .rsname { font-size: 12px; color: var(--text-secondary); }
+  .rsnum { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right;
+           color: var(--text-secondary); }
+  .rstrack { position: relative; height: 13px; border-radius: 3px; background: var(--grid);
+             overflow: hidden; }
+  .rstrack i { display: block; height: 100%; float: left; }
+  .rstrack u { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--fg-2, #888);
+               text-decoration: none; }
   table { border-collapse: collapse; font-size: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   th, td { border-bottom: 1px solid var(--border); padding: 3px 12px 3px 0; text-align: right; }
   th:first-child, td:first-child { text-align: left; }
@@ -1857,7 +2032,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div id="report"></div>
   <footer>PAR = 各 rank 之间的 峰值 / 均值，取值 [1, rank 数]；1 表示完全均衡。负载以 token-专家对计数，
-  一个 token 被路由给 <i>k</i> 个专家就贡献 <i>k</i>；某个 rank 的负载是它本地专家上的求和。</footer>
+  一个 token 被路由给 <i>k</i> 个专家就贡献 <i>k</i>。专家维度按<b>逻辑专家</b>数（副本算同一个，
+  pad 不计入）；rank 维度按<b>实际计算</b>数，分「真实行 / pad 行 / 合计行」三本账——
+  合计行在 MoonEP 腿上恒为容量 × topk，它的 PAR = 1.000 是构造结果，不是均衡的证据。</footer>
 </div>
 <div class="tip" id="tip" hidden></div>
 
@@ -2308,6 +2485,24 @@ function boxChart(host, o) {
 /* --------------------------------------------------------------- rendering */
 let current = 0;
 let layerPick = 0;
+let ledgerPick = "real";   // 真实行 / pad 行 / 合计行 —— 见 LEDGERS
+
+/* 三本账，同一个负载量的三种来源。report 的 rank 维度全部按它们画；
+   哪一本是「主」取决于问题：看屏障等谁要看真实行，看容量给了多少算力要看合计行。 */
+const LEDGERS = [
+  { key: "real", label: "真实行", hint: "gate 选中的、真的有人算的行。这是这批 token 真正让各 rank 干活的量。" },
+  { key: "pad", label: "pad 行", hint: "MoonEP 为对齐池化容量注入的零行。它不携带 token，但同样进 matmul。" },
+  { key: "total", label: "合计行", hint: "真实行 + pad 行 = 各 rank 实际算过的全部行。" +
+      "MoonEP 腿上它恒等于 容量 × topk，所以它的 PAR 恒为 1.000——那是构造结果，不是均衡证据。" },
+];
+const LEDGER_LABEL = { real: "真实行", pad: "pad 行", total: "合计行" };
+/* 取某个运行某一本账的整套 PAR / 负载表。off 腿没有 pad，real 与 total 相同、pad 恒 0。 */
+function view(r, key) { return (r.compute && r.compute[key]) ? r.compute[key] : r; }
+function ledgerLabel(key) { return LEDGER_LABEL[key] || ""; }
+/* 「分子分母各是哪一本账」——所有 PAR 数字下面都要能回答这一句。 */
+function ledgerPhrase(key) {
+  return "负载 = " + ledgerLabel(key) + "；PAR = 各 rank 之间 最忙 ÷ 平均。";
+}
 
 function kpiCard(key, value, note, hint) {
   const c = div("card");
@@ -2348,52 +2543,45 @@ function renderGlossary() {
     "<tr><td><b>本地专家</b>（local_experts）</td><td>坐在<b>本 rank 上</b>的专家数 = 逻辑专家 ÷ rank 数" +
     "（本例 " + G + " ÷ " + R + " = " + r0.local_experts + "）。" +
     "只有它们要花本 rank 的算力。<b>注意区分「专家是谁」和「谁在算」</b>：" +
-    "负载按<b>逻辑专家</b>记（副本算同一个专家），再按「谁持有它」落到各 rank。</td></tr>" +
+    "专家负载按<b>逻辑专家</b>记（副本算同一个专家）；rank 负载按<b>谁算了这一行</b>记。" +
+    "</td></tr>" +
     "<tr><td><b>冗余专家</b>（redundant）</td><td>EPLB 为削峰而<b>复制</b>出来的专家副本，" +
     "让一个热门专家能被两个 rank 同时扛。为 0 时，「谁持有哪个专家」就是一个划分。" +
-    "有副本时报告仍按<b>逻辑专家</b>记负载、并把副本的份额算在其中一个持有者头上" +
-    "（因为副本各自接了多少 token 在发送侧看不见），所以此时的 <b>PAR 是上界</b>——" +
-    "真实分摊只会让各 rank 更平。</td></tr>" +
+    "有副本时专家负载仍按<b>逻辑专家</b>记（副本算同一个专家），rank 维度不受影响——" +
+    "它数的是「谁算的行」，副本各算各的，各自记账。</td></tr>" +
     "<tr><td><b>EP</b> / ep_size</td><td>Expert Parallel：把 " + G + " 个专家<b>摊到各 rank</b> 上，" +
     "而不是每个 rank 都放全量。这份报告关心的不平衡是 EP 带来的。</td></tr>" +
     "<tr><td><b>放置</b>（placement）</td><td>「哪个专家坐在哪个 rank」。" +
-    "这是 EPLB 唯一能改的东西：token 流向决定倾斜有多大，放置决定这份倾斜落在谁头上。</td></tr>" +
+    "这是 EPLB 唯一能改的东西：token 流向决定倾斜有多大，放置决定这份倾斜落在谁头上。" +
+    "MoonEP 还能把别的 rank 的专家<b>预取</b>过来算，于是「专家住在哪」与「行在哪算」也可以不同。</td></tr>" +
     "<tr><td><b>token</b></td><td>模型处理的最小单位（一个词片）。一个 token 经过<b>每一层</b>都会被路由一次。</td></tr>" +
     "<tr><td><b>topk</b></td><td>每个 token 在每层被送给几个专家（本模型 " + K + "）。</td></tr>" +
-    "<tr><td><b>token-专家对</b></td><td>token × 被它选中的专家 = 一次路由。" +
-    "<b>这就是本报告的负载单位</b>，与 EPLB 的 moe_load 同口径，<b>不含 padding</b>。</td></tr>" +
+    "<tr><td><b>token-专家对</b>（「行」）</td><td>token × 被它选中的专家 = 一次路由，" +
+    "也就是一行要算的东西。<b>这就是本报告的负载单位</b>，与 EPLB 的 moe_load 同口径。" +
+    "「路由量」只数真实对；「计算量」还包括 pad 行。</td></tr>" +
     "<tr><td><b>专家负载</b></td><td>某个<b>逻辑专家</b>收到的 token-专家对数。" +
-    "副本算同一个专家。</td></tr>" +
-    "<tr><td><b>rank 负载</b></td><td>把该 rank 身上的 token-专家对数加起来。" +
-    "<b>算谁头上分两套口径</b>：<b>实际计算</b>（主）= 这个 rank 真正算过的行；" +
-    "<b>路由归属</b>（参照）= 落到它所持专家上的行。" +
-    "EP 下每个 rank 只算自己那部分 token，但 token 会被投递到别的 rank 的专家上——" +
-    "落到谁的专家就记谁，<b>不是「这个 rank 发出了多少」</b>；" +
-    "而专家被预取到别的 rank 上算时，两套又不一样。见下面两条。</td></tr>" +
-    "<tr><td><b>预取槽</b>（prefetch slot）</td><td>MoonEP 允许 rank 在自己家里留几个槽位、" +
-    "把<b>别的 rank 的专家</b>预取过来算（dump 里的 <code>experts_to_copy</code>）。" +
-    "于是「专家 A 的行」可能在 rank1 上被算，而 expert_map 里 A 的属主仍是 rank0——" +
-    "这正是要分开两套口径的原因。</td></tr>" +
-    "<tr><td><b>路由归属口径</b></td><td>每一对记在<b>专家属主</b>头上：谁持有这个逻辑专家，" +
-    "负载就算谁的；被搬到别的 rank 上算的行<b>仍记属主</b>。" +
-    "它回答「放置好不好」——是不做搬迁时的分布，衡量 EPLB 的依据。" +
-    "有副本或预取槽时，它在 rank 维度上是<b>上界</b>（真实分摊只会更平）。</td></tr>" +
-    "<tr><td><b>实际计算口径</b></td><td>每一对记在<b>算它的那个 rank</b> 头上（接收侧计数）。" +
-    "被搬到 rank1 上算的行记 rank1、其余记属主。它回答「屏障在等谁」——性能由它决定。" +
-    "<b>它含 pad</b>（pad 也是被算的行），不含被容量包络丢弃的对。" +
-    "报告的 rank 级结论以它为主。</td></tr>" +
-    "<tr><td><b>pad</b> / padding</td><td>MoonEP 每步把 MoE 输入补齐到池化容量（至少 128 个 token）" +
+    "副本算同一个专家。<b>这一维只看路由，与 pad 无关</b>——pad 行不算任何专家的热度。" +
+    "「专家热度」面板按它排序。</td></tr>" +
+    "<tr><td><b>rank 负载</b></td><td>这个 rank <b>实际算过的行</b>（谁算谁背）。" +
+    "报告把它拆成三本账：<b>真实行</b>（gate 选中、真的有人算的行）、" +
+    "<b>pad 行</b>（为对齐容量注入的零行）、<b>合计行</b>（两者之和）。" +
+    "三本账在「三个 PAR 口径」面板里都能切换查看。</td></tr>" +
+    "<tr><td><b>pad</b> / padding</td><td>MoonEP 每步把每个 rank 的输入补齐到池化容量（至少 128 个 token）" +
     "时塞进去的零行，不携带真实 token。<b>它不计入路由量</b>：打点侧在产生它的那个 rank 上、" +
     "按逻辑专家 id 直接从计数里扣掉并单独记下来，汇总值写在 dump 的退出头部" +
-    "（<code>pad_pairs_subtracted</code>）。<b>但它计入计算量</b>——零行同样进 matmul、同样占算力。</td></tr>" +
-    "<tr><td><b>发送量 / 计算量</b></td><td><code>发送量 = 真实路由 + pad</code>（rank 之间真正递送的行）；" +
-    "<code>计算量 = 发送量 − 丢弃</code>（真正进 matmul 的行）。两者都是 token-专家对。" +
-    "完整拆分见「计算量分层账本」。</td></tr>" +
-    "<tr><td><b>pad 计算量</b></td><td>pad 行贡献的那部分计算量。它不是真实流量，但也不是零成本——" +
-    "专家维度能精确拆开（pad 行单独落盘、按逻辑专家 id 记）；" +
-    "rank 维度只能按行数比例估（pad 进了槽位就和真实行长得一样，还可能被搬走）。</td></tr>" +
+    "（<code>pad_pairs_subtracted</code>）。<b>但它计入计算量</b>——零行同样进 matmul、同样占算力。" +
+    "本报告的 rank 维度用「真实行 / pad 行」把这两件事分开。</td></tr>" +
+    "<tr><td><b>合计行恒等于容量</b></td><td>MoonEP 把每个 rank 的输入都补齐到<b>同一个</b>池化容量，" +
+    "所以每个 rank 每 (步, 层) 算的行数完全相同：<code>容量 × topk</code>。" +
+    "于是<b>合计行的 PAR 恒为 1.000</b>——这是构造出来的、与负载倾斜无关，" +
+    "<b>不是</b>「均衡良好」的证据。倾斜只体现在真实行那一本账里。</td></tr>" +
+    "<tr><td><b>发送量</b></td><td>各 rank 自己的 token 产生的真实路由量（它「送出」了多少对）。" +
+    "这是<b>中性参照</b>：它衡量输入在各 rank 上本来有多不均匀，放置改不了它。" +
+    "注意它与「合计行」不是一回事——后者是各 rank 实际算了多少，已经被派发重新分配过了。" +
+    "（本报告不把注入的 pad 算进这一列：每 rank 的 pad 恰好把发送量补到容量，" +
+    "两者相加恒等于容量，那样这一列就没有信息了。）</td></tr>" +
     "<tr><td><b>丢弃</b>（dropped）</td><td>容量包络没能收下的对（超出专家 cap 配额的那部分）。" +
-    "只能作为残差得到：<code>丢弃 = 发送量 − 计算量</code>。" +
+    "只能作为残差得到：<code>丢弃 = 发送量 − 实际计算量</code>。" +
     "它是「计算量小于发送量」的唯一来源——计算量不会凭空多出来。</td></tr>" +
     "<tr><td><b>步</b>（step）</td><td>一次前向（一次 model execute）。" +
     "<b>一步 = 模型把所有 MoE 层各跑一遍</b>，所以一步产生 " + L + " 行。自回归时一步出一个新 token。</td></tr>" +
@@ -2461,23 +2649,21 @@ function renderGlossary() {
     "图上的 y 轴写这个是为了说明横轴之外的那一维是什么。</td></tr>" +
     "<tr><td><b>expert_map</b> / log2phy</td><td>dump 头部记的专家映射表（每 rank 一层一份）：" +
     "第 i 项 = <b>逻辑</b>第 i 号专家在这块卡上的本地槽位（−1 = 不在这块卡上）。" +
-    "两个方向都用得上：本地口径靠它把「本地槽位上的计数」还原成「逻辑专家号」；" +
-    "全局口径靠它反过来回答「<b>谁持有这个逻辑专家</b>」，把全局路由归属到各 rank。" +
+    "两个方向都用得上：本地口径靠它把「本地槽位上的计数」还原成<b>逻辑专家号</b>；" +
+    "报告靠它回答「<b>谁持有这个逻辑专家</b>」，用于 pad 专家的归属与放置表。" +
     "一个逻辑专家在这张表里出现两次（两个 rank 都 ≥ 0）就是副本。</td></tr>" +
     "</tbody></table>";
   howto.innerHTML =
     "<h4>报告地图：想看什么，看哪张图</h4>" +
     "<ul>" +
     "<li><b>口径是什么 / 数据可不可信</b> → 页面最上的「口径与统计 · 先读这里」（T1 口径表 + T2 自查）</li>" +
-    "<li><b>token 在 rank 上的分布</b> → 「每个 rank 的负载」+「各 rank 负载随步变化」</li>" +
-    "<li><b>token 在专家上的分布</b> → 「rank × 逻辑专家」+「层 × 逻辑专家」+" +
-    "「专家负载剖面：单层 / 单步」</li>" +
+    "<li><b>各 rank 实际算了多少（真实行 / pad 行 / 合计行）</b> → 「三个 PAR 口径 · 结论先看这里」" +
+    "（三本账都能切）+「每个 rank 的负载」+「各 rank 负载随步变化」</li>" +
+    "<li><b>token 在专家间的热度</b> → 「逻辑专家热度」（top-N、集中度 Gini/熵、冷专家数）" +
+    "+「层 × 逻辑专家」+「专家负载剖面：单层 / 单步」</li>" +
     "<li><b>专家在 rank 上的分布</b> → 「每个专家住在哪个 rank」</li>" +
-    "<li><b>峰均比</b> → 「PAR 随 step」+「各运行的峰均比」+「整个服务过程（全程累计）」</li>" +
-    (r0.has_compute
-      ? "<li><b>两套口径差在哪 / 总量怎么拆成实际 + pad</b> → " +
-        "「口径与统计」的 T0 +「计算量分层账本」（总账、按 rank、按专家三层）</li>"
-      : "") +
+    "<li><b>峰均比</b> → 「三个 PAR 口径」+「PAR 与每步 token 数的关系」+「各运行的峰均比」+「整个服务过程（全程累计）」</li>" +
+    "<li><b>总量怎么拆成真实 + pad</b> → 「分层账本」（总账、按 rank、按专家三层）</li>" +
     "<li><b>一步有多大 / 采集对不对</b> → 「PAR 与每步 token 数的关系」+ 页面顶部的对账横幅</li>" +
     "<li><b>性能：TTFT / TPOT / 吞吐</b> → 「性能：TTFT / TPOT / 吞吐」" +
     "（逐请求的图和表 + 整体的吞吐，以及各运行的对比）</li>" +
@@ -2493,60 +2679,60 @@ function renderGlossary() {
     "<tr><td><code>global</code></td>" +
     "<td>该 rank 在这一层 dispatch <b>之前</b>、按<b>逻辑专家 id</b> 数的路由直方图，" +
     "宽度 = 全部逻辑专家（" + G + "）。pad 在产生它的 rank 上已按全局 id 扣掉</td>" +
-    "<td>MoonEP：这一行是发送侧的真实路由，各 rank 按 (步, 层) 相加即全局路由</td></tr>" +
+    "<td>MoonEP：这一行是发送侧的<b>真实路由</b>，各 rank 按 (步, 层) 相加即全局路由、" +
+    "即专家维度</td></tr>" +
     "<tr><td><code>global+compute</code></td>" +
-    "<td>同一份 dump 里还有一类 <code>scope=compute</code> 的行（还有稀疏的 " +
+    "<td>同一份 dump 里还有一类 <code>scope=compute</code> 的行（以及稀疏的 " +
     "<code>scope=pad</code> 行）：该 rank 在这一层<b>真正算了</b>多少行，" +
     "按<b>逻辑专家 id</b> 排列（本地专家段 + 预取槽段按槽里的专家号摊开），宽同样 = " +
     G + "。<b>含 pad</b></td>" +
-    "<td>MoonEP（本报告的主口径）：这就是「谁算了谁背」的那套数；" +
-    "主行（<code>scope=global</code>）仍是路由归属那套</td></tr>" +
+    "<td>MoonEP：这就是<b>「谁算谁背」</b>的那套数，报告的 rank 维度以它为准；" +
+    "<code>scope=pad</code> 的行指出 pad 落在哪个专家上，用于把计算量拆成真实/pad</td></tr>" +
     "<tr><td><code>local</code></td>" +
     "<td>该 rank 的<b>本地槽位</b>各收到多少（宽 = 本 rank 的专家数），" +
-    "靠 expert_map 还原成逻辑专家</td>" +
+    "靠 expert_map 还原成逻辑专家。这条路上没有 pad</td>" +
     "<td>MC2 / all-gather / all-to-all 等，以及旧的 MoonEP dump</td></tr>" +
     "</tbody></table>" +
 
     "<h4>负载口径：数的是什么，不数什么</h4>" +
     "<p>报告里每个数都按下面这套口径。前三句是所有运行通用的；" +
-    "后面两句只在 dump 带 <code>compute</code> 行（MoonEP 两套口径）时才有意义。</p>" +
+    "后两句只在 dump 带 <code>compute</code> 行（MoonEP）时才有意义。</p>" +
     "<ul>" +
     "<li><b>专家负载 = 逻辑专家的负载。</b>路由空间里的专家 id 才是「专家」；" +
     "一个专家被复制到多个 rank 时，副本算同一个专家，负载记在原专家名下。" +
-    "两套口径下这个数<b>完全相同</b>。</li>" +
-    "<li><b>rank 负载按「谁持有这个专家的行」记（路由归属口径，参照）。</b>" +
-    "EP 下每个 rank 只算自己那部分 token，但 token 会被投递到别的 rank 的专家上；" +
-    "落到谁的专家就记谁。所以它<b>不是</b>「这个 rank 发出了多少」——" +
-    "后者会漏掉别的 rank 投过来的部分，实测少算约一半。" +
-    "另外，被预取槽搬到别处算的行也仍记属主，所以它是不做搬迁时的分布。</li>" +
-    "<li><b>rank 负载也可以按「谁算的这一行」记（实际计算口径，主）。</b>" +
-    "接收侧的数就是各 rank 真正算过的行，谁写的算谁的：专家 A 的属主是 rank0，" +
-    "但它的 25 行在 rank1 上算，那 25 行记 rank1。<b>性能与屏障只认这一套</b>，" +
-    "所以报告的 rank 级结论以它为主。</li>" +
-    "<li><b>pad 不计入路由量，但计入计算量。</b>MoonEP 为对齐池化容量塞进来的零行" +
-    "（(capacity − T) × topk 个对）由打点侧在产生它的 rank 上扣掉，报告只如实转述扣了多少。 " +
-    "扣减位置是<b>逻辑专家空间</b>里的某个 id——pad 行全部路由到本 rank 的某个本地专家，" +
+    "<b>它只数真实路由</b>，pad 行不算任何专家的热度。</li>" +
+    "<li><b>rank 负载 = 这个 rank 实际算过的行（谁算谁背）。</b>" +
+    "接收侧的数就是各 rank 真正算过的行，谁写的算谁的。" +
+    "<b>性能与屏障只认这一套</b>，所以报告的 rank 级结论以它为准。" +
+    "它<b>不是</b>「这个 rank 发出了多少」——发送量另有一列，两者讲的是不同的故事" +
+    "（见「分层账本」）。</li>" +
+    "<li><b>实际算过的行拆成两本账。</b><b>真实行</b> = gate 选中、真的有人算的行；" +
+    "<b>pad 行</b> = MoonEP 为对齐容量注入的零行。两者之和是<b>合计行</b>。" +
+    "拆法见下面的「pad 落在哪个 rank 上」。</li>" +
+    "<li><b>pad 不计入路由量，但计入计算量。</b>MoonEP 把每个 rank 的输入补齐到<b>同一个</b>" +
+    "池化容量，塞进来的零行由打点侧在产生它的 rank 上按逻辑专家 id 扣掉，" +
+    "并单独写成 <code>scope=pad</code> 的行（它同时指明了 pad 落在哪个专家上）。" +
+    "扣减位置必须是<b>逻辑专家空间</b>里的某个 id——pad 行全部路由到本 rank 的某个本地专家，" +
     "在本地槽位空间里扣永远扣不准（这也是旧 dump 对不上账的原因）。" +
-    "但 pad 行是真的行：它一样进 matmul、一样占算力，所以在「实际计算」那一套里它<b>保留</b>，" +
-    "并单独写成 <code>scope=pad</code> 的行，让报告能把计算量拆成「实际 + pad」。</li>" +
+    "pad 行是真的行：一样进 matmul、一样占算力，所以它留在「合计行」里。</li>" +
     "</ul>" +
     "<p>为什么能这么数：每个 rank 在 dispatch 之前手里就有完整的路由结果" +
     "（gate 选完专家之后才投递），按逻辑专家数一遍是免费的、<b>不需要任何额外通信</b>；" +
-    "接收侧则是投递完成之后的计数，既有 pad、又可能因为配额被搬动或丢弃，" +
-    "算「该收」不行、算「实收」正好——两套合起来才是完整的一张账：" +
-    "<code>发送量 = 真实路由 + pad</code>，<code>计算量 = 发送量 − 丢弃</code>。" +
-    "专家维度这三项逐项精确；rank 维度上「实际计算」的总量精确、" +
-    "它内部「多少是 pad」只能按行数比例估（pad 进了槽位就和真实行一样了）。</p>" +
-    "<p><b>冗余/预取槽的边界</b>：真的有副本时，副本各自接了多少 token 只体现在接收侧，" +
-    "发送侧看不见。路由归属那一套此时把负载记在其中一个持有者头上，不去猜分摊——" +
-    "<b>所以是它在 rank 维度上是上界</b>（真实分摊只会更平）；" +
-    "实际计算那一套本来就是接收侧的实测，不受这个限制。" +
-    "每处相关结论都会标注是哪一套。</p>" +
+    "接收侧则是投递完成之后的计数，谁写的这一行就是谁算的，<b>不需要任何推断</b>。" +
+    "两套合起来才是完整的一张账。" +
+    "专家维度逐项精确；rank 维度的三个总量（真实行合计 = 路由总量、pad 行合计 = 注入的 pad、" +
+    "合计 = 容量 × topk）全部精确。</p>" +
+    "<p><b>pad 落在哪个 rank 上</b>：pad 行只记「落在哪个专家上」，不记「谁来算这一行」。" +
+    "所以报告按<b>行</b>拆：某个 pad 专家上的行里，真实的那部分（由路由量给出）记给该专家的" +
+    "<b>首个持有者</b>，剩下的就是 pad。这条约定只在「真实行被搬到该专家的另一个持有者上算」" +
+    "时才不精确——本仓库实测这一情形只有 21 行 / 24.7 万行，对全程 PAR 的影响 0.1%。" +
+    "两条不依赖它的恒等式（真实行合计 = 路由总量、合计 = 容量 × topk）是页面上的自查项。</p>" +
 
     "<h4>token-专家对：负载的计量单位</h4>" +
     "<p>一个 token 被路由给 topk 个专家，就产生 <b>topk</b> 个 token-专家对（本模型 topk = " + K + "）。" +
     "每步对数 = token 数 × topk × 层数，逐层对数 = token 数 × topk（与层无关）。" +
-    "这里计的是真实路由量，<b>不含 padding</b>，与 EPLB 的 moe_load 同口径。</p>" +
+    "负载按<b>行</b>计：报告里的「真实行」与 EPLB 的 moe_load 同口径（不含 padding），" +
+    "「合计行」则是真的进了 matmul 的行数。</p>" +
 
     "<h4>每步 token 数</h4>" +
     "<p>公式：<code>Σ(所有 rank, 所有层) 对数 ÷ (topk × MoE 层数)</code>，" +
@@ -2559,11 +2745,11 @@ function renderGlossary() {
     "<h4>三个口径，回答三个不同的问题</h4>" +
     "<p>报告里的 PAR 都是<b>峰均比</b>：<code>最忙的 rank ÷ 平均的 rank</code>。" +
     "三者的区别只在于「把哪些负载先加起来」——在<b>层</b>这个维度聚合，还是连<b>时间</b>也一起聚合。" +
-    (r0.has_compute
-      ? "这三个口径<b>两套负载各算一遍</b>（实际计算为主、路由归属为参照），" +
-        "用的是同一个算式，所以两套的差别只可能来自数据：" +
-        "看两套的差就知道搬迁把哪些行挪到了谁头上。"
-      : "") + "</p>" +
+    "这三个口径<b>对三本账（真实行 / pad 行 / 合计行）各算一遍</b>，" +
+    "用的是同一个算式（同一个函数），所以任何两个数之间的差别只可能来自数据。" +
+    "报告默认显示<b>真实行</b>——它才是这批 token 真正让各 rank 干活的量；" +
+    "<b>合计行</b>的 PAR 恒为 1.000（容量对称的构造结果），看它是为了看容量给了多少算力，" +
+    "不是看均衡。</p>" +
     "<table><thead><tr><th>口径</th><th>怎么算</th><th>回答什么问题</th></tr></thead><tbody>" +
     "<tr><td><b>逐层 PAR</b></td>" +
     "<td>对<b>每一个 (步, 层)</b> 各算一次 <code>最忙÷平均</code>，" +
@@ -2609,12 +2795,12 @@ function renderGlossary() {
                            : "；按 expert_map 数，每个专家只有一个持有者") + "）。" +
     "计数口径为 <code>" + r0.scope + "</code>。" +
     (r0.has_compute
-      ? "这份 dump 带两套口径：<b>路由归属</b>的逻辑专家对数和 = 每步 token 数 × topk × 层数（不含 pad），" +
-        "各 rank 归属之和 = 同一个总数；<b>实际计算</b>的总量 = 路由归属 + pad − 丢弃，" +
-        "各 rank 计算量之和 = 同一个总数（每一行恰好被一个 rank 算）。" +
-        "两套的专家维度完全相同。"
+      ? "这份 dump 把「送出的路由」与「实际算的行」都记了下来：" +
+        "<b>真实路由</b>的逻辑专家对数和 = 每步 token 数 × topk × 层数（不含 pad）；" +
+        "<b>实际计算</b>的合计 = 真实行 + pad 行，各 rank 之和 = 同一个总数（每一行恰好被一个 rank 算）。" +
+        "专家维度只看真实路由。"
       : "<b>逻辑专家</b>对数和 = 每步 token 数 × topk × 层数（不含 pad）；" +
-        "<b>各 rank</b> 负载之和 = 同一个总数（每个对恰好归属一个持有者）。") + "</p>";
+        "<b>各 rank</b> 负载之和 = 同一个总数（每个对恰好由一个 rank 算）。") + "</p>";
   p.appendChild(foldSection("terms", "术语表：报告里出现的每个词（"
     + (terms.innerHTML.match(/<tr><td>/g) || []).length + " 条）", terms));
   p.appendChild(foldSection("howto", "怎么读这份报告：报告地图、口径、常见疑问（"
@@ -2644,30 +2830,31 @@ function renderHeader() {
       scoped.map(r => esc(r.name)).join("、") + "）：全局发送侧的真实路由，pad 已扣。</b> " +
       "每个 rank 在 dispatch 之前按<b>逻辑专家 id</b> 数一遍路由（宽 " +
       scoped[0].global_experts + " = 全部逻辑专家），分析器按 (步, 层) 把各 rank 加起来，" +
-      "就是这一步的真实路由；再按 expert_map 的「谁持有这个专家」把负载归属到各 rank。" +
+      "就是这一步的<b>真实路由</b>——专家维度就是它。" +
       "<b>pad 行不计入</b>：它由 dispatcher 在产生它的那个 rank 上、按逻辑专家 id 扣除，" +
       "不是事后估算。" +
-      (scoped.some(r => r.has_compute)
-        ? "这份 dump 还多记了一套「<b>实际计算</b>」的行（接收侧，含 pad），" +
-          "两套数不一样——见下面那条横幅与「口径与统计」。"
-        : "") +
       "每一步的完整口径见下面的「口径与统计」。若日志头部写着 counts_scope=global，" +
       "就是这套口径。</span>";
     box.appendChild(w);
   }
-  /* 两套口径横幅：这是 MoonEP 打点最容易被误读的地方，单独讲清楚。 */
-  const twoview = RUNS.filter(r => r.has_compute);
-  if (twoview.length) {
-    const names = twoview.map(r => esc(r.name)).join("、");
+  /* 分层账横幅：MoonEP 的 rank 维度最容易被误读的地方——「合计恒等于容量」是构造结果，
+     而真信息在真实/pad 的拆分里。单独讲清楚。 */
+  const layered = RUNS.filter(r => r.has_compute);
+  if (layered.length) {
+    const names = layered.map(r => esc(r.name)).join("、");
+    const r0 = layered[0];
+    const perCell = r0.ledger && r0.ledger.compute_total
+      ? r0.ledger.compute_total / Math.max(1, r0.n_steps * r0.n_layers * r0.n_ranks) : null;
     const w = div("warn ok");
-    w.innerHTML = "<span>✓</span><span><b>两套负载口径（" + names +
-      "）：这份 dump 同时记了「路由归属」与「实际计算」。</b> " +
-      "同一个 dispatch 被数了两遍：<b>路由归属</b>按「谁持有这个专家」把每一对记在他的属主头上；" +
-      "<b>实际计算</b>按「谁算的这一行」记在算它的 rank 头上。" +
-      "专家维度两套完全相同（都按逻辑专家记）；rank 维度不同——" +
-      "被预取槽搬到别的 rank 上算的那些行，路由归属记属主、实际计算记干活的那个 rank。" +
-      "本报告的 rank 级结论<b>以「实际计算」为主、以「路由归属」为参照</b>：前者是屏障真正等的东西，" +
-      "后者是不做搬迁时的分布（衡量放置与 EPLB 用）。pad 的归属见「计算量分层账本」。</span>";
+    w.innerHTML = "<span>✓</span><span><b>rank 维度分三本账（" + names +
+      "）：真实行 / pad 行 / 合计行。</b> " +
+      "同一份 dump 既记了「这个 rank 真正算了多少行」（<code>scope=compute</code>），" +
+      "也记了「pad 落在哪个专家上」（<code>scope=pad</code>），所以每一行的来源都能拆开：" +
+      "<b>真实行</b> = 这批 token 真正让各 rank 干的活；<b>pad 行</b> = 为对齐池化容量注入的零行。" +
+      (perCell ? "MoonEP 把每个 rank 的输入都补齐到<b>同一个</b>容量，所以每个 rank 每 (步, 层) 算的行数完全相同" +
+        "（本次 " + fmt(perCell, 0) + " 行 = 容量 × topk）：<b>合计行的 PAR 因此恒为 1.000</b>，" +
+        "那是构造结果、<b>不是</b>「均衡良好」的证据。" : "") +
+      "倾斜全在<b>真实行</b>那一本账里，页面默认显示它。</span>";
     box.appendChild(w);
   }
   if (mixed.length) {
@@ -2715,8 +2902,17 @@ function renderHeader() {
   }
   if (na.length) {
     const w = div("warn");
+    const solo = na.filter(r => !(r.n_ranks > 1));
+    const norank = na.filter(r => r.n_ranks > 1);
     w.innerHTML = "<span>·</span><span>逐层自查不适用：" +
-      na.map(r => esc(r.name)).join("、") + " 只有 1 个 rank，没有可比的两个副本，这项自查无从谈起。</span>";
+      (solo.length
+        ? solo.map(r => esc(r.name)).join("、") + " 只有 1 个 rank，没有可比的两个副本；"
+        : "") +
+      (norank.length
+        ? norank.map(r => esc(r.name)).join("、") +
+          " 没有 rank 维度（这份 dump 只有发送侧路由行），无从相加；"
+        : "") +
+      "这项自查谈不上，不代表数据有问题。</span>";
     box.appendChild(w);
   }
   RUNS.forEach(r => {
@@ -2758,7 +2954,10 @@ function renderHeader() {
       + "</span>";
     box.appendChild(w);
   });
-  const missing = RUNS.reduce((a, r) => a + r.checks.missing_cells, 0);
+  /* 缺格只在「本该有 rank 维度」时才值得报警：只有发送侧行的 dump 整片 rank 维度都不在，
+     每一格都空着，报「60 个单元缺失」会把它说成一份残缺的数据。 */
+  const missing = RUNS.reduce((a, r) => a + (r.checks.identities && r.checks.identities.applicable
+    ? r.checks.missing_cells : 0), 0);
   if (missing) {
     const w = div("warn");
     w.innerHTML = `<span>▲</span><span>有 ${missing} 个 (rank, step, layer) 单元在 dump 中缺失；` +
@@ -2783,88 +2982,78 @@ function renderRunPicker() {
 function renderKPIs() {
   const host = div("cards");
   for (const r of RUNS) {
-    /* 两套口径的 run：实际计算在前（主），路由归属在后（参照）。两者用的是同一套
-       PAR 算式，只换了负载序列，所以卡片除了标题完全对称，差别只在数据。 */
-    const lead = r.has_compute ? r.compute : r;
-    const views = r.has_compute
-      ? [["实际计算", "（主）", lead, r.pad],
-         ["路由归属", "（参照）", r, r.pad]]
-      : [["", "", r, r.pad]];
-    for (const [tag, rankMark, view, pad] of views) {
-      const perLayer = quantiles(view.par_by_step), agg = quantiles(view.par_agg);
-      const tagS = tag ? " · " + tag + rankMark : "";
-      const padNote = pad && pad.subtracted
-        ? (tag === "实际计算" ? "含 " + fmt(pad.subtracted, 0) + " 个 pad 对（pad 也进 matmul）。"
-                             : "不含 pad（pad 由属主扣掉、另记）。")
-        : "";
-      /* 计算量的 PAR 恒等于 1：容量对称 + pad 补齐，这个 1 与负载倾斜无关。卡片上是头条数字，
-         不加这句话就会被读成「均衡良好」。 */
-      const flatNote = (tag === "实际计算" && perLayer && perLayer.med < 1.001)
-        ? "<b>" + fmt(perLayer.med, 3) + " 是 pad 补出来的构造结果，不是均衡的证据</b>：" +
-          "池化容量对所有 rank 对称，pad 把每个 rank 补齐到同一个数，真实路由的差额被抹平——" +
-          "真实倾斜看同一位置的「路由归属」卡片（逐层 PAR " +
-          fmt(quantiles(r.par_by_step) && quantiles(r.par_by_step).med, 3) + "）。"
-        : "";
-      /* 卡片上那个 1.000 太容易被读成「均衡良好」，所以不只在 tooltip 里说，note 这一行也要挂个标记。 */
-      const flag = (tag === "实际计算" && perLayer && perLayer.med < 1.001)
-        ? " · 由 pad 补齐（非均衡结果）" : "";
-      host.appendChild(kpiCard(`${r.name}${tagS} · 逐层 PAR`, fmt(perLayer && perLayer.med, 3),
-        (perLayer ? `最大 ${fmt(perLayer.hi, 3)} · 均衡度 ${(1/perLayer.med).toFixed(3)}` : "无数据") + flag,
-        (tag === "实际计算"
-          ? "主口径：谁算的行记谁（预取槽搬过来的行记在干活的 rank 头上）。"
-          : tag === "路由归属"
-            ? "参照口径：按「谁持有这个专家」记，被搬走算的行仍记在属主头上，比实际更倾斜。"
-            : "") +
-        "跨步的中位数。逐层算 最忙rank÷平均rank，再对该步内所有层取平均。" +
-        "衡量单个层内部有没有热点，是 EPLB 优化的那个比值。1 = 完全均衡，上界 = rank 数。" +
-        "均衡度 = 1÷PAR，可读作最忙那张卡的利用率上限。" + padNote + flatNote));
-      host.appendChild(kpiCard(`${r.name}${tagS} · 整步 PAR`, fmt(agg && agg.med, 3),
-        agg ? `最大 ${fmt(agg.hi, 3)}` : "无数据",
-        (tag === "实际计算" ? "主口径：屏障真正等的就是它。" : "") +
-        (tag === "路由归属" ? "参照口径：不做搬迁时的分布。" : "") +
-        "跨步的中位数。只在一步内部把 " + r.n_layers + " 层加总，再算 峰值÷均值——" +
-        "不是把整个测试加起来。各层不均衡方向不一致会互相抵消，所以它通常明显小于逐层 PAR。" +
-        "这个数决定这一步最慢的 rank 要在同步屏障前等多久。"));
-      host.appendChild(kpiCard(`${r.name}${tagS} · 全程 PAR`, fmt(view.par_whole, 3),
-        `${r.n_steps} 步的总账`,
-        "整个服务过程一个数：把每个 rank 在全部步、全部层上的负载加起来，再算 峰值÷均值。" +
-        "它回答「总共谁做得多」，比逐步的整步 PAR 更小，因为步与步之间也会互相抵消。" +
-        "性能由逐步口径决定，这个数只用于评估放置与规划。"));
-    }
-    /* 分层账本一行账：总量 = 实际计算 + pad（− 丢弃）。两套口径的 run 才有。 */
-    const led = r.ledger;
-    if (r.has_compute && led && led.compute_total != null) {
-      const dropped = led.dropped || 0;
-      host.appendChild(kpiCard(`${r.name} · 每步 token`, fmt(mean(r.tokens_per_step), 0),
-        `${r.n_steps} 步 · topk ${r.topk} · 真实 token（不含 pad）`,
-        "Σ(所有 rank, 所有层) 对数 ÷ (topk × MoE 层数)。每个 token 经过所有 MoE 层，" +
-        "每层都产生 topk 个对，所以要除以层数。上界是 --max-num-batched-tokens，" +
-        "纯 decode 步则等于 --batch-size。这里是<b>真实</b> token：pad 行已扣掉。"));
-      host.appendChild(kpiCard(`${r.name} · 计算量分层`, fmt(led.compute_total, 0),
-        `真实 ${fmt(led.route_total, 0)} + pad ${fmt(led.pad_total, 0)}` +
-        (Math.abs(dropped) > 0.5 ? ` − 丢弃 ${fmt(dropped, 0)}` : ""),
-        "整段服务的计算量（token-专家对）：<b>总量 = 真实路由 + pad − 丢弃</b>。" +
-        "pad 是容量对齐注入的零行，不携带 token 但同样要算；丢弃是容量包络没能收下的对。" +
-        "专家维度这三项逐专家精确，rank 维度见「计算量分层账本」。"));
+    /* 三本账用的是同一套 PAR 算式（同一个函数），只换了负载序列，所以卡片除了标题
+       完全对称，差别只在数据。默认头条是真实行——它是这批 token 真正让各 rank 干的活。 */
+    const real = view(r, "real"), total = view(r, "total"), pad = view(r, "pad");
+    const rl = quantiles(real.par_by_step), ra = quantiles(real.par_agg);
+    const led = r.ledger || {};
+    host.appendChild(kpiCard(`${r.name} · 真实行 · 逐层 PAR`, fmt(rl && rl.med, 3),
+      rl ? `最大 ${fmt(rl.hi, 3)} · 均衡度 ${(1/rl.med).toFixed(3)}` : "无数据",
+      "跨步的中位数。逐层算 最忙rank ÷ 平均rank，再对该步内所有层取平均。" +
+      "衡量单个层内部有没有热点，是 EPLB 优化的那个比值。1 = 完全均衡，上界 = rank 数。" +
+      "均衡度 = 1÷PAR，可读作最忙那张卡的利用率上限。" +
+      "负载是<b>真实行</b>：gate 选中、真的有人算的那部分，不含 pad 行。"));
+    host.appendChild(kpiCard(`${r.name} · 真实行 · 整步 PAR`, fmt(ra && ra.med, 3),
+      ra ? `最大 ${fmt(ra.hi, 3)}` : "无数据",
+      "跨步的中位数。只在一步内部把 " + r.n_layers + " 层加总，再算 峰值÷均值——" +
+      "不是把整个测试加起来。各层不均衡方向不一致会互相抵消，所以它通常明显小于逐层 PAR。" +
+      "这个数决定这一步最慢的 rank 要在同步屏障前等多久。"));
+    /* 送出量：各 rank 自己的 token 产生的路由。它衡量输入本来有多不均匀，放置改不了它。
+       与「实际计算」一比，就看得出派发把倾斜削平了多少。 */
+    const sentPar = led.sent_par;
+    host.appendChild(kpiCard(`${r.name} · 送出（中性参照）· 全程 PAR`, fmt(sentPar, 3),
+      `各 rank 送出 ${fmt(led.route_total, 0)} 对真实路由`,
+      "各 rank 的<b>真实路由发送量</b>（它自己的 token 路由出了多少对）的峰均比。" +
+      "这是<b>中性参照</b>：输入 token 在各 rank 上本来就不均匀，派发与放置都改变不了它。" +
+      "比一比它和「真实行」的 PAR，就知道 MoE 派发把这份不均匀削掉了多少。" +
+      "（不含各 rank 注入的 pad：每 rank 的 pad 恰好把发送量补到容量，" +
+      "算进去这一列就恒等于容量、什么也说明不了。）"));
+    /* 合计行恒等于容量：这个 1.000 与负载倾斜无关。卡片上是并排数字，
+       不加这句话就会被读成「均衡良好」。 */
+    const tl = quantiles(total.par_by_step);
+    const flat = tl && tl.med < 1.001;
+    host.appendChild(kpiCard(`${r.name} · 合计行 · 逐层 PAR`, fmt(tl && tl.med, 3),
+      (tl ? `最大 ${fmt(tl.hi, 3)}` : "无数据") + (flat ? " · 由容量补齐，非均衡结果" : ""),
+      "各 rank <b>实际算过的全部行</b>（真实行 + pad 行）的峰均比。" +
+      (flat
+        ? "<b>这个 1.000 是构造结果，不是均衡的证据</b>：MoonEP 把每个 rank 的输入补齐到同一个池化容量，" +
+          "于是每个 rank 每 (步, 层) 算的行数完全相同，PAR 与负载倾斜无关。" +
+          "倾斜看「真实行」那张卡片。"
+        : "它比真实行的 PAR 更接近 1 的部分，就是 pad 把差额抹平的量。")));
+    if (pad && quantiles(pad.par_by_step)) {
+      const pl = quantiles(pad.par_by_step);
+      host.appendChild(kpiCard(`${r.name} · pad 行 · 逐层 PAR`, fmt(pl.med, 3),
+        `最大 ${fmt(pl.hi, 3)} · 共 ${fmt(led.pad_total, 0)} 对`,
+        "pad 行自己的峰均比。pad 由各 rank 按容量缺口注入，缺口大小取决于该 rank 的 token 数，" +
+        "所以它的分布是「输入不均匀」的镜像——但它不携带任何 token，" +
+        "这一列只在回答「容量补出来的算力在各 rank 上是否均匀」。"));
+    } else if (led.compute_total == null) {
+      host.appendChild(kpiCard(`${r.name} · pad 行`, "—", "没有 rank 维度",
+        "这份 dump 只有发送侧的路由行，pad 落在各 rank 上的计算量因此无从得知" +
+        (led.pad_total > 0.5
+          ? `（打点侧确实扣掉了 ${fmt(led.pad_total, 0)} 对，落点按专家维度照常可知）。`
+          : "（打点侧也没有扣掉任何 pad）。") +
+        "本工具的 rank 维度只按「谁算的」记账。"));
     } else {
-      host.appendChild(kpiCard(`${r.name} · 每步 token`, fmt(mean(r.tokens_per_step), 0),
-        `${r.n_steps} 步 · topk ${r.topk}`,
-        "Σ(所有 rank, 所有层) 对数 ÷ (topk × MoE 层数)。每个 token 经过所有 MoE 层，" +
-        "每层都产生 topk 个对，所以要除以层数。上界是 --max-num-batched-tokens，" +
-        "纯 decode 步则等于 --batch-size。"));
+      host.appendChild(kpiCard(`${r.name} · pad 行`, "—", "本运行没有 pad",
+        "这条链路上不做容量补齐（MoonEP 才做），所以每一行实际计算都是真实行。"));
     }
+    host.appendChild(kpiCard(`${r.name} · 每步 token`, fmt(mean(real.tokens_per_step), 0),
+      `${r.n_steps} 步 · topk ${r.topk} · 真实 token（不含 pad）`,
+      "Σ(所有 rank, 所有层) 真实行对数 ÷ (topk × MoE 层数)。每个 token 经过所有 MoE 层，" +
+      "每层都产生 topk 个对，所以要除以层数。上界是 --max-num-batched-tokens，" +
+      "纯 decode 步则等于 --batch-size。这里数的是<b>真实</b> token。" +
+      (r.has_compute ? " 对比：实际计算量 " + fmt(led.compute_total, 0) + " 对 = 真实行 " +
+        fmt(led.real_total, 0) + " + pad 行 " + fmt(led.compute_pad_total, 0) + "。" : "")));
   }
   const r0 = RUNS[current];
   host.appendChild(kpiCard(`${r0.name} · rank × 专家`, `${r0.n_ranks} × ${r0.global_experts}`,
     `每 rank ${r0.local_experts} 个槽位 · ${r0.n_layers} 个 MoE 层 · 计数口径 ${r0.scope}`,
     "热力图 F5 的形状：一行一个 rank，一列一个逻辑专家，" +
-    "格子 = 归到该 rank 的该专家 token-专家对数。" +
-    (r0.has_compute
-      ? "两套口径都画：实际计算（主，谁算谁背）与路由归属（参照，按属主）。"
-      : "（副本只记在一个持有者头上）。") +
+    "格子 = 该 rank 在该专家上算过的行数（可用上方的账本切换看真实行 / pad 行）。" +
     "行和 = 该 rank 的负载。" +
-    (!r0.has_compute && r0.duplicated_experts ? "本运行有副本：PAR 是上界。"
-      : (!r0.has_compute ? "本运行无副本：每个逻辑专家恰好一个持有者，归属是精确的。" : ""))));
+    (!r0.has_compute && r0.duplicated_experts
+      ? "本运行有副本：副本各算各的，各自记账。" : "")));
   return host;
 }
 
@@ -2876,71 +3065,87 @@ function panel(title, caption) {
 }
 
 function renderPerRank(r) {
-  const two = !!r.has_compute;
-  const lead = two ? r.compute : r;  // 主口径：实际计算
-  const p = panel(two ? "每个 rank 的负载（跨步均值 · 实际计算，主口径）"
-                      : "每个 rank 的负载（跨步均值）",
-    (two
-      ? "各 rank <b>真正算过</b>的 token-专家对（含 pad），跨步取平均——" +
-        "谁算的行记谁：被预取槽搬到别的 rank 上算的行记在干活的那个 rank 头上。" +
-        "这条序列的峰值与其自身均值之比，就是整步 PAR（主）。表里同时给出路由归属口径作参照。"
-      : "各 rank 承载的 token-专家对总数，跨步取平均。这条序列的峰值与其自身均值之比，" +
-        "就是整步 PAR。"));
+  const lead = view(r, ledgerPick);
+  const led = r.ledger || {};
+  const perRank = led.per_rank || [];
+  const p = panel(`每个 rank 的负载（跨步均值 · ${ledgerLabel(ledgerPick)}）`,
+    (ledgerPick === "real"
+      ? "各 rank <b>真正算过</b>的<b>真实行</b>（gate 选中、真的有人算的那部分），跨步取平均。" +
+        "这条序列的峰值与其自身均值之比，就是整步 PAR。表里三本账与发送量并排列出。"
+      : ledgerPick === "pad"
+        ? "各 rank <b>真正算过</b>的 <b>pad 行</b>（为对齐池化容量注入的零行），跨步取平均。" +
+          "它不携带 token，但它占的算力是真的——这里是它在各 rank 间的分布。"
+        : "各 rank <b>真正算过</b>的全部行（真实行 + pad 行），跨步取平均。" +
+          "MoonEP 腿上这个总数在每个 rank 上完全相同，所以它的 PAR 恒为 1.000：构造结果，不是均衡。") +
+    " 用上方的账本切换看另外两本。");
   barChart(p, { labels: r.rank_ids.map(String), values: lead.per_rank_mean, refLine: mean(lead.per_rank_mean),
-    color: seriesColor(0), xLabel: "rank", yLabel: "token-专家对", tipLabel: "rank", height: 250,
+    color: seriesColor(ledgerPick === "pad" ? 3 : 0), xLabel: "rank", yLabel: "token-专家对",
+    tipLabel: "rank", height: 250,
     tipExtra: i => `<br><span class="sm">峰值步 ${fmt(lead.per_rank_max[i])} · ` +
       `${(lead.per_rank_mean[i] / Math.max(1e-9, mean(lead.per_rank_mean)) / r.n_ranks * 100)
         .toFixed(1)}% 占全程</span>` +
-      (two ? `<br><span class="sm">路由归属口径 ${fmt(r.per_rank_mean[i])}（` +
-        `${r.per_rank_mean[i] - lead.per_rank_mean[i] >= 0 ? "+" : "−"}` +
-        `${fmt(Math.abs(r.per_rank_mean[i] - lead.per_rank_mean[i]))} 净差）</span>` : "") });
-  /* 每 rank 的负载是「落在它所持专家上的对数」：token 可能来自任何一个 rank，
-     落到谁的专家就记谁。所持专家数直接给出分母，方便看「活多是不是因为专家多」。 */
+      (ledgerPick !== "pad" ? `<br><span class="sm">pad 行 ${fmt(view(r, "pad").per_rank_mean[i])}</span>` : "") });
+  /* 所持专家数是「活多是不是因为专家多」的分母；发送量是「这批输入本来有多不均匀」的对照。 */
   const held = r.rank_ids.map(() => 0);
   for (const holders of (r.expert_holders || []))
     for (const j of holders) if (j >= 0 && j < held.length) held[j]++;
   const total = lead.per_rank_mean.reduce((a, b) => a + (b || 0), 0);
   const busiest = Math.max(...finite(lead.per_rank_mean), 1e-9);
-  const head = two
-    ? ["rank", "所持逻辑专家", "实际计算：步均值", "实际计算：峰值",
-       "路由归属：步均值", "净差（计算 − 归属）", "占全程（%）", "相对最忙（×）"]
-    : ["rank", "所持逻辑专家", "步均值（token-专家对/步）", "峰值负载（token-专家对）",
-       "占全程（%）", "相对最忙（×）"];
-  p.appendChild(collapsible("表", table(head,
+  const per = kind => view(r, kind).per_rank_mean;
+  const realMean = per("real"), padMean = per("pad");
+  const byRank = new Map((led.per_rank || []).map(e => [e.rank, e]));
+  p.appendChild(collapsible("表", scrollWrap(table(
+    ["rank", "所持逻辑专家", "送出真实路由", "注入 pad", "真实行（步均值）", "pad 行（步均值）",
+     "合计行（步均值）", "真实占比（%）", "相对最忙（×）"],
     r.rank_ids.map((id, i) => {
-      const cells = two
-        ? [id, held[i], "<b>" + fmt(lead.per_rank_mean[i]) + "</b>", fmt(lead.per_rank_max[i]),
-           fmt(r.per_rank_mean[i]),
-           (r.per_rank_mean[i] - lead.per_rank_mean[i] >= 0 ? "+" : "−") +
-             fmt(Math.abs(r.per_rank_mean[i] - lead.per_rank_mean[i])),
-           (100 * lead.per_rank_mean[i] / Math.max(1e-9, total)).toFixed(2) + "%",
-           (lead.per_rank_mean[i] / busiest).toFixed(3)]
-        : [id, held[i], fmt(lead.per_rank_mean[i]), fmt(lead.per_rank_max[i]),
-           (100 * lead.per_rank_mean[i] / Math.max(1e-9, total)).toFixed(2) + "%",
-           (lead.per_rank_mean[i] / busiest).toFixed(3)];
-      return cells;
-    }))));
+      const e = byRank.get(id) || {};
+      const share = (realMean[i] + padMean[i]) > 0 ? 100 * realMean[i] / (realMean[i] + padMean[i]) : null;
+      return [id, held[i], fmt(e.sent), fmt(e.injected),
+        "<b>" + fmt(realMean[i]) + "</b>", fmt(padMean[i]),
+        fmt(realMean[i] + padMean[i]),
+        share === null ? "–" : share.toFixed(2) + "%",
+        (lead.per_rank_mean[i] / busiest).toFixed(3)];
+    })))));
   p.appendChild(div("caption",
     "「峰值负载」= 该 rank 在最忙那一步的对数（不是步号），它 ÷ 步均值就是该 rank 的逐层 PAR 上界。" +
     "「相对最忙」= 该 rank 的步均值 ÷ 最忙 rank 的步均值：1.000 表示它就是瓶颈，" +
     "0.900 表示它比瓶颈少做 10%（这部分就是指望不上的算力）。" +
-    (two
-      ? " 两套口径的差别就是搬迁：<b>净差为正</b>说明这个 rank 净多算了别人的行（替人打工）、" +
-        "为负说明净搬出去。pad 只出现在实际计算那一列（它也要算），归属那一列不含 pad。"
-      : "") +
-    (!two && r.duplicated_experts
-      ? " 有副本时，副本实际分担走的量在发送侧看不见，所以各 rank 的真实差距只会比这里更小。"
-      : "")));
+    "<b>「送出」与「真实行」是两件事</b>：送出是各 rank 自己的 token 路由出来的对，" +
+    "真实行是这批 token 派发之后各 rank 实际算掉的对——派发把前者的不均匀变成了后者。" +
+    "「注入 pad」是该 rank 自己塞进去的零行（它按容量缺口注入，再由 plan 摊给持有该专家的各 rank，" +
+    "所以它与「pad 行」列不必逐 rank 相等，但两列的合计相等）。"));
   return p;
 }
 
 function renderOverSteps(r) {
-  const p = panel("各 rank 负载随步变化",
+  const lead = view(r, ledgerPick);
+  const p = panel(`各 rank 负载随步变化 · ${ledgerLabel(ledgerPick)}`,
     "每条线是一个 rank 在该步的总量。最高线与最低线之间的差距，" +
-    "就是同步屏障为之付出代价的不均衡量。");
+    "就是同步屏障为之付出代价的不均衡量。" +
+    (ledgerPick === "total"
+      ? " 合计行那条：所有线都重合在容量上——这不是好消息，是构造结果。"
+      : ""));
   lineChart(p, { x: r.steps, xLabel: "步", yLabel: "token-专家对", height: 300,
-    series: r.rank_ids.map((id, i) => ({ name: "rank " + id, points: r.rank_step_load[i] })) });
+    series: r.rank_ids.map((id, i) => ({ name: "rank " + id, points: lead.rank_step_load[i] })) });
   return p;
+}
+
+/* 账本切换器：三本账共用同一个算式，所以切换只换数据、不换画法。
+   它挂在「三个 PAR 口径」那块上，页面里所有跟着账本走的图都读同一个 ledgerPick。 */
+function ledgerPicker(afterChange) {
+  const bar = div("bar");
+  bar.appendChild(div("axis-title", "账本"));
+  for (const l of LEDGERS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = l.label;
+    b.title = l.hint;
+    b.setAttribute("aria-pressed", String(l.key === ledgerPick));
+    if (l.key === ledgerPick) b.className = "on";
+    b.addEventListener("click", () => { ledgerPick = l.key; afterChange(); });
+    bar.appendChild(b);
+  }
+  return bar;
 }
 
 function renderParOverSteps() {
@@ -2960,20 +3165,20 @@ function renderParOverSteps() {
       yLabel: "峰值 / 均值", height: 290, yMin: 1, markers: false, tipDigits: 3,
       emptyNote: "PAR 至少需要两个 rank（本 dump 只有一个）",
       refLines: [{ y: 1, label: "完全均衡" }],
-      series: RUNS.map(r => ({ name: r.name, points: r[key] })) });
+      series: RUNS.map(r => ({ name: r.name, points: view(r, ledgerPick)[key] })) });
     host.appendChild(p);
   }
   return host;
 }
 
 function renderParVsTokens() {
-  const p = panel("PAR 与每步 token 数的关系",
+  const p = panel(`PAR 与每步 token 数的关系 · ${ledgerLabel(ledgerPick)}`,
     "决定一步有多倾斜的是路由（gate），而不是集合通信：无论哪个 all-to-all 承载，" +
     "gate 都挑同一批专家。不同运行之间的差别在于一步里落了多少 token，" +
     "所以真正的差异会体现在这里。");
   const series = RUNS.slice(0, 8).map(r => ({
     name: r.name,
-    points: r.tokens_per_step.map((t, i) => [t, r.par_agg[i]])
+    points: view(r, ledgerPick).tokens_per_step.map((t, i) => [t, view(r, ledgerPick).par_agg[i]])
       .filter(pt => Number.isFinite(pt[0]) && Number.isFinite(pt[1])).sort((a, b) => a[0] - b[0])
   }));
   const span = minMax(series.flatMap(s => s.points.map(pt => pt[0])));
@@ -3026,9 +3231,9 @@ function scopeBadge(r) {
       (pad.tail_missing
         ? " · pad 已按逻辑专家 id 扣除（dump 无退出汇总行，扣了多少不可知）"
         : (pad.subtracted ? " · pad 已扣 " + fmt(pad.subtracted, 0) + " 对" : " · 本运行无 pad")) +
-      (r.has_compute ? " · 另有「实际计算」一套" : "") +
+      (r.has_compute ? " · rank 维度另有「实际计算」行，且分真实/pad 两本账" : "") +
       "</span><small>行宽 " + r.row_width + " = 全部逻辑专家" +
-      (r.has_compute ? " · 两套口径，rank 级以「实际计算」为主" : "") + "</small>";
+      (r.has_compute ? " · 专家维度看真实路由，rank 维度看实际计算" : "") + "</small>";
   } else if (r.scope === "mixed") {
     node.className = "badge crit";
     node.innerHTML = "<i></i><span>口径：混合（不可信）</span>" +
@@ -3047,7 +3252,10 @@ function scopeBadge(r) {
 
 /* 层间偏差：0 是常态（说明各 rank 的步确实对齐），所以别写成 0.0e+0。 */
 function spreadText(c) {
-  if (!c.applicable) return "不适用（只有一个 rank）";
+  if (!c.applicable) {
+    return (c.identities && !c.identities.applicable)
+      ? "不适用（这份 dump 没有 rank 维度）" : "不适用（只有一个 rank）";
+  }
   const v = Number(c.max_layer_spread);
   if (!isFinite(v)) return "–";
   if (v === 0) return "0（各层完全一致）";
@@ -3068,58 +3276,53 @@ function renderSemantics(r) {
   p.className = "panel sem";
   p.appendChild(scopeBadge(r));
 
-  /* 两套口径：这份 dump 的核心区别，放在 T1 之前单独讲清楚。 */
+  /* 分层账：这份 dump 的核心区别，放在 T1 之前单独讲清楚。 */
   if (two) {
-    p.appendChild(heading("h3", "T0 · 两套口径：路由归属 vs 实际计算"));
+    p.appendChild(heading("h3", "T0 · 一个负载，两个维度：专家看路由，rank 看计算"));
     p.appendChild(div("caption",
-      "MoonEP 把专家的行<b>搬到别的 rank 上算</b>（预取槽），于是「这个专家的负载算谁的」有两种问法，" +
-      "两种都对、答案不同。这份 dump 两套都记了，报告也两套都画：" +
-      "<b>rank 级结论以「实际计算」为主</b>（屏障等的是它），<b>「路由归属」作为参照</b>" +
-      "（它是不做搬迁时的分布，衡量放置与 EPLB 用）。专家维度的两套数完全相同。"));
+      "报告里只有一套「负载」，但它有两个维度，各自数的是不同的事：" +
+      "<b>专家维度</b>数的是「这个专家收到多少真实路由」——token 在逻辑专家之间的热度，与 pad、与放置都无关；" +
+      "<b>rank 维度</b>数的是「这个 rank 实际算掉多少行」——屏障等的是它，" +
+      "它再按行拆成<b>真实行</b>与 <b>pad 行</b>两本账。两维的数据来源不同（发送侧直方图 vs 接收侧计数），" +
+      "所以不是同一件事的两种口径，而是两个问题、两份答案。"));
     p.appendChild(richTable(
-      ["口径", "rank 负载怎么记", "回答什么问题", "边界"],
-      [["<b>路由归属</b>（参照）",
-        "每一对记在该专家<b>属主</b>名下：谁持有这个逻辑专家，负载就算谁的。" +
-        "例：专家 A 的属主是 rank0，它的 100 对路由里 25 对是在 rank1 上算的，" +
-        "<b>这 100 对全记 rank0</b>。",
-        "放置好不好、EPLB 该往哪搬——它是不做搬迁时的分布。",
-        "被搬到别的 rank 上算的行也仍记在属主头上，所以它<b>不等于</b>任何一张卡真正算的量；" +
-        "有副本时它是上界（副本间怎么分在发送侧看不见）。"],
-       ["<b>实际计算</b>（主）",
-        "每一对记在<b>算它的那个 rank</b> 头上（接收侧计数，谁写这一行算谁的）。" +
-        "上例那 25 对记 rank1、另外 75 对记 rank0。",
-        "屏障真正等的是谁——性能由这条序列决定。" + "它含 pad 行（pad 也是被算的行），" +
-        "且不含被容量包络丢弃的对。",
-        "它把「专家的倾斜」和「放置的倾斜」混在一起（搬迁既可能削峰、也可能把行搬到本就忙的卡上），" +
-        "所以它<b>不是</b>放置质量的度量，两者要一起看。"]]));
-    p.appendChild(div("caption",
-      "<b>两套之间唯一的恒等式</b>：专家维度完全相同（都按逻辑专家记，Σ对数 = 全部真实路由）；" +
-      "rank 维度上 <code>实际计算 − (路由归属真实 + 路由归属pad) = 净搬入 − 自己名下被丢弃</code>，" +
-      "也就是「这个 rank 净多算了多少行」。两套的差就是搬迁与丢弃，没有第三种来源。" +
-      "完整的账见下面的「计算量分层账本」。"));
-    /* 这里必须点名「实际计算的 PAR 恒等于 1.000 是 pad 构造出来的」：容量在所有 rank 上对称，
-       pad 把每个 rank 补齐到同一个数，于是计算量的 PAR 与负载倾斜无关。不说明这一点，
+      ["维度", "数的是什么", "本运行的数据来源", "回答什么问题"],
+      [["<b>专家维度</b>（逻辑专家热度）",
+        "每个<b>逻辑专家</b>收到的真实 token-专家对数；副本算同一个专家。" +
+        "pad 行不算进任何专家的热度。",
+        "各 rank 在 dispatch <b>之前</b>按逻辑专家 id 数的路由直方图，按 (步, 层) 相加；" +
+        "pad 已由打点侧在产生它的 rank 上扣除。",
+        "这批输入下 token 在专家之间有多不均匀（热度 top-N、冷热比），" +
+        "以及 EPLB 该不该搬、往哪搬。"],
+       ["<b>rank 维度</b>（实际计算）",
+        "每个 rank <b>真正算过</b>的行，拆成<b>真实行</b>（gate 选中、真的有人算的）" +
+        "与 <b>pad 行</b>（为对齐容量注入的零行）。",
+        "各 rank 自己写下的 <code>scope=compute</code> 行（接收侧计数，谁写这一行算谁的）；" +
+        "<code>scope=pad</code> 的行指出 pad 落在哪个专家上，用于拆分。",
+        "屏障真正在等谁、这张卡干了多少活。它<b>不是</b>「这个 rank 发出了多少」——" +
+        "发送量是另一个中性参照（各 rank 自己的 token 路由出了多少对）。"]]));
+    /* 这里必须点名「合计行的 PAR 恒等于 1.000 是容量构造出来的」：容量在所有 rank 上对称，
+       pad 把每个 rank 补齐到同一个数，于是合计的 PAR 与负载倾斜无关。不说明这一点，
        读者会把 1.000 读成「平衡良好」——正好把结论读反。 */
     const led0 = r.ledger || {};
     const perRankLayer = (led0.compute_total != null && T > 0 && L > 0 && R > 0)
       ? led0.compute_total / (T * L * R) : null;
     if (perRankLayer != null && led0.compute_total) {
-      const cmpL = quantiles(r.compute.par_by_step), runL = quantiles(r.par_by_step);
-      const padShare = 100 * (led0.pad_total || 0) / led0.compute_total;
-      const realShare = 100 * (led0.route_total || 0) / led0.compute_total;
+      const tot = view(r, "total"), real = view(r, "real");
+      const padShare = 100 * (led0.compute_pad_total || 0) / led0.compute_total;
+      const sent = led0.sent_par;
       p.appendChild(div("caption",
-        "<b>读这两套数最容易踩的坑：实际计算那一套的 PAR 恒等于 " + fmt(r.compute.par_whole, 3) +
-        "，那是 pad 补出来的构造结果，不是「负载均衡」的证据。</b>" +
-        "池化容量对所有 rank 对称（每个 rank 都按同一个容量 pad），pad 把每个 rank 补齐到同一个数：" +
-        "本次每个 rank 每层恰好算 <b>" + fmt(perRankLayer, 0) + " 对</b>（容量 × topk），" +
-        "所以逐层、整步、全程的 PAR 全是 " + fmt(cmpL ? cmpL.med : null, 3) + "。" +
-        "真实路由的差额全被 pad 抹平了——本次 pad 占计算量 <b>" + padShare.toFixed(1) + "%</b>，" +
-        "真实路由只占 " + realShare.toFixed(1) + "%，而负载差异恰恰只在那 " + realShare.toFixed(1) + "% 里，" +
-        "它只体现在「路由归属」那一套（逐层 PAR 均值 " + fmt(mean(r.par_by_step), 3) +
-        (runL ? "、最大 " + fmt(runL.hi, 3) : "") + "，全程 " + fmt(r.par_whole, 3) + "）。" +
-        "<b>两套一比就看出 pad 与搬迁各改写掉了多少</b>：pad 把 PAR 从 " + fmt(mean(r.par_by_step), 3) +
-        " 拉到 " + fmt(mean(r.compute.par_by_step), 3) + "，剩下的差额才是搬迁与丢弃（逐 rank 见 T2 的净差）。" +
-        "要做放置优化、EPLB，看「路由归属」那一套；要回答「屏障在等谁」，看「实际计算」那一套。"));
+        "<b>读这份数据最容易踩的坑：合计行的 PAR 恒等于 " + fmt(tot.par_whole, 3) +
+        "，那是容量补齐的构造结果，不是「负载均衡」的证据。</b>" +
+        "MoonEP 把每个 rank 的输入都补齐到<b>同一个</b>池化容量，于是每个 rank 每 (步, 层) 算的行数完全相同：" +
+        "本次每个 rank 每层恰好算 <b>" + fmt(perRankLayer, 0) + " 行</b>（容量 × topk），" +
+        "所以合计行的逐层、整步、全程 PAR 全是 1.000。" +
+        "本次 pad 占计算量 <b>" + padShare.toFixed(1) + "%</b>，真实行只占 " +
+        (100 - padShare).toFixed(1) + "%，而负载差异恰恰只在那部分里。" +
+        (isFinite(sent) ? "再往上看一层：各 rank <b>送出</b>的真实路由 PAR 是 " + fmt(sent, 3) +
+          "（输入本来就很不均匀），派发之后<b>实际计算</b>的真实行 PAR 变成 " +
+          fmt(real.par_whole, 3) + "——派发把不均匀削掉了多少，这两个数之差就是答案。" : "") +
+        "三本账在「三个 PAR 口径」那块可以逐一切换。"));
     }
   }
 
@@ -3127,36 +3330,59 @@ function renderSemantics(r) {
     ? "每个 rank 每层 dispatch <b>之前</b>的路由直方图（按逻辑专家 id 计数，宽 " + G +
       "），各 rank 按（步, 层）相加 = 这一步的真实路由"
     : "各 method 上报的本地计数（宽 " + r.row_width + " = 本 rank 的本地槽位），再按 expert_map 还原成逻辑专家";
-  p.appendChild(heading("h3", "T1 · 负载口径"));
+  const led1 = r.ledger || {};
+  p.appendChild(heading("h3", "T1 · 负载口径：每一行数的是什么"));
   p.appendChild(richTable(
-    ["量", "定义", "本运行的数据来源", "不含"],
+    ["量", "定义", "本运行的数据来源", "含 / 不含"],
     [["<b>专家负载</b>",
-      "该<b>逻辑专家</b>收到的 token-专家对数。一个 token 在每个 MoE 层被路由 topk(" + K +
-      ") 次，一对 = 一次专家计算；<b>副本算同一个专家</b>。" +
-      (two ? "两套口径下这个数完全相同。" : ""),
-      srcExpert, "pad 行"],
-     ["<b>rank 负载</b>",
+      "该<b>逻辑专家</b>收到的真实 token-专家对数，是 token 热度的度量。" +
+      "一个 token 在每个 MoE 层被路由 topk(" + K + ") 次，一对 = 一次专家计算；<b>副本算同一个专家</b>。",
+      srcExpert, "不含 pad 行（pad 不携带 token，不该算进热度）"],
+     ["<b>真实行</b>（rank 维度）",
+      "该 rank <b>真正算过</b>的、来自真实 token 的行。" +
+      (two ? "它是这批 token 让各 rank 干活的量，也是逐层 PAR 该看的序列。" : ""),
       two
-        ? "<b>两套</b>：<b>实际计算</b>（主）= 该 rank 真正算了的行（含 pad）；" +
-          "<b>路由归属</b>（参照）= 落到该 rank 所持专家上的真实路由（不含 pad）。" +
-          "搬走的行两套的记法不同，见 T0。"
-        : "<b>实际落到该 rank 所持专家上</b>的对数——token 来自所有 rank，" +
-          "落到谁的专家就记谁；不是「这个 rank 发出了多少」。",
+        ? ("各 rank 自己写下的 <code>scope=compute</code> 行（谁算谁背），再减去落在它头上的 pad 行（见下）")
+        : (global
+            ? "<b>没有</b>：这份 dump 只有发送侧的路由行，谁算了哪些行无从得知——" +
+              "本工具只按「谁算的」记账，不会按专家属主把路由分摊回 rank"
+            : "各 rank 报的计数就是它本地专家收到的量，直接取用"),
+      two ? "不含 pad 行 —— 那部分单独成账"
+          : (global ? "没有可拆的数据" : "不含 pad 行（本运行 pad 恒 0）")],
+     ["<b>pad 行</b>（rank 维度）",
+      "MoonEP 把每步 MoE 输入 pad 到池化容量（≥128 token）时注入的零行：" +
+      "(容量 − T) × topk。它们不携带 token，<b>但和真实行一样进 matmul</b>——" +
+      "所以它计入计算量、不计入路由量。",
       two
-        ? "一套来自发送侧直方图按 expert_map 的归属；另一套来自各 rank 收到的行（scope=compute）"
-        : (global ? "上面的全局路由按 expert_map 的「谁持有这个专家」归属到各 rank"
-                  : "各 rank 报的计数就是它本地专家收到的量，直接取用"),
-      two ? "两套各自见 T0" : "pad 行"],
-     ["<b>pad 对数</b>",
-      "MoonEP 每步把 MoE 输入 pad 到池化容量（≥128 token）时注入的零行：" +
-      "(capacity − T) × topk。它们不携带真实 token，<b>但确实进 matmul</b>——" +
-      "所以它是「计算量」的一部分、不是「路由量」的一部分。",
-      global ? ("打点侧在<b>产生它的 rank</b> 上、按逻辑专家 id 从计数里直接扣除" +
-                (pad.subtracted ? "（本运行已扣 " + fmt(pad.subtracted, 0) + " 对）" : "") +
-                "，并单独写成 scope=pad 的行，所以按专家扣得准、按 rank 只算得到属主")
-             : ("这份 dump 没有发送侧直方图可用；" +
-                (pad.subtracted ? "打点侧已扣 " + fmt(pad.subtracted, 0) + " 对" : "旧 dump 的 pad 无法离线还原")),
-      "—— 它不含真实 token，但计入「实际计算」"]]));
+        ? ("打点侧在<b>写</b>它的 rank 上写成 <code>scope=pad</code> 的行并指出落在哪个专家上；" +
+           "分析器按「该专家的真实路由归它的首个持有者、剩下的算 pad」把它摊回各 rank" +
+           (pad.subtracted ? "（本运行 pad 共 " + fmt(pad.subtracted, 0) + " 对）" : ""))
+        : (pad.subtracted
+            ? (pad.experts && pad.experts.length
+                ? "打点侧把 pad 写成 <code>scope=pad</code> 的行、并按逻辑专家 id 指明落点；" +
+                  "本运行 pad 共 " + fmt(pad.subtracted, 0) + " 对，落在 " +
+                  pad.experts.slice(0, 8).join("、") +
+                  (pad.experts.length > 8 ? " 等 " + pad.experts.length + " 个专家" : " 号专家") + "上。" +
+                  "但这份 dump 没有 <code>scope=compute</code> 行，所以 pad 落在哪个 <b>rank</b> 上读不出来。"
+                : "这份 dump 没写出 pad 行（旧版打点只记总数），所以 pad 落在哪些专家上无从得知；" +
+                  "汇总行说扣掉了 " + fmt(pad.subtracted, 0) + " 对")
+            : "本运行没有 pad 行可拆（off 模式下容量不对输入做补齐）"),
+      "不含真实 token"],
+     ["<b>合计行</b>",
+      "<b>真实行 + pad 行</b> = 该 rank 实际算掉的全部行。屏障等的是它。" +
+      (led1.compute_total != null
+        ? " 本次每个 rank 每 (步, 层) 恰好 " + fmt(led1.compute_total / Math.max(1, r.n_steps * r.n_layers * r.n_ranks), 0) +
+          " 行（容量 × topk），所以它的 PAR 恒为 1.000——那是构造结果，不是均衡证据。"
+        : ""),
+      "上面两行相加；打点侧另有 <code>compute_rows_total</code> 汇总行可以对账",
+      "不含被容量包络丢弃的对"],
+     ["<b>发送量</b>（中性参照）",
+      "该 rank <b>自己发出</b>的真实路由：它的 token 路由出了多少对。" +
+      "这是「这批输入在这个 rank 上本来有多少活」，与放置、与 pad 都无关——" +
+      "所以它是判断「派发把活摊平了多少」的参照量，<b>不是</b>负载。",
+      "发送侧直方图按发送方 rank 分块统计（<code>sent_by_rank</code>）；" +
+      (led1.sent_par != null ? "本次它的 PAR 是 " + fmt(led1.sent_par, 3) + "。" : ""),
+      "不含 pad（pad 是补齐、不是这个 rank 的输入）；它与注入的 pad 相加恰好等于容量，所以两者不能相加"]]));
 
   const dup = r.duplicated_experts || 0;
   const spread = spreadText(c);
@@ -3167,29 +3393,41 @@ function renderSemantics(r) {
       (pad.top_share != null ? "平均占 " + (pad.top_share * 100).toFixed(0) + "%" : "占了大头") +
       "，而 dump 头部没有任何扣除记录），所以下面的负载绝对值与 PAR 都被 pad 抬高了。" +
       "以下口径描述的是<b>这套统计该怎么数</b>；要拿到可用的数，请用带 pad 修正的打点重跑。<br>";
-  boundary.innerHTML += dup
-    ? ("<b>冗余 / 副本的边界（本运行适用）</b>：按 expert_map 统计，有 <b>" + dup +
-       " 个逻辑专家同时被多个 rank 持有</b>（头部记 redundant_experts=" + r.redundant + "）。" +
-       "专家负载按逻辑专家记，副本算同一个专家；但<b>副本之间各自处理了多少</b>" +
-       (two ? "只有「实际计算」那一套看得见，" +
-              "「路由归属」那一套看不见（发送侧只有路由结果），它把整个专家的负载记在一个持有者头上。"
-            : "没有任何记录，报告把 rank 负载记在持有它的那个 rank 上，不去猜分摊。") +
-       (two
-         ? "<b>所以：rank 级以「实际计算」为准，它是谁算了谁背的实测值；" +
-           "「路由归属」在（且仅在）这一维上是上界——真实分摊只会让各个 rank 更平。</b>"
-         : "因此这份运行的 <b>PAR 是上界</b>——真实分摊只会让各个 rank 更平。"))
-    : ("<b>冗余 / 副本的边界（本运行不适用，但要说明）</b>：本运行头部 redundant_experts=" + r.redundant +
-       "，expert_map 里<b>没有一个逻辑专家同时被两个 rank 持有</b>，所以「谁持有哪个专家」是一个划分：" +
-       "某个逻辑专家的负载整个记在它的持有者头上，各 rank 之和 = 全部真实路由，不多不少。" +
-       (two
-         ? "预取槽仍然会把行搬到别的 rank 上算，那部分差异由「实际计算」那一套精确给出（见 T0）。"
-         : "如果换成有副本的放置（MoonEP 的预取槽 / EPLB 冗余），副本之间的分摊在发送侧看不见，" +
-           "报告会退到同样的归属口径并标注 PAR 是上界。"));
+  const split = r.split || {};
+  const negP = split.negative_pairs || 0;
+  boundary.innerHTML += two
+    ? ("<b>真实 / pad 拆分的精度分级（本运行适用）</b>：<b>专家维度与两个总量是精确的</b>——" +
+       "pad 行由打点侧按逻辑专家 id 写成独立的行，专家热度与 pad 总量都直接读得出。" +
+       "<b>rank 维度只有一处约定</b>：pad 落在某个专家上时，该专家在这张卡上的<b>真实</b>行" +
+       "（gate 真的选中了它、又恰好落在这个持 pad 的 rank 上）会与 pad 行混在一起，" +
+       "dump 里看不出哪一行是哪个。报告按「该专家的真实路由归它的<b>首个持有者</b>」记账" +
+       "（无重定位时这就等于真值）。" +
+       (split.pad_experts && split.pad_experts.length
+         ? "本次受影响的专家是 " + split.pad_experts.join("、") +
+           "（共 " + (split.pad_experts.length) + " 个）；"
+         : "") +
+       (negP > 0
+         ? "反推时出现 <b>" + fmt(negP, 0) + " 对负值</b>（该卡在该专家上的计算行少于它头上的 pad，" +
+           "说明有真实行被搬到别处算了），按原值计入、不做截断——截断会破坏 pad 总量恒等式。"
+         : "本次反推没有出现负值。") +
+       (two && r.duplicated_experts
+         ? " 另有 " + r.duplicated_experts + " 个逻辑专家被多 rank 持有，" +
+           "这种专家的真实行只可能落在持有它的那些 rank 上，所以拆分的误差上限比上面更小。"
+         : ""))
+    : (global
+        ? ("<b>这份 dump 没有 rank 维度</b>：它只有发送侧的路由行，所以「各 rank 实际算了多少」" +
+           "无从得知（本工具只按「谁算的」记账），真实行 / pad 行的拆分也无从谈起。" +
+           "发送侧的量照常精确——各 rank 送出的真实路由见 T1 的最后一行。")
+        : ("<b>本运行没有 pad（off 模式）</b>：容量不对输入做补齐，所以「真实行 = 合计行」、" +
+           "pad 行恒为 0，三本账里的两本是同一份数据。" +
+           "而这份 dump 的计数取自各 method 上报的接收侧本地计数，本身就是「实际计算」的原始量。"));
   p.appendChild(boundary);
 
   p.appendChild(heading("h3", "T2 · 统计与自查"));
   const flatCell = !c.applicable
-    ? "只有 1 个 rank，无从度量离散度"
+    ? (c.identities && !c.identities.applicable
+        ? "这份 dump 没有 rank 维度可加"
+        : "只有 1 个 rank，无从度量离散度")
     : (c.flat ? "通过" : "<b>不通过</b>");
   const benchCell = !r.bench
     ? "目录里没有 bench.json"
@@ -3199,8 +3437,8 @@ function renderSemantics(r) {
     : (pad.subtracted
         ? "已扣 " + fmt(pad.subtracted, 0) + " 对"
         : (pad.suspect ? "<b>未扣除</b>" : (pad.misplaced ? "<b>有落空的扣除</b>" : "本运行无 pad")));
-  const ownCell = dup || r.unowned_slots
-    ? (dup + " 个专家被多 rank 持有 / " + (r.unowned_slots || 0) + " 个 (层, 专家) 无人持有")
+  const ownCell = dup
+    ? (dup + " 个专家被多 rank 持有")
     : "每个逻辑专家恰好一个持有者";
   p.appendChild(richTable(
     ["项目", "怎么算", "本次结果", "判定"],
@@ -3220,33 +3458,89 @@ function renderSemantics(r) {
       pad.tail_missing
         ? "<b>不可知</b>"
         : (pad.subtracted && !pad.misplaced ? "通过" : (pad.suspect ? "<b>需重跑</b>" : "通过"))],
-     ["④ 归属完备",
-      "每个逻辑专家恰好归属一个 rank（副本时取编号最小的持有者）",
+     ["④ 放置的完备",
+      "每个逻辑专家恰好被一个 rank 持有（副本时取编号最小的持有者）——" +
+      "它决定 pad 专家上的真实行算给谁，也决定「谁在算哪个专家」怎么读",
       ownCell,
-      dup || r.unowned_slots ? "<b>是上界</b>" : "通过"],
+      dup ? "<b>有副本</b>" : "通过"],
      ["⑤ 步的完整性",
       "打点侧在 dump 末尾的汇总行里记下「少于已知层数就结束」的步数（<code>partial_steps</code>）；" +
       "这样的步会把没跑到的层记成 0，进而低估负载",
       (pad.tail_missing ? "<b>不可知</b>（没有退出汇总行）"
         : (r.partial_steps ? "<b>" + r.partial_steps + " 步不完整</b>" : "0 步")) +
-      (r.checks.missing_cells ? " · " + r.checks.missing_cells + " 个单元缺失" : ""),
+      (r.checks.missing_cells && c.identities && c.identities.applicable
+        ? " · " + r.checks.missing_cells + " 个单元缺失" : ""),
       pad.tail_missing ? "<b>不可知</b>" : (r.partial_steps ? "<b>偏低</b>" : "通过")]]));
 
-  if (pad.subtracted || pad.misplaced || (pad.by_rank || []).some(row => row[1])) {
-    p.appendChild(heading("h3", "T6 · pad 记账（每 rank）"));
-    const rows = (pad.by_rank || []).map(([rank, pads, sent]) => {
-      const counted = sent + pads;
-      return [rank, fmt(pads, 0), counted > 0 ? (100 * pads / counted).toFixed(2) + "%" : "–"];
-    });
-    const totalPads = (pad.by_rank || []).reduce((a, row) => a + row[1], 0);
-    const totalSent = (pad.by_rank || []).reduce((a, row) => a + row[2], 0);
-    if (rows.length > 1)
-      rows.push(["<b>合计</b>", "<b>" + fmt(totalPads, 0) + "</b>",
-        (totalSent + totalPads) > 0 ? "<b>" + (100 * totalPads / (totalSent + totalPads)).toFixed(2) + "%</b>" : "–"]);
-    p.appendChild(richTable(["rank", "扣除的 pad 对数（token-专家对）", "占该 rank 计数（%）"], rows));
+  /* 三条恒等式：拆分算法的正确性全在这里。它们互相独立——不满足时报告会直接点名，
+     因为一个坏掉的拼接先是让残差动一点点，很久以后才让 PAR 动。 */
+  const id = (r.checks || {}).identities;
+  if (id && id.applicable === false) {
+    /* No rank dimension: the identities have nothing to sum over. Saying "0 vs
+       247164, 不通过" would report a catastrophic failure where the truth is "this
+       dump does not carry the data" -- so the panel says which dump it needs. */
+    p.appendChild(heading("h3", "T6 · 三条恒等式（拆分算法的对账）"));
     p.appendChild(div("caption",
-      "分母 = 该 rank 自己数过的对（已扣 pad 的真实计数 + 扣掉的 pad）。" +
-      "pad 与真实 token 同量级时最容易看出：占比越高，说明这份数据里有多少是空转。"));
+      "<b>不适用</b>：这份 dump 只有发送侧路由行，没有 rank 维度可加，" +
+      "所以三条恒等式无从检验。要用它们对账就重跑一次带 <code>scope=compute</code> 行的打点。" +
+      "本次专家维度照常可用（路由总量 " + fmt(id.route_total, 0) + " 对），" +
+      "容量相关的量（" +
+      (id.cell_total_min == null ? "无" : "每格 " + fmt(id.cell_total_min, 0) + " 对") +
+      "）由打点侧直接读出，不依赖这条拼接。"));
+  } else if (id) {
+    p.appendChild(heading("h3", "T6 · 三条恒等式（拆分算法的对账）"));
+    /* ①②: a dropped row belongs to exactly one of the two ledgers and the dump does
+       not say which, so on a run that drops neither can be checked to zero on its
+       own -- but the *pair* is exact (their sum is the computed total) and neither
+       may come out positive. That is what the verdict reads. */
+    const dropped = Math.max(0, id.drop_total || 0);
+    const okCell = err => Math.abs(err) < 0.5 ? "通过"
+      : (err <= 0.5 && -err <= dropped + 0.5
+        ? "通过（差额由丢弃解释）"
+        : "<b>不通过</b>");
+    const rows = [
+      ["<b>Σ_r 真实行 = 路由总量</b>",
+        "每个真实行都必须有人算：专家维度数出来的路由，" +
+        "在 rank 维度加回来必须还是那个数（多算 = 重复计，少算 = 有层没落盘）",
+        fmt(id.real_sum, 0) + " vs " + fmt(id.route_total, 0),
+        "差 " + fmt(id.real_error, 0) + " 对", okCell(id.real_error)],
+      ["<b>Σ_r pad 行 = 注入的 pad</b>",
+        "每个 pad 行都必须落在某个 rank 头上：打点侧扣掉多少对，" +
+        "拆分后就该摊回多少对（它保证「pad 只是被重新分配，没被凭空造出或抹掉」）",
+        fmt(id.pad_sum, 0) + " vs " + fmt(id.pad_injected, 0),
+        "差 " + fmt(id.pad_error, 0) + " 对", okCell(id.pad_error)],
+      ["<b>Σ_r 合计行 = 容量 × topk</b>",
+        "MoonEP 把每个 rank 的输入补齐到同一个池化容量，所以每个 (rank, 步, 层) 格子的合计" +
+        "应当处处相同、且是 topk(" + K + ") 的整数倍（容量 = 格子的合计 ÷ topk）",
+        id.capacity_pinned
+          ? "每格恒为 " + fmt(id.cell_total_min, 0) + " 对 → 容量 " + fmt(id.capacity, 0) + " token"
+          : "各格在 " + fmt(id.cell_total_min, 0) + "–" + fmt(id.cell_total_max, 0) + " 之间不等",
+        "总计 " + fmt(id.compute_total, 0) + " 对",
+        id.capacity_pinned ? "通过（<b>构造结果</b>）" : "不适用"],
+      /* 这条在有任何丢弃时替 ①② 作证：两者之和必须正好是丢弃量。 */
+      ["<b>① 的差 + ② 的差 = −丢弃</b>",
+        "丢弃的行只可能落在真实行或 pad 行之一，而 dump 不说落在哪一类；" +
+        "所以两个差各自 ≤ 0、加起来等于 −(发送量 − 计算量)——这条是丢弃不为 0 时唯一能对死的账",
+        "两差之和 " + fmt(id.error_sum, 0) + " vs −丢弃 " + fmt(-(id.drop_total || 0), 0),
+        "差 " + fmt((id.error_sum || 0) + (id.drop_total || 0), 0) + " 对",
+        Math.abs((id.error_sum || 0) + (id.drop_total || 0)) < 0.5
+          ? (id.drop_total > 0.5 ? "通过（丢弃 " + fmt(id.drop_total, 0) + " 对）" : "通过")
+          : "<b>不通过</b>"],
+    ];
+    p.appendChild(richTable(["恒等式", "为什么必须成立", "本次结果", "差额", "判定"], rows));
+    p.appendChild(div("caption",
+      "第三条的「通过」<b>不是均衡的证明，恰恰相反</b>：它成立只说明容量对所有 rank 对称、" +
+      "pad 把每个 rank 都补齐到了同一个数。负载的真正差异全在第一条（真实行）里，" +
+      "合计行的 PAR 因此恒为 1.000。" +
+      (id.drop_total > 0.5
+        ? " 本次有 <b>" + fmt(id.drop_total, 0) + " 对</b>在派发途中被容量包络丢掉：" +
+          "丢掉的行属于①②中的哪一类 dump 里看不出来，所以两条的差额各自都不为 0、" +
+          "但它们的和必须正好等于 −丢弃（第四条）。"
+        : " 本次没有丢弃，所以①②各自都是严丝合缝的 0。") +
+      (id.real_error != null && Math.abs(id.real_error) >= 0.5 && !(id.drop_accounted)
+        ? " <b>第一条不通过</b>：真实行的拆分与专家维度对不上，下面的 rank 级数字因此偏小，" +
+          "请先看告警再读数。"
+        : "")));
   }
 
   p.appendChild(div("caption",
@@ -3277,37 +3571,57 @@ function renderParScopes(r) {
       note: () => `全部 ${r.n_steps} 步、${r.n_layers} 层加总成一个总账`,
       why: "层间、步间方向相反的倾斜都已互相抵消，所以它最小。" },
   ];
-  const views = two
-    ? [["实际计算（主）", r.compute, "谁算的行记谁：预取槽搬过来的行记在干活的 rank 头上，pad 也在里面。"],
-       ["路由归属（参照）", r, "按属主记：被搬走算的行仍记在属主头上，不含 pad。放置与 EPLB 看的分布。"]]
-    : [["", r, ""]];
   const p = div("panel hero");
   p.appendChild(heading("h3", "三个 PAR 口径 · 结论先看这里"));
   p.appendChild(div("caption",
-    `${r.name}：同一个负载量的三种加总口径，数值依次变小是正常的——口径越大，` +
+    `${r.name}：PAR = 最忙 rank ÷ 平均 rank，是<b>比值、无单位</b>` +
+    "（1.000 表示完全均衡，上界 = rank 数）；均衡度 = 1/PAR，可读作最忙那张卡把负载摊平时的利用率。" +
+    "负载本身的单位是 <b>token-专家对</b>。" +
+    "同一个负载量有三种加总口径（逐层 / 整步 / 全程），数值依次变小是正常的——口径越大，" +
     "层与层、步与步之间方向相反的倾斜抵消得越充分。" +
-    "PAR = 最忙 rank ÷ 平均 rank，是<b>比值、无单位</b>（1.000 表示完全均衡，上界 = rank 数）；" +
-    "均衡度 = 1/PAR，同为比值，可读作最忙那张卡的负载占满时的利用率。" +
-    "负载本身（各 rank 的对数）单位是 token-专家对。" +
     (two
-      ? "<b>这份 dump 有两套负载口径，全部并列给出：rank 级以「实际计算」为主、" +
-        "「路由归属」为参照（见上方 T0）。</b>"
-      : "") +
+      ? "<b>rank 维度这份 dump 有三本账（合计行 = 真实行 + pad 行），下面的数字跟着选择走。" +
+        "真实行才是这批 token 让各 rank 干活的量；合计行恒为 1.000，是容量补齐的构造结果。</b>"
+      : ((r.ledger || {}).compute_total == null
+          ? "这份 dump 只有发送侧的路由行，<b>没有 rank 维度</b>：PAR 是 rank 之间的比，所以" +
+            "下面的三本账都算不出来（专家维度的量照常可读，见热度面板）。"
+          : "本运行没有 pad，所以只有一本账。")) +
     (RUNS.length > 1 ? "切换上方的运行按钮，这一块跟着换。" : "")));
-  for (const [label, view, why] of views) {
-    if (label) {
-      const head = heading("h4", label);
-      head.style.marginTop = "4px";
-      p.appendChild(head);
-      p.appendChild(div("caption", why));
-    }
+  const led = r.ledger || {};
+  const head = div("bar");
+  head.appendChild(div("axis-title", "负载账"));
+  /* 换账本要重画整页：跟着账本走的图不止这一块（每 rank、逐步、全程、对比、数据表）。
+     折叠状态记在 FOLD_STATE 里，所以整页重绘不会把读者展开的长文收回去。 */
+  const picker = ledgerPicker(() => renderAll());
+  head.appendChild(picker);
+  p.appendChild(head);
+  const cap = div("caption");
+  p.appendChild(cap);
+  const gridHost = div();
+  p.appendChild(gridHost);
+  const rankHost = div();
+  const rankCap = div("caption");
+  p.appendChild(rankHost);
+  p.appendChild(rankCap);
+  const tbl = document.createElement("table");
+  tbl.className = "grid";
+  const tw = scrollWrap(tbl);
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr><th>口径</th><th>怎么算</th><th>本运行</th><th>均衡度 = 1/PAR</th></tr>";
+  const tbody = document.createElement("tbody");
+  tbl.appendChild(thead); tbl.appendChild(tbody);
+  p.appendChild(tw);
+
+  function draw() {
+    const v = view(r, ledgerPick);
     const base = Math.max(1e-9, ...series.map(s => {
-      const v = s.pick(view)[0];
-      return isFinite(v) ? v : 0;
+      const x = s.pick(v)[0];
+      return isFinite(x) ? x : 0;
     }));
+    gridHost.innerHTML = "";
     const grid = div("scopes");
     for (const s of series) {
-      const [value, q] = s.pick(view);
+      const [value, q] = s.pick(v);
       const cell = div("scope");
       cell.style.borderTopColor = s.color;
       cell.appendChild(div("sk", s.key));
@@ -3322,58 +3636,114 @@ function renderParScopes(r) {
       cell.appendChild(div("sn", s.why));
       grid.appendChild(cell);
     }
-    p.appendChild(grid);
-  }
-  const perLayerMean = mean(r.par_by_step), aggMean = mean(r.par_agg);
-  const bal = v => (isFinite(v) && v > 0 ? (1 / v).toFixed(3) : "–");
-  const cmp = view => [
-    [mean(view.par_by_step), quantiles(view.par_by_step)],
-    [mean(view.par_agg), quantiles(view.par_agg)],
-    [view.par_whole, null],
-  ];
-  const ref = two ? cmp(r) : null, own = cmp(two ? r.compute : r);
-  const rows = [];
-  series.forEach((s, i) => {
-    const row = [s.key,
-      s.key === "逐层 PAR"
+    gridHost.appendChild(grid);
+
+    /* 每 rank 的堆叠条：真实行 + pad 行 = 合计行。这是「同一个负载两个维度」里
+       rank 那一维最直接的读法——pad 有多厚、真实部分有多参差，一眼分得开。 */
+    const real = view(r, "real"), padV = view(r, "pad");
+    const comp = view(r, "total");
+    const ledR = led.per_rank || [];
+    /* 没有 rank 维度时 per_rank_mean 全是 NaN：画成 0 高的柱子等于说「这张卡什么都没干」，
+       而真相是这份 dump 没说（同 rank_total 的约定）。所以柱子不画，只留一句 n/a。 */
+    const rankUnknown = !(r.checks && r.checks.identities && r.checks.identities.applicable);
+    const scale = Math.max(1e-9, ...comp.per_rank_mean.map(x => (isFinite(x) ? x : 0)));
+    rankHost.innerHTML = "";
+    const wrap = div("rankstack");
+    const refPct = (() => {          // 送出量（中性参照）画成一根竖线
+      const s = ledR.map(e => e.sent);
+      const m = mean(s);
+      return isFinite(m) && scale > 0 ? 100 * m / scale : null;
+    })();
+    ledR.forEach((e, i) => {
+      if (rankUnknown) return;
+      const line = div("rsrow");
+      line.appendChild(div("rsname", "rank " + e.rank));
+      const track = div("rstrack");
+      const rv = isFinite(real.per_rank_mean[i]) ? real.per_rank_mean[i] : 0;
+      const pv = isFinite(padV.per_rank_mean[i]) ? padV.per_rank_mean[i] : 0;
+      const segR = document.createElement("i");
+      segR.style.width = (100 * rv / scale).toFixed(2) + "%";
+      segR.style.background = seriesColor(0);
+      const segP = document.createElement("i");
+      segP.style.width = (100 * pv / scale).toFixed(2) + "%";
+      segP.style.background = ramp().seq[3];
+      track.appendChild(segR); track.appendChild(segP);
+      if (refPct !== null) {
+        const mark = document.createElement("u");
+        mark.style.left = refPct.toFixed(2) + "%";
+        track.appendChild(mark);
+      }
+      line.appendChild(track);
+      const tot = rv + pv;
+      line.appendChild(div("rsnum",
+        fmt(tot, 0) + "　(真实 " + (tot > 0 ? (100 * rv / tot).toFixed(1) : "0.0") + "%)"));
+      const tip = `<b>rank ${e.rank}</b><br>` +
+        `真实行（步均值）：<b>${fmt(rv)}</b><br>pad 行（步均值）：${fmt(pv)}<br>` +
+        `合计行（步均值）：<b>${fmt(tot)}</b><br>` +
+        `<span class="sm">送出真实路由 ${fmt(e.sent)} · 注入 pad ${fmt(e.injected)}</span>`;
+      hoverable(line, tip);
+      wrap.appendChild(line);
+    });
+    rankHost.appendChild(wrap);
+    if (rankUnknown) {
+      rankHost.appendChild(div("caption",
+        "这份 dump 只有发送侧的路由行，<b>没有 rank 维度</b>：每 rank 的实际计算量、" +
+        "以及真实行 / pad 行的拆分都无从得知，所以这里不画柱。" +
+        "各 rank <b>送出</b>的真实路由照常精确——见下面表里的「发送量」一列。"));
+    }
+    if (!rankUnknown)
+      rankHost.appendChild(legendOf([
+        ["真实行", seriesColor(0)],
+        ["pad 行", ramp().seq[3]],
+        ...(refPct !== null ? [["竖线 = 各 rank 送出真实路由的均值", css("--fg-2")]] : []),
+      ]));
+    /* 分档总结：真实行的 PAR 与 pad 行的 PAR 讲的是不同的故事，把它们并排说出来。 */
+    const rl = quantiles(real.par_by_step), pl = quantiles(padV.par_by_step);
+    const tl = quantiles(comp.par_by_step);
+    cap.innerHTML =
+      (LEDGER_LABEL[ledgerPick] || "合计行") + "：逐层 PAR 均值 <b>" +
+      fmt(mean(view(r, ledgerPick).par_by_step), 3) + "</b>、整步 PAR 均值 <b>" +
+      fmt(mean(view(r, ledgerPick).par_agg), 3) + "</b>、全程 <b>" +
+      fmt(view(r, ledgerPick).par_whole, 3) + "</b>。" +
+      (two
+        ? " 三本账的逐层 PAR 均值分别是 真实行 <b>" + fmt(mean(real.par_by_step), 3) +
+          "</b>（中位 " + fmt(rl && rl.med, 3) + "，最大 " + fmt(rl && rl.hi, 3) + "）、pad 行 <b>" +
+          fmt(mean(padV.par_by_step), 3) + "</b>、合计行 <b>" + fmt(mean(comp.par_by_step), 3) +
+          "</b>。<b>真实行才是负载倾斜待的地方</b>；pad 行之所以平，是因为每个 rank 注入的 pad" +
+          "恰好把它补到同一个数；合计行因此被抹平到 1.000。"
+        : (rankUnknown
+            ? " 这三行都是「–」：PAR 是 rank 之间的比，这份 dump 没有 rank 维度。"
+            : ""));
+    tbody.innerHTML = "";
+    series.forEach((s, i) => {
+      const vals = [[mean(v.par_by_step), quantiles(v.par_by_step)],
+                    [mean(v.par_agg), quantiles(v.par_agg)],
+                    [v.par_whole, null]][i];
+      const tr = document.createElement("tr");
+      const how = s.key === "逐层 PAR"
         ? `每个 (步, 层) 各算一次 最忙 rank÷平均 rank，再对该步内 ${r.n_layers} 层取平均`
         : (s.key === "整步 PAR" ? `每一步内 ${r.n_layers} 层加总后，再算 峰值÷均值`
-                                : `全部 ${r.n_steps} 步加总后，再算 峰值÷均值`)];
-    if (two) {
-      row.push(`<b>${fmt(own[i][0], 3)}</b>（中位 ${fmt(own[i][1] && own[i][1].med, 3)}）`);
-      row.push(`${fmt(ref[i][0], 3)}（中位 ${fmt(ref[i][1] && ref[i][1].med, 3)}）`);
-      const d = own[i][0] - ref[i][0];
-      row.push(isFinite(d)
-        ? (Math.abs(d) < 0.0005 ? "≈ 0（无搬迁）"
-           : `${d > 0 ? "+" : ""}${d.toFixed(3)}（${d < 0 ? "搬迁削平了" : "搬迁把行搬到了更忙的 rank"}）`)
-        : "–");
-    } else {
-      row.push(`${fmt(own[i][0], 3)}（${r.n_steps} 步的均值，中位 ${fmt(own[i][1] && own[i][1].med, 3)}）`);
-    }
-    row.push(bal(own[i][0]));
-    rows.push(row);
-  });
-  p.appendChild(table(
-    two ? ["口径", "怎么算（负载口径见上方 T0）", "实际计算（主）", "路由归属（参照）", "差（主 − 参照）", "均衡度 = 1/PAR"]
-        : ["口径", "怎么算（负载口径见上方 T1）", "本运行", "均衡度 = 1/PAR"],
-    rows));
+                                : `全部 ${r.n_steps} 步加总后，再算 峰值÷均值`);
+      tr.innerHTML = "<td>" + s.key + "</td><td>" + how + "</td>" +
+        "<td><b>" + fmt(vals[0], 3) + "</b>（中位 " + fmt(vals[1] && vals[1].med, 3) + "）</td>" +
+        "<td>" + (isFinite(vals[0]) && vals[0] > 0 ? (1 / vals[0]).toFixed(3) : "–") + "</td>";
+      tbody.appendChild(tr);
+    });
+    rankCap.innerHTML = rankUnknown
+      ? "没有 rank 维度，所以这里没有柱——原因见上面那条说明。"
+      : ("柱 = 该 rank 的<b>实际计算量</b>（每步均值），蓝色是真实行、灰色是 pad 行，" +
+         "两者的比例说明这张卡的活有多少是真的。" +
+         (ledR.some(e => e.sent != null)
+           ? "竖线是各 rank <b>送出</b>真实路由的均值——它是「这批输入本来就分给谁」的中性参照：" +
+             "竖线左侧的卡片算得比送出的多，右侧的少。"
+           : ""));
+  }
   p.appendChild(div("caption",
-    two
-      ? "两套数用的是同一个算式，只换了负载序列（见「口径与统计」）。" +
-        "<b>差为负 = 搬迁把行从忙的 rank 挪给了闲的，实际计算口径更平</b>；" +
-        "差为正 = 有 rank 被搬进了超出它份额的行，那正是屏障要多等的地方。" +
-        "「路由归属」那一列不含 pad，实际计算含 pad（pad 也进 matmul），" +
-        "所以两者之间还有一个 pad 量级的差——精确的拆分见下面的「计算量分层账本」。"
-      : `上表的分子分母都按 T1 的口径数：专家按逻辑专家、rank 按实际落到它所持专家上的对数、不含 pad。` +
-        (r.primary === "global" ? "" : " 注意这份 dump 的计数取自各 method 上报的接收侧本地计数。") +
-        ` 均衡度 = 1 ÷ PAR，可读作最忙那张卡的有效利用率上限。`));
-  const tail = div("caption");
-  tail.innerHTML =
     "该看哪个：<b>判断性能看整步 PAR</b>（屏障是逐步发生的）；" +
     "<b>看 EPLB 收益看逐层 PAR</b>（它要削的是单层尖峰）；" +
     "<b>全程 PAR 只说明活干完时两边是否扯平</b>——它最小，但预测不了任何一次等待。" +
-    (r.n_ranks < 2 ? " 本次只有 1 个 rank，PAR 无定义。" : "");
-  p.appendChild(tail);
+    (r.n_ranks < 2 ? " 本次只有 1 个 rank，PAR 无定义。" : "")));
+  draw();
   return p;
 }
 
@@ -3383,10 +3753,13 @@ function renderParScopes(r) {
 function renderLedger(r) {
   if (!r.has_compute) return null;
   const led = r.ledger || {};
-  if (led.compute_total == null) return null;
+  if (led.route_total == null) return null;
+  /* 这份 dump 有没有计算行：没有的话（旧版打点只有发送侧），实际计算量、真实/pad 行的
+     拆分都无从得知 —— 那几行显示 "–" 而不是 0。 */
+  const compKnown = led.compute_total != null;
   const pad = r.pad || {};
   const L = r.n_layers, G = r.global_experts;
-  const p = panel("计算量分层账本 · 总量 = 实际计算 + pad",
+  const p = panel("分层账本 · 发送量 = 真实路由 + pad，计算量 = 发送量 − 丢弃",
     "一个 dispatch 上流动着三个量：<b>真实路由</b>（gate 选中的对）、" +
     "<b>pad</b>（为对齐池化容量塞进去的零行）、<b>丢弃</b>（容量包络没能收下的对）。" +
     "两句话就能串起来：<code>发送量 = 真实路由 + pad</code>、" +
@@ -3396,15 +3769,18 @@ function renderLedger(r) {
     "这正是下面这张账要分开的东西。");
   const sum = a => a.reduce((x, y) => x + y, 0);
   const routeT = led.route_total, padT = led.pad_total, sentT = led.sent_total;
-  const compT = led.compute_total, dropT = led.dropped || 0;
-  const pct = v => (sentT + compT) > 0 ? (100 * v / Math.max(sentT, compT)).toFixed(2) + "%" : "–";
+  const compT = led.compute_total, realT = led.real_total, padCompT = led.compute_pad_total;
+  const dropT = compKnown ? sentT - compT : null;
+  const pct = v => (compKnown && (sentT + compT) > 0)
+    ? (100 * v / Math.max(sentT, compT)).toFixed(2) + "%" : "–";
+  const unknown = "这份 dump 没有计算行，实际计算量无从得知";
 
   p.appendChild(heading("h3", "T1 · 总账（整段服务）"));
   p.appendChild(richTable(
     ["量", "怎么来的", "对数（token-专家对）", "占发送量（%）"],
     [["<b>真实路由</b>", "gate 选中的 (token, 专家) 对；发送侧直方图已把 pad 扣掉，所以它是纯真实流量。",
       fmt(routeT, 0), (100 * routeT / Math.max(1e-9, sentT)).toFixed(2) + "%"],
-     ["<b>pad 计算量</b>",
+     ["<b>pad（注入）</b>",
       "MoonEP 为对齐池化容量注入的零行：每 rank 每步 (capacity − T) × topk。" +
       "零行也进 matmul，所以它是计算量的一部分。",
       fmt(padT, 0), (100 * padT / Math.max(1e-9, sentT)).toFixed(2) + "%"],
@@ -3412,129 +3788,247 @@ function renderLedger(r) {
       "<b>" + fmt(sentT, 0) + "</b>", "100.00%"],
      ["<b>丢弃</b>",
       "容量包络下没能进任何槽位的对（排在最热专家后面、超出配额的那部分）。" +
-      "只有残差可知：发送量 − 计算量。",
-      (dropT >= 0 ? "− " : "+ ") + fmt(Math.abs(dropT), 0), pct(dropT)],
+      "dump 里没有单独的计数器，只有残差可知：发送量 − 计算量。",
+      compKnown ? (dropT >= 0 ? "− " : "+ ") + fmt(Math.abs(dropT), 0) : "–", pct(dropT)],
      ["<b>实际计算量 = 发送 − 丢弃</b>",
-      "各 rank 真正算过的行。它 = 真实路由 + pad − 丢弃，是屏障为之排队的总工作量。",
-      "<b>" + fmt(compT, 0) + "</b>", pct(compT)]]));
+      "各 rank 真正算过的行。它 = 真实行 + pad 行，是屏障为之排队的总工作量。",
+      compKnown ? "<b>" + fmt(compT, 0) + "</b>" : "–", pct(compT)],
+     ["<b>　其中真实行</b>", "有人算的真实路由（跨 rank 加总 = 上面的真实路由，见 T6 恒等式①）。",
+      compKnown ? fmt(realT, 0) : "–", pct(realT)],
+     ["<b>　其中 pad 行</b>", "被算掉的 pad（跨 rank 加总 = 上面注入的 pad，见 T6 恒等式②）。",
+      compKnown ? fmt(padCompT, 0) : "–", pct(padCompT)]]));
+  if (!compKnown) p.appendChild(div("caption", "<b>" + unknown + "</b>：" +
+    "这份 dump 只有发送侧的路由行（旧版打点没有写「实际计算」的那一行）。" +
+    "上面真实路由与 pad 两行照常精确——它们是发送侧直方图直接读出来的。"));
 
-  p.appendChild(heading("h3", "T2 · 按 rank：路由归属 vs 实际计算"));
+  p.appendChild(heading("h3", "T2 · 按 rank：送出的、注入的、算掉的"));
   const byRank = (led.per_rank || []).slice().sort((a, b) => a.rank - b.rank);
-  const rows = byRank.map(e => {
-    const sent = e.sent, comp = e.compute;
-    const net = (sent != null && comp != null) ? comp - sent : null;
+  const realM = view(r, "real").rank_total, padM = view(r, "pad").rank_total;
+  const rows = byRank.map((e, i) => {
+    const rr = realM[i], pp = padM[i], tt = e.total;
+    const net = (e.sent != null && tt != null) ? tt - e.sent : null;
     return [e.rank,
-      fmt(e.route, 0), fmt(e.pad, 0), sent != null ? "<b>" + fmt(sent, 0) + "</b>" : "–",
-      comp != null ? "<b>" + fmt(comp, 0) + "</b>" : "–",
-      fmt(e.pad_est, 0), fmt(e.real_est, 0),
+      e.sent != null ? "<b>" + fmt(e.sent, 0) + "</b>" : "–",
+      fmt(e.injected, 0),
+      rr != null ? fmt(rr, 0) : "–", pp != null ? fmt(pp, 0) : "–",
+      tt != null ? "<b>" + fmt(tt, 0) + "</b>" : "–",
+      e.real_share != null ? (100 * e.real_share).toFixed(2) + "%" : "–",
       net == null ? "–"
         : (Math.abs(net) < 0.5 ? "≈ 0" : (net > 0 ? "+" : "−") + fmt(Math.abs(net), 0))];
   });
   if (rows.length > 1) {
     const t = k => sum(byRank.map(e => (e[k] == null ? 0 : e[k])));
-    rows.push(["<b>合计</b>", "<b>" + fmt(t("route"), 0) + "</b>", "<b>" + fmt(t("pad"), 0) + "</b>",
-      "<b>" + fmt(t("sent"), 0) + "</b>", "<b>" + fmt(t("compute"), 0) + "</b>",
-      "<b>" + fmt(t("pad_est"), 0) + "</b>", "<b>" + fmt(t("real_est"), 0) + "</b>",
-      (t("compute") - t("sent") > 0 ? "+" : "−") + fmt(Math.abs(t("compute") - t("sent")), 0)]);
+    const rSum = sum(realM.filter(Number.isFinite)), pSum = sum(padM.filter(Number.isFinite));
+    /* 没有计算行时逐 rank 的合计列全是 "–"，合计行也必须跟着说 "–"：0 会被读成「没有」 */
+    const cSum = k => (compKnown ? "<b>" + fmt(t(k), 0) + "</b>" : "–");
+    rows.push(["<b>合计</b>", "<b>" + fmt(t("sent"), 0) + "</b>", "<b>" + fmt(t("injected"), 0) + "</b>",
+      cSum("real"), cSum("pad"), cSum("total"),
+      "<b>" + (rSum + pSum > 0 ? (100 * rSum / (rSum + pSum)).toFixed(2) + "%" : "–") + "</b>",
+      compKnown ? (t("total") - t("sent") > 0 ? "+" : "−") + fmt(Math.abs(t("total") - t("sent")), 0) : "–"]);
   }
   p.appendChild(scrollWrap(table(
-    ["rank", "路由归属：真实", "路由归属：pad", "归属合计",
-      "实际计算：计算量", "实际计算：其中 pad（估）", "实际计算：其中真实（估）", "净差"],
+    ["rank", "送出真实路由（中性参照）", "注入 pad", "真实行", "pad 行",
+      "合计行 = 真实 + pad", "真实占比（%）", "合计 − 送出"],
     rows)));
   p.appendChild(div("caption",
-    "<b>路由归属那三列是精确的</b>：真实按专家属主归属，pad 也按同一个规则归属" +
-    "（pad 行被 dispatcher 记在产生它的 rank 上，而它总是落在这个 rank 自己的专家上），" +
-    "所以「归属合计 = 真实 + pad」逐 rank 成立。" +
-    "<b>实际计算里「计算量」一列也是精确的</b>——它就是该 rank 写下的那一行行数之和。" +
-    "<b>唯一只能估的是它的成分拆解</b>：pad 行一旦进了槽位就和真实行长得一模一样，" +
-    "而且可能被搬到别的 rank 上，所以「其中 pad」按 <code>该rank算的该专家行数 ÷ 该专家发送量</code> " +
-    "把每个专家的 pad 摊开，剩下的算真实；它的误差上限就是 pad 总量本身（几 %）。" +
-    "<b>净差 = 实际计算 − 归属合计</b>：正数表示净搬到这个 rank 上算的行多（它替别人打了工）、" +
-    "负数表示净搬出去（或被丢弃）。" +
-    (led.dropped != null && Math.abs(led.dropped) > 0.5
-      ? " 本次丢弃 " + fmt(led.dropped, 0) + " 对（占发送量 " +
-        (100 * led.dropped / Math.max(1e-9, sentT)).toFixed(2) + "%），" +
-        "它只出现在「发送了却没算」的属主那一行，所以净差的负数里也含它。"
-      : " 本次没有丢弃，净差就纯粹是搬迁的净额。")));
+    "<b>「送出」这一列不是负载</b>：它是这个 rank 自己的 token 路由出了多少对，" +
+    "是「这批输入本来就分给它多少活」的中性参照——放置、pad 都改不了它。" +
+    "<b>「注入 pad」也不等于「pad 行」</b>：每个 rank 把自己的输入补齐到同一个容量，" +
+    "但补齐后的行会被 dispatcher 摊到持有该专家的各 rank 上，所以注入侧与计算侧的两列" +
+    "只在合计上相等。" +
+    "<b>「合计 − 送出」</b>回答「这张卡最终算的比它自己送出的多多少」：正数说明它替别人算了行" +
+    "（pad 与搬迁都算在这里），负数说明它的行被别人算掉了。" +
+    ((r.checks && r.checks.identities && r.checks.identities.capacity_pinned)
+      ? "本次合计行逐 rank 完全相同（容量对称），所以这一列直接读出每张卡被补齐了多少。"
+      : "本次合计行逐 rank 并不完全相同，所以这一列里既有派发的形状（pad 与搬迁），" +
+        "也有「这批输入本来就在各 rank 上不均匀」的成分——两者都在这一个数里。")));
 
-  p.appendChild(heading("h3", "T3 · 按专家（三列全部精确）"));
+  p.appendChild(heading("h3", "T3 · 按逻辑专家（真实 + pad，两列都精确）"));
   /* 专家维度是唯一可以逐项对上的地方：pad 行是按逻辑专家 id 扣的、也是按逻辑专家 id 记的，
-     所以「计算 = 真实 + pad − 丢弃」对每个专家都成立，不需要任何估计。 */
-  const routed = [], pads = [], computed = [];
+     所以「计算行 = 真实 + pad」对每个专家都成立，不需要任何估计。 */
+  const routed = [], pads = [];
   for (let g = 0; g < G; g++) {
-    let a = 0, b = 0, c = 0;
-    for (let l = 0; l < L; l++) {
-      a += r.layer_expert[l][g] || 0;
-      b += (r.layer_expert_pad && r.layer_expert_pad[l]) ? (r.layer_expert_pad[l][g] || 0) : 0;
-      c += (r.compute.layer_expert && r.compute.layer_expert[l]) ? (r.compute.layer_expert[l][g] || 0) : 0;
-    }
-    routed.push(a); pads.push(b); computed.push(c);
+    routed.push((r.expert_total || [])[g] || 0);
+    pads.push((r.expert_pad_total || [])[g] || 0);
   }
-  const order = routed.map((v, g) => [computed[g], g]).sort((x, y) => y[0] - x[0]);
+  const order = routed.map((v, g) => [v, g]).sort((x, y) => y[0] - x[0]);
   const expertRows = order.map(([_, g]) => {
-    const drop = routed[g] + pads[g] - computed[g];
-    return [g, fmt(routed[g], 0), fmt(pads[g], 0), "<b>" + fmt(computed[g], 0) + "</b>",
-      Math.abs(drop) < 0.5 ? "0" : (drop > 0 ? fmt(drop, 0) : "− " + fmt(-drop, 0)),
-      computed[g] > 0 ? (100 * pads[g] / computed[g]).toFixed(1) + "%" : "–"];
+    const share = routed.reduce((a, b) => a + b, 0);
+    return [g, "<b>" + fmt(routed[g], 0) + "</b>", fmt(pads[g], 0),
+      fmt(routed[g] + pads[g], 0),
+      share > 0 ? (100 * routed[g] / share).toFixed(3) + "%" : "–",
+      (routed[g] + pads[g]) > 0 ? (100 * pads[g] / (routed[g] + pads[g])).toFixed(1) + "%" : "–"];
   });
   p.appendChild(scrollWrap(table(
-    ["逻辑专家", "真实路由", "pad", "计算量 = 真实 + pad − 丢弃", "丢弃", "pad 占计算量（%）"],
+    ["逻辑专家", "真实路由（热度）", "pad", "该专家共算了", "占全部路由（%）", "pad 占该专家的（%）"],
     expertRows)));
   const hot = order.slice(0, 3).map(([_, g]) => g);
   p.appendChild(div("caption",
-    "按计算量从大到小排（可滚动）。这三列全部精确：pad 是按<b>逻辑专家 id</b> 扣的、" +
-    "也是按逻辑专家 id 另写成行的，所以每个专家都能逐项对上。" +
+    "按<b>真实路由</b>从大到小排（可滚动）——这才是「token 在专家之间有多热」的排序。" +
     (hot.length ? "本次最忙的三个专家是 " + hot.join("、") + "；" : "") +
-    "看这一列就能分清「负载差异是路由倾斜造成的」还是「pad 撑起来的」——" +
-    "pad 占比高的那一行，它多出来的量本来就不携带任何 token。"));
+    "pad 那一列只在少数几个专家上非零（各 rank 注入 pad 时选的那个专家），" +
+    "所以它读的是「容量补齐把哪些专家撑大了」，而不是热度。" +
+    "同一个专家如果被多个 rank 持有（副本），它的真实路由只有一份，报告不去猜副本间怎么分——" +
+    "要知道谁在算它，看下面的「rank × 逻辑专家」。"));
+
   return p;
 }
 
 /* 全程口径：把整段测试加起来看总账。它回答「总共谁做得多」，
    而不是「谁在哪一步等」——后者是逐步口径，性能由那个决定。 */
-function renderWholeRun(r) {
-  const p = panel("整个服务过程（全程累计）",
-    `把全部 ${r.n_steps} 步加起来看总账：每个 rank 全程一共扛了多少、最忙的比平均多多少。` +
-    "这是评估专家放置、容量规划的指标；每一步实际要等多久，看上面的逐步口径。");
-  const total = r.rank_total.reduce((a, b) => a + (b || 0), 0);
-  const meanTotal = total / Math.max(1, r.n_ranks);
-  barChart(p, {
-    labels: r.rank_ids.map(String), values: r.rank_total, refLine: meanTotal,
-    color: seriesColor(0), xLabel: "rank", yLabel: "token-专家对（全程累计）",
-    tipLabel: "rank", height: 250,
-    tipExtra: i => `<br><span class="sm">占全程 ` +
-      `${(100 * r.rank_total[i] / Math.max(1e-9, total)).toFixed(2)}% · 平均 ${fmt(meanTotal)}</span>`,
+/* 逻辑专家热度：这批输入把哪些专家喂饱了。
+   这是「专家负载」这一维唯一的问题——它跟 pad、跟放置都无关，只跟 gate 的选择有关，
+   所以它可以跨运行、跨通信方式直接比。排序用真实路由，pad 不进热度。 */
+function renderExpertHotness(r) {
+  const v = (r.expert_total || []).map(x => x || 0);
+  const G = v.length || 1;
+  const total = v.reduce((a, b) => a + b, 0);
+  const m = total / Math.max(1, G);
+  const order = v.map((x, g) => g).sort((a, b) => v[b] - v[a]);
+  const p = panel(`逻辑专家热度：token 在专家之间有多不均匀（${r.name}）`,
+    "专家维度数的是<b>真实路由</b>——每个逻辑专家收到的 token-专家对数，" +
+    "pad 已扣除、副本合并。它回答两个问题：这批输入把活集中喂给了少数专家吗？" +
+    "以及，如果要靠 EPLB 搬家来救，能搬的余量有多大。");
+
+  /* 四个标量把分布讲完：最热的占比、前 1% 的占比、归一化熵（越大越均匀）、Gini。 */
+  const top1 = v[order[0]] || 0;
+  const k1 = Math.max(1, Math.round(G / 100));
+  const topK = order.slice(0, k1).reduce((a, g) => a + v[g], 0);
+  let entropy = 0;
+  for (const x of v) if (x > 0) { const q = x / Math.max(1e-9, total); entropy -= q * Math.log(q); }
+  const evenness = Math.log(Math.max(2, G)) > 0 ? entropy / Math.log(Math.max(2, G)) : null;
+  const sortedAsc = order.slice().reverse().map(g => v[g]);
+  let gini = null;
+  if (total > 0 && G > 1) {
+    let acc = 0, sumWeighted = 0;
+    sortedAsc.forEach((x, i) => { acc += x; sumWeighted += (i + 1) * x; });
+    gini = (2 * sumWeighted) / (G * acc) - (G + 1) / G;
+  }
+  const cold = v.filter(x => x < 0.5 * m).length;
+  const cards = div("cards");
+  cards.appendChild(kpiCard("最热专家占比", (100 * top1 / Math.max(1e-9, total)).toFixed(2) + "%",
+    `专家 ${order[0]} · ${fmt(top1, 0)} 对 · ${(top1 / Math.max(1e-9, m)).toFixed(2)}× 均值`,
+    "单个专家吃掉全部真实路由的比例。均匀时是 1/G = " + (100 / G).toFixed(2) + "%。"));
+  cards.appendChild(kpiCard(`最热 ${k1} 个专家（前 1%）`,
+    (100 * topK / Math.max(1e-9, total)).toFixed(1) + "%",
+    `${k1} / ${G} 个专家 · 均匀时应占 ${(100 * k1 / G).toFixed(1)}%`,
+    "集中度最直观的一个数：前 1% 的专家扛了多少活。"));
+  cards.appendChild(kpiCard("均匀度（熵 / 最大熵）", evenness === null ? "–" : evenness.toFixed(3),
+    "1.000 = 完全均匀，0 = 全压在一个专家上",
+    "把整个分布压成一个数：归一化香农熵。它不像「最热占比」那样只看头部，" +
+    "而是把尾部也算进来，所以能看出「头部很热但尾部也不冷」和「头部热、尾部空转」的区别。"));
+  cards.appendChild(kpiCard("Gini", gini === null ? "–" : gini.toFixed(3),
+    `${cold} 个专家低于均值一半`,
+    "与熵互为补充的不均衡度量：0 = 完全均匀，接近 1 = 极不均。" +
+    "它与熵一起看能判断倾斜是「少数热点」还是「长尾冷门」。"));
+  p.appendChild(cards);
+
+  const topN = Math.min(40, G);
+  const bar = div();
+  p.appendChild(bar);
+  barChart(bar, {
+    labels: order.slice(0, topN).map(String),
+    values: order.slice(0, topN).map(g => v[g]),
+    refLine: m, xLabel: `逻辑专家 id（最热的 ${topN} 个，按负载排序）`,
+    yLabel: "真实路由（token-专家对）", tipLabel: "专家", height: 300, width: 1100, rotate: true,
+    color: seriesColor(0),
+    tipExtra: i => {
+      const g = order[Number(i)];
+      const hs = (r.expert_holders || [])[g] || [];
+      return `<br><span class="sm">${(v[g] / Math.max(1e-9, m)).toFixed(2)}× 均值 · 占全部 ` +
+        `${(100 * v[g] / Math.max(1e-9, total)).toFixed(3)}%` +
+        (hs.length ? ` · 持有 rank ${hs.map(j => r.rank_ids[j]).join("/")}` : "") + `</span>`;
+    },
   });
   p.appendChild(div("caption",
-    "三个 PAR 口径（逐层 / 整步 / 全程）的对照表在页面顶部的" +
-    "「三个 PAR 口径 · 结论先看这里」一块里——这块只讲总账。"));
+    "横线是均值（" + fmt(m, 0) + " 对/专家）。柱高与均值的比就是「热度倍数」：" +
+    "它同时也是 PAR 的微观来源——rank 之间的负载差，最终来自各家持有的专家热度不同。"));
+
+  /* 累计曲线：换个角度看同一份分布。均匀分布是一条对角线，越往左上拱越集中。 */
+  let acc = 0;
+  const cum = order.map((g, i) => { acc += v[g]; return [100 * (i + 1) / G, 100 * acc / Math.max(1e-9, total)]; });
+  const diag = [[0, 0], [100, 100]];
+  const cumHost = div();
+  p.appendChild(cumHost);
+  lineChart(cumHost, {
+    x: [0, 100], xLabel: "最热的 x% 专家", yLabel: "累计占全部真实路由（%）",
+    height: 280, yMin: 0, markers: false, tipDigits: 2,
+    series: [{ name: "本次", points: cum }, { name: "完全均匀", points: diag }],
+  });
+  p.appendChild(div("caption",
+    "曲线越往左上拱、离对角线越远，说明活越集中在少数专家上。" +
+    "该不该/能不能用 EPLB 搬平，看的是这条曲线的头部：把最热的那些专家复制一份，" +
+    "能削掉的尖峰就是曲线在那一小段里的斜率。"));
+
+  if (cold > 0 || r.duplicated_experts) {
+    const colds = order.slice(-Math.min(12, G)).reverse().filter(g => v[g] < 0.5 * m);
+    p.appendChild(collapsible("最冷的几个专家", table(
+      ["专家", "真实路由（token-专家对）", "相对均值（×）", "持有 rank"],
+      colds.map(g => [g, fmt(v[g], 0), (v[g] / Math.max(1e-9, m)).toFixed(3) + "×",
+        ((r.expert_holders || [])[g] || []).map(j => r.rank_ids[j]).join("/") || "—"]))));
+  }
   return p;
 }
 
+function renderWholeRun(r) {
+  const lead = view(r, ledgerPick);
+  const p = panel(`整个服务过程（全程累计） · ${ledgerLabel(ledgerPick)}`,
+    `把全部 ${r.n_steps} 步加起来看总账：每个 rank 全程一共扛了多少、最忙的比平均多多少。` +
+    "这是评估专家放置、容量规划的指标；每一步实际要等多久，看上面的逐步口径。");
+  const total = lead.rank_total.reduce((a, b) => a + (b || 0), 0);
+  const meanTotal = total / Math.max(1, r.n_ranks);
+  barChart(p, {
+    labels: r.rank_ids.map(String), values: lead.rank_total, refLine: meanTotal,
+    color: seriesColor(0), xLabel: "rank", yLabel: "token-专家对（全程累计）",
+    tipLabel: "rank", height: 250,
+    tipExtra: i => `<br><span class="sm">占全程 ` +
+      `${(100 * lead.rank_total[i] / Math.max(1e-9, total)).toFixed(2)}% · 平均 ${fmt(meanTotal)}</span>`,
+  });
+  p.appendChild(div("caption",
+    "三个 PAR 口径（逐层 / 整步 / 全程）的对照表在页面顶部的" +
+    "「三个 PAR 口径 · 结论先看这里」一块里——这块只讲总账。" +
+    (ledgerPick === "total"
+      ? " 现在看的是合计行：各柱等高是容量补齐的构造结果（每个 rank 每 (步, 层) 算的行数" +
+        "完全相同），不是均衡的证据。切到「真实行」才是负载倾斜待的地方。"
+      : "")));
+  return p;
+}
+
+/* rank × 逻辑专家：谁在算哪个专家。数据是**接收侧**的计数（scope=compute），
+   所以 pad 也在里面——它本来就是这张卡算过的行。这是唯一能看出
+   「专家的热度落在哪些卡上」的图，也是放置是否合理的直接证据。 */
 function renderRankExpert(r) {
-  const p = panel(`token 去了哪里：rank × 逻辑专家（${r.name}）`,
-    "本次运行的每一个 token-专家对，按「哪个 rank 算的」和「哪个专家收的」摆开。" +
-    "一行的合计就是该 rank 的工作量；一列的分布说明某个专家的流量是" +
-    "集中还是分摊。");
-  const values = r.rank_expert.map((row, i) => r.rank_expert_seen[i] ? row : row.map(() => null));
-  const rowTotal = r.rank_expert.map(row => row.reduce((a, b) => a + b, 0));
+  const comp = (r.compute && r.compute.rank_expert) || [];
+  const seen = (r.compute && r.compute.seen) || [];
+  const p = panel(`谁在算哪个专家：rank × 逻辑专家（${r.name}）`,
+    "每一行 = 那个 rank <b>实际算过</b>的 token-专家对（接收侧计数，含 pad 行），" +
+    "按逻辑专家摆开。一行的合计就是该 rank 的工作量；一列的分布说明这个专家的流量" +
+    "是集中在少数几张卡上、还是摊开了。");
+  const values = comp.map((row, i) => (seen[i] === false ? row.map(() => null) : row));
+  const rowTotal = comp.map(row => row.reduce((a, b) => a + b, 0));
   heatmap(p, {
     values, rowLabels: r.rank_ids.map(id => "rank " + id),
     colLabels: Array.from({ length: r.global_experts }, (_, i) => String(i)),
     rowLabel: "rank", colLabel: "逻辑专家 id",
     height: Math.max(150, 110 + r.n_ranks * 22),
     tip: (row, col, v) =>
-      `<b>rank ${r.rank_ids[row]} · 专家 ${col}</b><br>token-专家对：<b>${fmt(v)}</b><br>` +
+      `<b>rank ${r.rank_ids[row]} · 专家 ${col}</b><br>实际计算：<b>${fmt(v)}</b><br>` +
       `<span class="sm">占该 rank 全程的 ${(100 * v / Math.max(1e-9, rowTotal[row])).toFixed(2)}%</span>`
   });
+  p.appendChild(div("caption",
+    "与专家维度的两张热力图对照着看：那边的列是<b>真实热度</b>、这边的列是<b>谁在算</b>，" +
+    "两者的列合计不同（这边含 pad 行，且 pad 集中落在少数专家上）。" +
+    (r.has_compute ? "" : "这份 dump 没有计算视图，用的是发送侧计数，因此它是「谁送了」而非「谁算了」。")));
   return p;
 }
 
 function renderLayerExpert(r) {
   const grand = r.layer_expert.reduce((a, row) => a + row.reduce((x, y) => x + y, 0), 0);
-  const p = panel(`层 × 逻辑专家（${r.name}）`,
-    "同样的流量按层拆开。某层出现一条深色带，说明该层的不均衡主导了逐层 PAR；" +
-    "某层在这里是平的，就说明它对此毫无贡献。");
+  const p = panel(`层 × 逻辑专家热度（${r.name}）`,
+    "同一份热度按层拆开（每格 = 该层里该逻辑专家收到的真实路由）。" +
+    "某层出现一条深色带，说明该层的专家倾斜主导了逐层 PAR；" +
+    "某层在这里是平的，就说明它对此毫无贡献。" +
+    "层与层之间的热点往往落在<b>同一个</b>专家上——那是 gate 的偏好，不是某一层的偶然。");
   heatmap(p, {
     values: r.layer_expert,
     rowLabels: Array.from({ length: r.n_layers }, (_, i) => String(i)),
@@ -3639,7 +4133,7 @@ function renderStepProfile(r) {
     const [lo, hi] = minMax(row);
     const order = row.map((v, k) => k).sort((a, b) => row[b] - row[a]);
     plot.innerHTML = "";
-    cap.textContent = `第 ${r.steps[i]} 步的逻辑专家负载 — ${fmt(r.tokens_per_step[i], 0)} token，` +
+    cap.textContent = `第 ${r.steps[i]} 步的逻辑专家负载 — ${fmt(view(r, "real").tokens_per_step[i], 0)} token，` +
       `通信方式 ${r.methods_per_step[i] || "?"}。各柱合计为 ` +
       `${fmt(row.reduce((a, b) => a + b, 0))} 对 = token 数 × topk × ${r.n_layers} 层。`;
     barChart(plot, {
@@ -3656,8 +4150,10 @@ function renderStepProfile(r) {
 
 function renderPlacement() {
   const r = RUNS[current];
+  const comp = (r.compute && r.compute.rank_expert) || [];
   const p = panel("每个专家住在哪个 rank（由负载推断）",
-    "一格 = 一个（层，逻辑专家），颜色是「处理了该专家最多流量的那个 rank」。" +
+    "一格 = 一个（层，逻辑专家），颜色是「算了该专家最多行的那个 rank」" +
+    "（接收侧计数，含 pad 行——它就是这张卡实际干的活）。" +
     "没有冗余专家时这是一个划分——每个专家恰好落在一个 rank 上——这正是 EPLB " +
     "会去搬动的形状。它预测均衡性，而不度量均衡性。");
   p.appendChild(div("caption", `展示的是当前选中的运行（${r.name}）。同一个模型下的各次运行共用` +
@@ -3687,15 +4183,17 @@ function renderPlacement() {
     const values = rows.map(l => Array.from({ length: r.global_experts }, (_, g) => {
       let best = null, bestV = 0, total = 0;
       for (let i = 0; i < r.n_ranks; i++) {
-        const v = r.layer_expert[l][g] !== null ? r.rank_expert[i][g] : 0;
+        const v = comp[i] ? comp[i][g] : 0;
         total += v;
         if (v > bestV) { bestV = v; best = i; }
       }
       return total > 0 ? best : null;
     }));
     note.textContent = single
-      ? `第 ${rows[0]} 层：颜色是处理该专家最多流量的那个 rank。` +
-        "没有冗余时落败者恒为 0，所以它就是归属者。"
+      ? `第 ${rows[0]} 层：颜色是算了该专家最多行的那个 rank。` +
+        "没有冗余时落败者恒为 0，所以它就是归属者。" +
+        "有 pad 时这一格可能被 pad 行主导（pad 总是打在注入者自己的专家上），" +
+        "所以它读作「这层谁在扛这个专家」而不是「专家住在哪」——精确的放置见下面按层的表。"
       : "全部层。只要没有专家被搬动，每一层都会落到同一行，" +
         "这正是预期的基线。";
     heatmap(plot, {
@@ -3706,9 +4204,32 @@ function renderPlacement() {
       tip: (row, col, v) => v === null
         ? `<b>层 ${rows[row]} · 专家 ${col}</b><br><span class="sm">无流量记录</span>`
         : `<b>层 ${rows[row]} · 专家 ${col}</b><br>最忙 rank：<b>rank ${r.rank_ids[v]}</b><br>` +
-          `<span class="sm">由负载读出，不是声明的放置</span>`
+          `<span class="sm">由计算行读出，不是声明的放置</span>`
     });
     plot.appendChild(legendOf(r.rank_ids.map((id, i) => ["rank " + id, seriesColor(i)])));
+    /* 静态放置才是 EPLB 真正要搬的东西，而它只在 dump 头部：这里有就列出来，
+       与上面「由负载推断」的形状互为对照。 */
+    const hs = r.expert_holders || [];
+    const dup = r.duplicated_experts || 0;
+    if (!single && hs.length === r.global_experts) {
+      const groups = new Map();
+      hs.forEach((holders, g) => {
+        const key = holders.length ? holders.map(j => r.rank_ids[j]).join("+") : "无人持有";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(g);
+      });
+      const table = div();
+      table.appendChild(div("caption",
+        "<b>dump 头部声明的放置</b>" +
+        (dup ? "（" + dup + " 个专家被多 rank 持有，取编号最小的为归属者）" : "") +
+        "——这是 EPLB 会去改动的那个对象，与上面的热力图对照可以看出负载差有多少来自放置、" +
+        "多少来自专家本身的冷热。"));
+      table.appendChild(scrollWrap(richTable(
+        ["持有 rank", "专家数", "逻辑专家 id"],
+        Array.from(groups.entries()).sort((a, b) => b[1].length - a[1].length)
+          .map(([key, gs]) => [key, gs.length, gs.slice(0, 24).join("、") + (gs.length > 24 ? " …" : "")]))));
+      plot.appendChild(table);
+    }
   }
   sel.addEventListener("change", draw);
   draw();
@@ -3857,26 +4378,31 @@ function renderPerf() {
 }
 
 function renderComparison() {
-  const p = panel("各运行的峰均比",
+  const p = panel(`各运行的峰均比 · ${ledgerLabel(ledgerPick)}`,
     "各运行 PAR 随步的分布：左边是逐层，右边是聚合。" +
-    "箱体是中位数与四分位；须线到观测到的最小值和最大值。");
+    "箱体是中位数与四分位；须线到观测到的最小值和最大值。" +
+    "比对不同运行之前先确认它们在同一个账本上——都在「" + ledgerLabel(ledgerPick) + "」。" +
+    "合计行在不同运行之间没有可比性（它恒为 1.000），要比就看真实行。");
   const grid = div("grid2");
   for (const [key, title] of [["par_by_step", "逐层 PAR"], ["par_agg", "整步 PAR"]]) {
     const cell = div();
     cell.appendChild(heading("h3", title));
-    boxChart(cell, { labels: RUNS.map(r => r.name), boxes: RUNS.map(r => quantiles(r[key])),
+    boxChart(cell, { labels: RUNS.map(r => r.name),
+      boxes: RUNS.map(r => quantiles(view(r, ledgerPick)[key])),
       colorFor: i => seriesColor(i), yLabel: "峰值 / 均值", height: 210, yMin: 1, width: 640,
       emptyNote: "PAR 至少需要两个 rank", refLines: [{ y: 1, label: "完全均衡" }] });
     grid.appendChild(cell);
   }
   p.appendChild(grid);
   p.appendChild(collapsible("表", table(
-    ["运行", "步数", "逐层 PAR 均值（×）", "中位（×）", "最大（×）",
+    ["运行", "账本", "步数", "逐层 PAR 均值（×）", "中位（×）", "最大（×）",
       "整步 PAR 均值（×）", "最大（×）", "每步 token（个）"],
     RUNS.map(r => {
-      const a = quantiles(r.par_by_step), b = quantiles(r.par_agg);
-      return [r.name, r.n_steps, fmt(a && mean(r.par_by_step), 3), fmt(a && a.med, 3), fmt(a && a.hi, 3),
-        fmt(b && mean(r.par_agg), 3), fmt(b && b.hi, 3), fmt(mean(r.tokens_per_step), 0)];
+      const v = view(r, ledgerPick);
+      const a = quantiles(v.par_by_step), b = quantiles(v.par_agg);
+      return [r.name, ledgerLabel(ledgerPick), r.n_steps, fmt(a && mean(v.par_by_step), 3),
+        fmt(a && a.med, 3), fmt(a && a.hi, 3),
+        fmt(b && mean(v.par_agg), 3), fmt(b && b.hi, 3), fmt(mean(v.tokens_per_step), 0)];
     })), true));
   p.appendChild(div("caption",
     "PAR 是「最忙 rank ÷ 平均 rank」，均衡度 = 1/PAR，两者都是比值、<b>没有单位</b>，" +
@@ -3892,23 +4418,26 @@ function renderTables() {
     "单位：写着「token-专家对」的列都指同一件事——某个 token 在某一层被路由到某个专家一次" +
     "（逐步表与每 rank 表的各 rank 列、逐层表的「对数」列都是它）；PAR 与占比是比值，无单位。");
   for (const r of RUNS) {
+    const v = view(r, ledgerPick);
     const rows = [];
     for (let si = 0; si < r.n_steps; si++) {
-      rows.push([r.steps[si], r.methods_per_step[si] || "?", fmt(r.tokens_per_step[si], 0),
-        fmt(r.par_by_step[si], 4), fmt(r.par_agg[si], 4),
-        ...r.rank_step_load.map(col => fmt(col[si]))]);
+      rows.push([r.steps[si], r.methods_per_step[si] || "?", fmt(v.tokens_per_step[si], 0),
+        fmt(v.par_by_step[si], 4), fmt(v.par_agg[si], 4),
+        ...v.rank_step_load.map(col => fmt(col[si]))]);
     }
-    p.appendChild(collapsible(`${r.name} — 逐步`,
+    p.appendChild(collapsible(`${r.name} — 逐步（${ledgerLabel(ledgerPick)}）`,
       table(["步", "通信方式", "token（个）", "逐层 PAR（×）", "整步 PAR（×）",
         ...r.rank_ids.map(id => "rank " + id)], rows)));
   }
   for (const r of RUNS) {
-    const totals = r.rank_expert.map(row => row.reduce((a, b) => a + b, 0));
-    const grand = totals.reduce((a, b) => a + b, 0);
-    p.appendChild(collapsible(`${r.name} — 每 rank`, table(
-      ["rank", "对数（token-专家对）", "占比（%）", "步均值（token-专家对/步）", "峰值负载（token-专家对）"],
-      r.rank_ids.map((id, i) => [id, fmt(totals[i]), (100 * totals[i] / Math.max(1e-9, grand)).toFixed(2) + "%",
-        fmt(r.per_rank_mean[i]), fmt(r.per_rank_max[i])]))));
+    const t = r.ledger || {}, rows = t.per_rank || [];
+    const grand = rows.reduce((a, e) => a + (e.total || 0), 0);
+    p.appendChild(collapsible(`${r.name} — 每 rank（三本账）`, table(
+      ["rank", "送出真实路由", "注入 pad", "真实行", "pad 行", "合计行 = 真实 + pad",
+        "占比（%）", "步均值 合计行（对/步）", "峰值步 合计行（对）"],
+      rows.map((e, i) => [e.rank, fmt(e.sent), fmt(e.injected), fmt(e.real), fmt(e.pad), fmt(e.total),
+        (100 * (e.total || 0) / Math.max(1e-9, grand)).toFixed(2) + "%",
+        fmt(view(r, "total").per_rank_mean[i]), fmt(view(r, "total").per_rank_max[i])]))));
   }
   for (const r of RUNS) {
     const rows = [];
@@ -3916,11 +4445,13 @@ function renderTables() {
       const row = r.layer_expert[l];
       const total = row.reduce((a, b) => a + b, 0);
       const top = row.map((v, g) => [v, g]).sort((a, b) => b[0] - a[0]).slice(0, 3);
-      rows.push([l, fmt(total), fmt(mean(r.par_layer.map(col => col[l])), 4),
+      const layerPar = view(r, ledgerPick).par_layer || [];
+      const col = layerPar.map(stepRow => (stepRow || [])[l]).filter(x => x !== null && x !== undefined);
+      rows.push([l, fmt(total), fmt(mean(col), 4),
         top.map(([v, g]) => `${g} (${(100 * v / Math.max(1e-9, total)).toFixed(1)}%)`).join(", ")]);
     }
-    p.appendChild(collapsible(`${r.name} — 逐层`,
-      table(["层", "对数（token-专家对）", "逐层 PAR 均值（×）", "最热专家（占比）"], rows)));
+    p.appendChild(collapsible(`${r.name} — 逐层（真实路由 / 专家热度）`,
+      table(["层", "真实路由（token-专家对）", "逐层 PAR 均值（×）", "最热专家（占比）"], rows)));
   }
   return p;
 }
@@ -3943,6 +4474,8 @@ function renderRun(r) {
   host.appendChild(renderParOverSteps());
   host.appendChild(renderWholeRun(r));
   if (r.n_ranks > 1) host.appendChild(renderRankExpert(r));
+  /* 专家维度紧挨着 rank 维度：先看这批 token 把哪些专家喂饱了，再看谁在算它们。 */
+  host.appendChild(renderExpertHotness(r));
   host.appendChild(renderLayerExpert(r));
   const drill = div("grid2");
   drill.appendChild(renderExpertProfile(r));

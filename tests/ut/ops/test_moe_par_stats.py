@@ -685,25 +685,25 @@ class TestAnalyzer(TestBase):
     def setUpClass(cls):
         cls.mod = _load_analyzer()
 
-    def test_owned_mask_reads_the_map_as_a_holding(self):
+    def test_held_mask_reads_the_map_as_a_holding(self):
         # expert_map is indexed by global id and holds the local slot, so "not -1"
         # is "this rank holds it" -- the reading that survives replication.
-        mask, source = self.mod._owned_mask({"expert_map": [-1, -1, 0, 1]}, 2, 4, ep_rank=1)
+        mask, source = self.mod._held_mask({"expert_map": [-1, -1, 0, 1]}, 2, 4, ep_rank=1)
         self.assertEqual(list(mask), [False, False, True, True])
         self.assertEqual(source, self.mod._SRC_EXPERT_MAP)
 
-    def test_owned_mask_reads_replication_as_two_holders(self):
+    def test_held_mask_reads_replication_as_two_holders(self):
         # The same logical expert in two ranks' maps: a copy, not a contradiction.
-        mask, _ = self.mod._owned_mask({"expert_map": [0, -1, 0, -1]}, 2, 4, ep_rank=0)
+        mask, _ = self.mod._held_mask({"expert_map": [0, -1, 0, -1]}, 2, 4, ep_rank=0)
         self.assertEqual(list(mask), [True, False, True, False])
 
-    def test_owned_mask_falls_back_to_a_contiguous_partition(self):
-        mask, source = self.mod._owned_mask({}, 2, 8, ep_rank=2)
+    def test_held_mask_falls_back_to_a_contiguous_partition(self):
+        mask, source = self.mod._held_mask({}, 2, 8, ep_rank=2)
         self.assertEqual(list(mask), [False, False, False, False, True, True, False, False])
         self.assertEqual(source, self.mod._SRC_IDENTITY)
 
-    def test_owned_mask_covers_everything_when_the_table_is_whole(self):
-        mask, source = self.mod._owned_mask({}, 8, 8, ep_rank=0)
+    def test_held_mask_covers_everything_when_the_table_is_whole(self):
+        mask, source = self.mod._held_mask({}, 8, 8, ep_rank=0)
         self.assertTrue(mask.all())
         self.assertEqual(source, self.mod._SRC_WHOLE)
 
@@ -820,14 +820,26 @@ class TestRecorderToAnalyzerRoundTrip(MoeParStatsTestCase):
 
         # Every token-expert pair of the step must be accounted for by some rank:
         # layers x tokens x topk, and no rank may have lost its share.
-        totals = run.rank_step_load
+        totals = run.compute["real"]["rank_step_load"]
         self.assertTrue(np.isfinite(totals).all())
         np.testing.assert_allclose(totals.sum(axis=0), self.n_layers * self.tokens * self.topk)
+
+        # A local-scope dump is the degenerate case of the three ledgers: nothing on
+        # this path pads, so 真实 and 合计 are the same array and pad is a zeroed
+        # copy. The ledger the report switches between must still exist, or every
+        # panel would need a second code path for the non-MoonEP legs.
+        np.testing.assert_allclose(run.compute["total"]["rank_step_load"], totals)
+        self.assertTrue((run.compute["pad"]["rank_step_load"] == 0).all())
+        identities = run.checks["identities"]
+        self.assertEqual(identities["real_error"], 0.0, identities)
+        self.assertEqual(identities["pad_injected"], 0.0, identities)
+        self.assertFalse(identities["capacity_pinned"], "no capacity envelope without MoonEP")
 
         # PAR is only defined across ranks and must land in (1, n_ranks]. The upper
         # bound is what makes the join meaningful -- a run whose ranks were never
         # told apart would sit at exactly 1.
-        for name, values in (("per-layer", run.par_by_step), ("aggregate", run.par_agg)):
+        for name, values in (("per-layer", run.compute["real"]["par_by_step"]),
+                             ("aggregate", run.compute["real"]["par_agg"])):
             finite = values[np.isfinite(values)]
             self.assertEqual(finite.size, self.n_steps, f"{name} PAR should be defined for every step")
             self.assertGreaterEqual(finite.min(), 1.0 - 1e-9)
@@ -849,18 +861,19 @@ class TestRecorderToAnalyzerRoundTrip(MoeParStatsTestCase):
 
         run = self.mod.Run("solo", self.tmpdir).finalize()
         self.assertEqual(run.n_ranks, 1)
-        self.assertTrue(np.isnan(run.par_by_step).all())
-        self.assertTrue(np.isnan(run.par_agg).all())
+        self.assertTrue(np.isnan(run.compute["real"]["par_by_step"]).all())
+        self.assertTrue(np.isnan(run.compute["real"]["par_agg"]).all())
         self.assertTrue(any("只有一个 rank" in w for w in run.notes), run.notes)
         # The load data itself is still there; only the ratio is undefined.
-        self.assertTrue(np.isfinite(run.rank_step_load).all())
+        self.assertTrue(np.isfinite(run.compute["real"]["rank_step_load"]).all())
 
 
 class TestGlobalScopeRoundTrip(MoeParStatsTestCase):
-    """The MoonEP path end to end: each rank dumps the dispatcher's *sending-side*
-    histogram over the model's whole expert space, and the analysis sums the ranks of
-    a (step, layer) into the run's real routing before crediting it to the ranks that
-    hold those experts."""
+    """The MoonEP path end to end, in its one-view form: each rank dumps the
+    dispatcher's *sending-side* histogram over the model's whole expert space, and the
+    analysis sums the ranks of a (step, layer) into the run's real routing. What it
+    does not get from this dump is who ran those rows -- that is the second view, and
+    a dump without it says so rather than reconstructing it from placement."""
 
     n_ranks = 4
     global_experts = 8
@@ -919,7 +932,7 @@ class TestGlobalScopeRoundTrip(MoeParStatsTestCase):
                         moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
                 moe_par_stats._shutdown()
 
-    def test_round_trip_reconstructs_the_routing_and_attributes_it(self):
+    def test_the_sending_side_is_the_routing(self):
         self._write_all_ranks()
         run = self.mod.Run("moonep", self.tmpdir).finalize()
 
@@ -927,35 +940,51 @@ class TestGlobalScopeRoundTrip(MoeParStatsTestCase):
         self.assertEqual(run.row_width, self.global_experts, "a global row spans every expert")
         self.assertEqual(run.local_experts, self.local_experts, "read off the header, not the row")
         self.assertEqual(run.duplicated_experts, 0)
-        self.assertEqual(run.unowned_slots, 0)
 
+        # This dump has the routing view and nothing else, and the *expert* dimension
+        # is what that view answers: the sending side of every rank, summed, is the
+        # step's routing -- no placement, no attribution, no rank axis needed.
         check = run.checks
-        self.assertTrue(check["flat"], f"cross-rank join should reconcile: {check}")
-        self.assertEqual(check["missing_cells"], 0)
+        self.assertFalse(check["applicable"], check)
+        self.assertFalse(check["identities"]["applicable"], check["identities"])
+        # Every (rank, step, layer) cell is unread rather than zero: the rank dimension
+        # is what would fill them, and this dump does not carry it.
+        self.assertEqual(check["missing_cells"], self.n_ranks * self.n_steps * self.n_layers)
+        self.assertTrue(np.isnan(run.load_real).all())
+        self.assertIsNone(run.ledger["compute_total"])
 
-        # The join is exact and the pads are gone: every pair of the step is on
-        # some rank's experts, and none of it is padding.
-        totals = run.rank_step_load
-        np.testing.assert_allclose(totals.sum(axis=0), self.n_layers * self.tokens * self.topk)
+        # The experts' own totals are the whole reconstruction: with the pads out,
+        # nothing was counted twice and nothing was lost. The expert dimension is
+        # the one this view is for -- it needs no placement and no attribution.
+        np.testing.assert_allclose(run.layer_expert.sum(axis=1), self.tokens * self.topk * self.n_steps)
+        np.testing.assert_allclose(run.expert_total.sum(), self.n_layers * self.tokens * self.topk * self.n_steps)
         self.assertEqual(run.pad_subtracted, self.n_ranks * self.n_steps * self.n_layers * self.pads)
         self.assertEqual(run.pad_misplaced, 0)
-        # The experts' own totals are the whole reconstruction: with the pads out,
-        # nothing was counted twice and nothing was lost.
-        np.testing.assert_allclose(run.layer_expert.sum(axis=1), self.tokens * self.topk * self.n_steps)
-        # Attribution is a partition here (no replication): summing the ranks back
-        # up must return the routing itself, expert for expert.
-        np.testing.assert_allclose(run.rank_expert.sum(axis=0), run.layer_expert.sum(axis=0))
-        self.assertAlmostEqual(
-            float(run.rank_expert.sum()), self.n_layers * self.tokens * self.topk * self.n_steps
-        )
+        # The pads the injectors reported land on the injector's own first expert,
+        # which is where the split rule will look for them.
+        self.assertEqual(run.pad_experts, [rank * self.local_experts for rank in range(self.n_ranks)])
+        self.assertEqual(float(run.expert_pad_total.sum()), run.pad_subtracted)
+        self.assertTrue((run.layer_expert[:, run.pad_experts] >= 0).all())
         # A global dump subtracted its pads, so nothing about it should look padded.
         self.assertFalse(run.pad_suspect)
 
-        # Each rank's load is the slice of the global routing that its experts saw,
-        # and every rank sees both its own tokens and the others'.
-        self.assertTrue((run.rank_total > 0).all())
-        self.assertTrue(np.isfinite(run.par_agg).all())
-        self.assertGreater(run.par_agg.max(), 1.0 + 1e-6, "the routing's skew should show up")
+    def test_a_routing_only_dump_leaves_the_rank_dimension_missing(self):
+        # Sending-side rows say what was routed, not who ran it. Reconstructing the
+        # rank dimension from `expert_map` would be the owner attribution this view
+        # replaced, so the analyzer reports it as missing and says why -- a rank
+        # column of zeros would read as a measurement.
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+
+        self.assertFalse(run.has_compute)
+        self.assertTrue(np.isnan(run.load_real).all(), "no compute rows means no rank dimension")
+        self.assertTrue(np.isnan(run.compute["real"]["rank_total"]).all())
+        self.assertTrue(any("没有 scope=compute 行" in w for w in run.warnings), run.warnings)
+        # The expert dimension is unaffected: it never needed the rank axis.
+        self.assertGreater(float(run.expert_total.sum()), 0.0)
+        # The identity check needs a rank axis to sum over, and says so instead of
+        # reporting `0 != 路由总量` as a failure it cannot have measured.
+        self.assertFalse(run.checks["identities"]["applicable"], run.checks["identities"])
 
     def test_the_scope_reaches_the_report_payload(self):
         self._write_all_ranks()
@@ -1188,22 +1217,24 @@ class TestComputeNote(MoeParStatsTestCase):
         self.assertEqual(moe_par_stats._pad_expert_used, 1)
 
 
-class TestTwoViewRoundTrip(MoeParStatsTestCase):
-    """A MoonEP dispatch whose plan relocated rows, so the two views must differ.
+class TestThreeLedgerRoundTrip(MoeParStatsTestCase):
+    """A MoonEP dispatch whose plan relocated rows and dropped some: one load, three
+    ledgers, and the split has to hold all of them together.
 
     The construction is fixed by hand, which is the point: every number asserted below
-    is arithmetic on this doctring's own setup rather than a re-derivation by the code
+    is arithmetic on this docstring's own setup rather than a re-derivation by the code
     under test. Per (step, layer), over ``n_ranks = 4`` ranks holding 2 experts each:
 
-    - 128 pairs are routed, 44 of them to expert 2 -- rank 1's expert, and expert 2 is
-      the hotspot that makes the routing view skewed;
+    - 128 pairs are routed, 44 of them to expert 2 -- rank 1's expert, the hotspot;
     - 20 of expert 2's rows were pulled into prefetch slots held by ranks 0, 2 and 3
-      (7, 7 and 6 rows), so three ranks run work that expert 2's owner is credited for;
-    - 5 pairs of expert 4 (rank 2's) fell to the capacity envelope and were never run;
+      (7, 7 and 6 rows), so three ranks run rows whose expert rank 1 owns;
+    - 5 rows of expert 4 (rank 2's) fell to the capacity envelope and were never run;
     - every rank pads its own first expert (0, 2, 4, 6) with 6 pairs per layer.
 
-    So the routing view totals 24/56/24/24 per layer and the compute view 37/42/32/36:
-    relocation flattens the hotspot, which is exactly what the report is to show.
+    合计 (= 真实 + pad, what each rank ran) is therefore 37/42/32/36, and 真实 (the
+    routed rows, credited to whoever ran them) is 24/56/24/24: pad is what separates
+    the two ledgers, and the relocation is what makes the expert axis -- 44 rows of
+    expert 2, run by four different ranks -- differ from the rank axis.
     """
 
     n_ranks = 4
@@ -1277,7 +1308,7 @@ class TestTwoViewRoundTrip(MoeParStatsTestCase):
                         moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
                 moe_par_stats._shutdown()
 
-    def test_the_two_views_differ_by_exactly_the_relocated_rows(self):
+    def test_the_three_ledgers_add_up_to_the_rows_each_rank_ran(self):
         self._write_all_ranks()
         run = self.mod.Run("moonep", self.tmpdir).finalize()
 
@@ -1288,36 +1319,98 @@ class TestTwoViewRoundTrip(MoeParStatsTestCase):
         self.assertEqual(run.checks["missing_cells"], 0)
 
         sl = self.step_layers
-        # Routing view: expert 2 is rank 1's, so all 44 of it lands on rank 1 -- even
-        # the 20 rows three other ranks actually ran. This is the upper bound.
-        np.testing.assert_allclose(run.rank_total, [24 * sl, 56 * sl, 24 * sl, 24 * sl])
-        self.assertAlmostEqual(run.par_whole, 56 / 32)
-        # Compute view: whoever ran the row carries it.
-        np.testing.assert_allclose(run.compute["rank_total"], [37 * sl, 42 * sl, 32 * sl, 36 * sl])
-        self.assertAlmostEqual(run.compute["par_whole"], 42 / (147 / 4))
-        # The whole point of the pair: relocation flattened the hotspot, and only the
-        # compute view shows it.
-        self.assertLess(run.compute["par_whole"], run.par_whole)
+        # 合计: exactly the rows each rank wrote, straight off its compute row.
+        np.testing.assert_allclose(run.compute["total"]["rank_total"], [37 * sl, 42 * sl, 32 * sl, 36 * sl])
+        # 真实: the routed rows that rank ran. Rank 1's own expert was its hotspot, so
+        # it carries the whole 44 even though 20 of those rows were run elsewhere --
+        # that is the one agreed exception of the split, not an accident.
+        np.testing.assert_allclose(run.compute["real"]["rank_total"], [24 * sl, 56 * sl, 24 * sl, 24 * sl])
+        # pad 行 = 合计 - 真实, per rank, and it is allowed to be negative where a rank
+        # ran *fewer* rows of the pad expert than the routing it is credited with
+        # (rank 1: 30 rows of expert 2 in its own block, 44 credited to it).
+        np.testing.assert_allclose(run.compute["pad"]["rank_total"],
+                                   [13 * sl, -14 * sl, 8 * sl, 12 * sl])
+        # 合计 = 真实 + pad, cell by cell and in total: the three ledgers are one load
+        # split in two, not three measurements.
+        np.testing.assert_allclose(run.load_real + run.load_pad, run.load_total, equal_nan=True)
+        for ledger in ("real", "pad", "total"):
+            pack = run.compute[ledger]
+            # The whole-run figure is the per-step table summed over the steps -- the
+            # report shows both, so they have to be the same reduction.
+            np.testing.assert_allclose(pack["rank_step_load"].sum(axis=1), pack["rank_total"],
+                                       rtol=0, atol=1e-6)
 
-    def test_the_experts_own_ledger_splits_exactly(self):
+    def test_the_expert_axis_needs_no_attribution(self):
         self._write_all_ranks()
         run = self.mod.Run("moonep", self.tmpdir).finalize()
         sl = self.step_layers
 
-        # Per expert, in both views: 计算 = 真实路由 + pad - 丢弃.
+        # Expert totals are the routing itself (pads already subtracted by the
+        # recorder) -- placement, relocation and drops cannot move them.
         for expert in range(self.global_experts):
-            routed = run.layer_expert[:, expert].sum()
-            pads = run.pad_layer_expert[:, expert].sum()
-            computed = run.compute_layer_expert[:, expert].sum()
-            dropped = self.drop * sl if expert == 4 else 0
-            self.assertAlmostEqual(routed, self.routed[expert] * sl, msg=f"expert {expert} routing")
-            self.assertEqual(pads, self.pads * sl if expert % 2 == 0 else 0, f"expert {expert} pads")
-            self.assertAlmostEqual(computed, routed + pads - dropped, delta=1e-6, msg=f"expert {expert} compute")
-        # The expert dimension is where the split is exact: the pads of the hot expert
-        # are known even though three ranks ran part of it.
-        self.assertAlmostEqual(run.compute_layer_expert[:, 2].sum(), 44 * sl + self.pads * sl)
+            self.assertAlmostEqual(run.layer_expert[:, expert].sum(), self.routed[expert] * sl,
+                                   msg=f"expert {expert} routing")
+            self.assertAlmostEqual(run.pad_layer_expert[:, expert].sum(),
+                                   self.pads * sl if expert % 2 == 0 else 0, msg=f"expert {expert} pads")
+        self.assertAlmostEqual(float(run.expert_total.sum()), 128 * sl)
+        self.assertAlmostEqual(float(run.expert_pad_total.sum()), self.n_ranks * self.pads * sl)
+        self.assertEqual(run.pad_experts, [0, 2, 4, 6], "the injectors' own first experts")
 
-    def test_the_rank_ledger_is_exact_where_it_can_be_and_an_estimate_where_it_cannot(self):
+    def test_the_pad_experts_real_rows_go_to_their_first_holder(self):
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+        sl = self.step_layers
+        real = run.rank_expert_real
+
+        # Expert 2 belongs to rank 1, so the whole 44 lands there even though ranks 0,
+        # 2 and 3 ran 7, 7 and 6 of those rows -- the agreed exception, and the reason
+        # its column can read negative.
+        self.assertAlmostEqual(real[1, 2], 44 * sl)
+        self.assertEqual(float(real[[0, 2, 3], 2].sum()), 0.0)
+        # The relocation is what comes out negative: rank 1 ran 30 rows of its own
+        # expert but is credited with all 44. Cells here are (rank, step, layer), so
+        # the one rank shows up once per cell, and the pairs are the 14 rows a layer.
+        self.assertEqual(run.pad_negative_cells, sl, "one rank, in every (step, layer) cell")
+        self.assertAlmostEqual(run.pad_negative_pairs, 14 * sl)
+        # The expert-level split and the rank-level split are the same load read two
+        # ways, so summing one over the experts has to land on the other. Everywhere
+        # but the pad experts the two are the same row, which is what makes this exact.
+        np.testing.assert_allclose(run.rank_expert_real.sum(axis=1), run.load_real.sum(axis=(1, 2)))
+        np.testing.assert_allclose(run.rank_expert_pad.sum(axis=1), run.load_pad.sum(axis=(1, 2)))
+        # And they add back up to what was computed, cell by cell.
+        np.testing.assert_allclose(run.rank_expert_real + run.rank_expert_pad,
+                                   run.compute_rank_expert)
+
+    def test_the_identities_survive_a_dropped_row(self):
+        # A dropped row belongs to 真实行 or pad 行 and the dump does not say which, so
+        # neither identity can be checked to zero on its own -- but the pair is exact:
+        # their sum is the computed total, therefore `① + ② == −丢弃`, both <= 0.
+        self._write_all_ranks()
+        run = self.mod.Run("moonep", self.tmpdir).finalize()
+        idn = run.checks["identities"]
+        sl = self.step_layers
+
+        self.assertTrue(idn["applicable"])
+        self.assertAlmostEqual(idn["route_total"], 128 * sl)
+        self.assertAlmostEqual(idn["pad_injected"], self.n_ranks * self.pads * sl)
+        self.assertAlmostEqual(idn["compute_total"], 147 * sl)
+        self.assertAlmostEqual(idn["drop_total"], self.drop * sl)
+        # The 5 dropped rows were expert 4's -- a pad expert -- so ① is still exact and
+        # ② carries the whole drop.
+        self.assertEqual(idn["real_error"], 0.0)
+        self.assertAlmostEqual(idn["pad_error"], -self.drop * sl)
+        self.assertAlmostEqual(idn["error_sum"], -idn["drop_total"])
+        self.assertTrue(idn["drop_accounted"])
+        # The check reads every (rank, step, layer) cell, so this fixture is *not*
+        # capacity-pinned: its ranks run 37/42/32/36 rows a cell, which is what makes
+        # the rank ledger interesting here. A real MoonEP leg has the same number in
+        # every cell, and only then does the report call the 合计 PAR 1.000 a
+        # construction result rather than a measurement.
+        self.assertFalse(idn["capacity_pinned"])
+        self.assertEqual(idn["cell_total_min"], 32)
+        self.assertEqual(idn["cell_total_max"], 42)
+
+    def test_the_rank_ledger_keeps_the_sending_side_as_a_reference(self):
         self._write_all_ranks()
         run = self.mod.Run("moonep", self.tmpdir).finalize()
         ledger = run.ledger
@@ -1327,68 +1420,52 @@ class TestTwoViewRoundTrip(MoeParStatsTestCase):
         self.assertAlmostEqual(ledger["pad_total"], self.n_ranks * self.pads * sl)
         self.assertAlmostEqual(ledger["sent_total"], ledger["route_total"] + ledger["pad_total"])
         self.assertAlmostEqual(ledger["compute_total"], 147 * sl)
-        self.assertAlmostEqual(ledger["dropped"], self.drop * sl)
+        self.assertAlmostEqual(ledger["real_total"], 128 * sl, "no real row was dropped")
+        self.assertAlmostEqual(ledger["compute_pad_total"], ledger["pad_total"] - self.drop * sl)
 
         by_rank = {entry["rank"]: entry for entry in ledger["per_rank"]}
-        # Routing view, per rank: the pads are the rank's own, so 真实 + pad is exact.
-        np.testing.assert_allclose([by_rank[r]["route"] for r in range(4)], [24 * sl, 56 * sl, 24 * sl, 24 * sl])
-        np.testing.assert_allclose([by_rank[r]["pad"] for r in range(4)], [self.pads * sl] * 4)
-        for rank in range(4):
-            self.assertAlmostEqual(by_rank[rank]["sent"], by_rank[rank]["route"] + by_rank[rank]["pad"])
-        # Compute view, per rank: exact, because it is the row the rank wrote.
-        np.testing.assert_allclose([by_rank[r]["compute"] for r in range(4)], [37 * sl, 42 * sl, 32 * sl, 36 * sl])
+        # The sending side is the neutral reference, and here it is the boring one:
+        # every rank's own tokens routed 32 pairs a layer, so the skew the rank ledger
+        # shows comes entirely from the dispatch, not from the input. The injected
+        # pads are their own column -- each rank pads its own first expert by 6, and
+        # that is a different quantity from what it sent.
+        np.testing.assert_allclose([by_rank[r]["sent"] for r in range(4)], [32 * sl] * 4)
+        np.testing.assert_allclose([by_rank[r]["injected"] for r in range(4)], [self.pads * sl] * 4)
+        self.assertAlmostEqual(float(np.sum([by_rank[r]["sent"] for r in range(4)])), ledger["route_total"])
+        np.testing.assert_allclose([by_rank[r]["real"] for r in range(4)], [24 * sl, 56 * sl, 24 * sl, 24 * sl])
+        np.testing.assert_allclose([by_rank[r]["total"] for r in range(4)], [37 * sl, 42 * sl, 32 * sl, 36 * sl])
+        self.assertAlmostEqual(by_rank[1]["real_share"], 56 / 42, places=6)
+        self.assertTrue(all("pad_est" not in entry for entry in ledger["per_rank"]),
+                        "the pro-rata estimate went away with the owner view")
 
-        # The one thing the data cannot say: how many of expert 2's pads rank 1 ran
-        # itself (it ran 30 of the expert's 50 rows a layer) and how many came with
-        # the slots. The estimate spreads them by the share each rank ran.
-        pad_est = {rank: by_rank[rank]["pad_est"] for rank in range(4)}
-        self.assertAlmostEqual(pad_est[1], 90 * 30 / 50, places=6)
-        self.assertAlmostEqual(pad_est[0], 90 + 90 * 7 / 50, places=6)
-        self.assertAlmostEqual(pad_est[3], 90 + 90 * 6 / 50, places=6)
-        # Expert 4's pads follow the rows that were dropped, and the drops are what
-        # makes the estimate miss the pad total -- in the one direction that is safe.
-        self.assertAlmostEqual(pad_est[2], 90 * 13 / (12 + self.pads) + 90 * 7 / 50, places=6)
-        total = sum(pad_est.values())
-        self.assertLess(total, ledger["pad_total"])
-        # real_est is the computed total with the estimated padding taken back out.
-        for rank in range(4):
-            self.assertAlmostEqual(by_rank[rank]["real_est"], by_rank[rank]["compute"] - by_rank[rank]["pad_est"])
-
-    def test_the_payload_carries_both_views(self):
+    def test_the_payload_carries_the_three_ledgers(self):
         self._write_all_ranks()
         run = self.mod.Run("moonep", self.tmpdir).finalize()
         payload = self.mod.build_payload([run])["runs"][0]
 
         self.assertEqual(payload["scope"], "global+compute")
-        self.assertEqual(payload["primary"], "global")
         self.assertTrue(payload["has_compute"])
-        self.assertIsNotNone(payload["compute"])
-        self.assertEqual(len(payload["compute"]["rank_total"]), self.n_ranks)
-        self.assertEqual(np.shape(payload["compute"]["layer_expert"]), (self.n_layers, self.global_experts))
+        # Every key the report's panels read has to be here for each ledger, or the
+        # page renders blank exactly when someone switches books.
+        for ledger in ("real", "pad", "total"):
+            view = payload["compute"][ledger]
+            for key in ("par_layer", "par_by_step", "par_agg", "par_whole", "rank_total",
+                        "rank_step_load", "per_rank_mean", "per_rank_max", "tokens_per_step",
+                        "step_pairs", "load"):
+                self.assertIn(key, view, f"compute.{ledger}.{key}")
+            self.assertEqual(len(view["rank_total"]), self.n_ranks)
+            self.assertEqual(np.shape(view["par_layer"]), (self.n_steps, self.n_layers))
         self.assertEqual(np.shape(payload["compute"]["rank_expert"]), (self.n_ranks, self.global_experts))
-        # The pad ledger reaches the report on its own, so 计算 can be split there.
+        self.assertEqual(len(payload["expert_total"]), self.global_experts)
+        self.assertEqual(len(payload["expert_pad_total"]), self.global_experts)
+        self.assertEqual(payload["split"]["pad_experts"], [0, 2, 4, 6])
+        self.assertEqual(payload["checks"]["identities"]["drop_total"], self.drop * self.step_layers)
+        # The pad ledger reaches the report on its own, so 合计 can be split there.
         self.assertAlmostEqual(payload["ledger"]["compute_total"], 147 * self.step_layers)
         self.assertAlmostEqual(payload["ledger"]["pad_total"], run.pad_subtracted)
         self.assertEqual(payload["pad"]["rows"], self.n_ranks * self.step_layers)
         self.assertAlmostEqual(payload["pad"]["pairs"], run.pad_subtracted)
 
-    def test_an_old_dump_still_has_no_compute_view(self):
-        # Backwards compatibility: a dump recorded before the second view existed must
-        # read exactly as it did, with nothing invented for it.
-        layer = _fake_layer(600, self.local_experts, self.global_experts, ep_rank=0, ep_size=self.n_ranks,
-                            topk=self.topk)
-        for _ in range(4):
-            moe_par_stats.note_route_counts(torch.zeros(self.global_experts, dtype=torch.int32), 0, -1)
-            moe_par_stats.record(layer, None, 1, "MoonEPCommImpl")
-        moe_par_stats._shutdown()
-        run = self.mod.Run("old", self.tmpdir).finalize()
-        self.assertEqual(run.scope, "global")
-        self.assertFalse(run.has_compute)
-        self.assertIsNone(run.compute)
-        self.assertIsNone(run.ledger["compute_total"])
-        payload = self.mod.build_payload([run])["runs"][0]
-        self.assertFalse(payload["has_compute"])
-        self.assertIsNone(payload["compute"])
 
 
 class TestReportJavaScript(TestBase):
