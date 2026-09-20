@@ -118,7 +118,8 @@ class MoeParStatsTestCase(TestBase):
         moe_par_stats._pad_expert_used = None
         moe_par_stats._negative_cells = 0
         moe_par_stats._compute_note = None
-        moe_par_stats._buf_compute = None
+        moe_par_stats._buf_raw = None
+        moe_par_stats._raw_geo = None
         moe_par_stats._compute_ords.clear()
         moe_par_stats._compute_rows_total = 0
         moe_par_stats._compute_pairs_total = 0
@@ -1128,6 +1129,63 @@ class TestComputeNote(MoeParStatsTestCase):
         self._step([0] * 8, [0, 0, 6, 6, 0], slots=[5, 7, -1], pads=2, pad_expert=1)
         moe_par_stats._shutdown()
         self.assertEqual(self._values(self._rows("compute")[0]), [0, 0, 0, 0, 0, 6, 0, 6])
+
+    def test_two_slots_holding_one_expert_accumulate(self):
+        # A replicated expert can sit in two slots at once. Both groups' rows were
+        # computed, so the fold has to add them; an assignment would silently report
+        # only the second group and understate that expert's work.
+        self._step([0] * 8, [2, 1, 9, 5, 0], slots=[6, 6, -1])
+        moe_par_stats._shutdown()
+        self.assertEqual(self._values(self._rows("compute")[0]), [2, 1, 0, 0, 0, 0, 14, 0])
+
+    def test_the_slot_mapping_is_copied_not_held(self):
+        # The mapping is the dispatch's own plan tensor, and the next layer's plan
+        # rewrites it. The row is staged raw now and folded at the flush, so the copy
+        # has to happen while the layer is still the one being recorded.
+        mapping = torch.tensor([6], dtype=torch.int64)
+        moe_par_stats.note_route_counts(torch.tensor([0] * 8, dtype=torch.int32), 0, -1)
+        moe_par_stats.note_compute_load(
+            torch.tensor([2, 1, 9], dtype=torch.int32), 0, self.local_experts, mapping
+        )
+        moe_par_stats.record(self.layer, None, 1, "MoonEPCommImpl")
+        mapping.fill_(3)
+        moe_par_stats._shutdown()
+        self.assertEqual(self._values(self._rows("compute")[0]), [2, 1, 0, 0, 0, 0, 9, 0])
+
+    def test_a_slot_mapping_that_does_not_match_is_refused(self):
+        # Two slot groups, one mapping entry: scattering with it would drop a group's
+        # rows on the floor, so the row goes and the disagreement is said out loud.
+        self._step([0] * 8, [2, 1, 9, 5], slots=[6])
+        moe_par_stats._shutdown()
+        self.assertEqual(self._rows("compute"), [])
+        self.assertEqual(len(self._rows("global")), 1, "the routing row is unaffected")
+        self.assertIn("compute-slots", moe_par_stats._warned)
+
+    def test_a_layout_that_moves_is_refused(self):
+        # The width of a compute row is fixed by the first one recorded: every row of
+        # a dump is read as one expert space, so a layer whose plan has a different
+        # number of slot groups cannot join it.
+        self._step([0] * 8, [2, 1, 9], slots=[6])
+        self._step([0] * 8, [2, 1, 9, 5], slots=[6, 3])
+        moe_par_stats._shutdown()
+        rows = self._rows("compute")
+        self.assertEqual(len(rows), 1, "only the layout the buffer was built for")
+        self.assertEqual(self._values(rows[0]), [2, 1, 0, 0, 0, 0, 9, 0])
+        self.assertIn("compute-layout", moe_par_stats._warned)
+        self.assertEqual(len(self._rows("global")), 2, "both routing rows are there")
+
+    def test_a_multi_step_window_takes_each_steps_pads_off_its_own_row(self):
+        # The pads are subtracted at the flush, on the whole window at once, so each
+        # one has to find its own (step, layer) rather than the newest.
+        self._step([15, 8, 0, 0, 0, 0, 0, 0], [15, 8], pads=3, pad_expert=0)
+        self._step([9, 4, 0, 0, 0, 0, 0, 0], [9, 4], pads=4, pad_expert=1)
+        moe_par_stats._shutdown()
+        rows = [self._values(ln) for ln in self._rows("global")]
+        self.assertEqual(rows[0], [12, 8, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(rows[1], [9, 0, 0, 0, 0, 0, 0, 0])
+        # Each step's own row, and the pads sum to what the exit line claims.
+        self.assertEqual(moe_par_stats._pad_pairs_subtracted, 7)
+        self.assertEqual(moe_par_stats._pad_expert_used, 1)
 
 
 class TestTwoViewRoundTrip(MoeParStatsTestCase):

@@ -24,8 +24,11 @@ once per (step, layer), to a per-rank text dump.
 Nothing here communicates. The peak-to-average ratio is a cross-rank quantity, but
 the aggregation is offline in ``scripts/moe_par/analyze_moe_par.py``: each rank writes only
 its own load and the script stitches the ranks together. That keeps the hot path
-free of collectives -- one device-to-device copy per layer per step, plus a single
-``.cpu()`` per ``MOE_PAR_STATS_FLUSH_EVERY`` steps.
+free of collectives and of device arithmetic: a layer costs one device-to-device
+copy per row it writes and nothing else -- the pad subtraction and the folding of
+MoonEP's receive-side rows back onto global expert ids are host arithmetic at the
+flush -- and one ``.cpu()`` per ``MOE_PAR_STATS_FLUSH_EVERY`` steps pays for the
+whole window.
 
 Enable with ``VLLM_ASCEND_MOE_PAR_STATS=1``. The module is inert otherwise, and it
 is independent of EPLB (``dynamic_eplb`` may stay off).
@@ -90,10 +93,10 @@ experts; they differ in *what they are attributed to*:
   bound on the real imbalance.
 * the ``compute`` row is the work: which rows this rank actually ran. It is the
   dispatcher's receive-side counts (``local_counts``, including the slot groups a
-  prefetch created) folded back onto global expert ids through
-  ``note_compute_load()``, so a row kept local and computed against a prefetched
-  weight lands on the rank that computed it -- "who is busy", which is what a
-  peak-to-average ratio over ranks is supposed to measure.
+  prefetch created) handed over raw through ``note_compute_load()`` and folded back
+  onto global expert ids by the flush, so a row kept local and computed against a
+  prefetched weight lands on the rank that computed it -- "who is busy", which is
+  what a peak-to-average ratio over ranks is supposed to measure.
 
 One (token, expert) pair is counted once in each row: the expert's own column sums
 across the ranks give the load of that logical expert, and a rank's row sums give
@@ -168,6 +171,7 @@ _partial_steps = 0
 # follows it. It replaces the method's own per-expert counts (the receiving side of
 # the dispatch, which carries MoonEP's capacity pads and misses rows the dispatch
 # dropped) and carries the pad block to remove: (histogram, pad_pairs, pad_expert).
+# The block is named here and taken off at the flush, in the histogram's own space.
 _route_note: tuple[Any, int, int] | None = None
 # Ledger totals, accrued in _flush from the rows actually written rather than from
 # the notes that announced them: the note of the layer that closes a step arrives
@@ -183,11 +187,19 @@ _negative_cells = 0
 # The rows this rank is about to *compute* for the layer whose dispatch just
 # finished, announced through ``note_compute_load()`` and consumed by the
 # ``record()`` that follows it -- same one-shot contract as the routing note. The
-# payload is (counts, home_first, epn, slot_experts) and is expanded to a row of
-# global expert ids when the layer is recorded, because only then is the model's
-# expert count known: (counts, home_first, epn, slot_experts).
+# payload is (counts, home_first, epn, slot_experts), staged by _stage_compute and
+# folded onto the model's global expert ids at the flush, once the model's expert
+# count is known from the routing rows.
 _compute_note: tuple[Any, int, int, Any] | None = None
-_buf_compute: torch.Tensor | None = None  # [window, layers, global_experts] int32, on device
+# The staged compute rows, as MoonEP handed them over: [home(epn) | slots(B) |
+# mapping(B)] int32, width ``epn + 2B`` (``epn`` alone in owner mode, which has no
+# slots). Raw rather than folded because the fold is a scatter-add: on the device
+# it cost ~10 small kernels per layer, in the layer's critical path, and only the
+# MoonEP legs would have paid them -- the one asymmetry the two accounting views
+# must not introduce. ``_raw_geo`` is the (home_first, epn, B) that fixes the
+# layout; the first row sets it and a later row that disagrees is not accommodated.
+_buf_raw: torch.Tensor | None = None
+_raw_geo: tuple[int, int, int] | None = None
 _compute_ords: list[set[int]] = []  # window slot -> layer ords that have a compute row
 _compute_rows_total = 0
 _compute_pairs_total = 0
@@ -266,6 +278,12 @@ def note_compute_load(
     carries them, and the recorder writes them as their own rows (``scope=pad``) --
     so the report can split "computed" into real work and padding.
 
+    The payload is stored exactly as announced -- the slot mapping copied along with
+    the counts, for the same reason -- and folded onto global expert ids at flush
+    time, when the model's expert count is known from the routing rows. Folding
+    there is what keeps the two accounting views from costing different amounts to
+    measure: see :func:`_fold_compute_row`.
+
     Overwrites rather than accumulates, exactly like ``note_route_counts()``: the
     ``record()`` of the same layer consumes it once.
     """
@@ -331,14 +349,25 @@ def _take_compute_note() -> tuple[Any, int, int, Any] | None:
     return note
 
 
-def _expand_compute(note: tuple[Any, int, int, Any], width: int) -> torch.Tensor | None:
-    """Fold a compute note onto one row of ``width`` global expert ids, or None.
+def _stage_compute(slot: int, layer_ord: int, note: tuple[Any, int, int, Any], width: int) -> None:
+    """Stage one compute note's raw payload in the window for the flush to fold.
 
-    The home block is a contiguous global range, so it is a slice copy; the slot
-    groups are scattered (each holds whichever experts the plan pulled in), so they
-    need a scatter-add. Both happen on device -- the mapping is a tensor, and the
-    whole point of the row is to not depend on the analysis guessing the plan.
+    The payload goes in exactly as MoonEP handed it over -- the home counts, the
+    slot counts, and the slot-to-expert mapping -- so nothing is lost or guessed;
+    the fold onto global expert ids happens in :func:`_fold_compute_row`, on the
+    host, where it costs a few dozen ints of numpy instead of ~10 small kernels per
+    layer in the half of the comparison that runs MoonEP.
+
+    The mapping is copied here rather than held: it is ``plan.experts_to_copy``, the
+    dispatch's own tensor, and the next layer's plan rewrites it -- the same reason
+    the counts are snapshotted by the note.
+
+    Staging the *first* row fixes the run's layout (``_raw_geo``). A later row that
+    disagrees is rejected rather than written at a width of its own: every compute
+    row of a dump has to be read as one expert space, and a geometry that moves
+    means the two sides disagree about the model, not that a new kind of row exists.
     """
+    global _buf_raw, _raw_geo
     counts, home_first, epn, slot_experts = note
     if home_first < 0 or home_first + epn > width:
         _warn_once(
@@ -349,52 +378,113 @@ def _expand_compute(note: tuple[Any, int, int, Any], width: int) -> torch.Tensor
             home_first + epn,
             width,
         )
-        return None
-    row = torch.zeros(width, dtype=torch.int32, device=counts.device)
-    row[home_first : home_first + epn] = counts[:epn].to(torch.int32)
-    slots = counts[epn:]
-    if slot_experts is not None and slot_experts.numel() and slots.numel():
-        targets = slot_experts.reshape(-1)[: slots.numel()].to(torch.int64)
-        # A slot the plan left empty (-1) received nothing and must not land on an
-        # expert; clamping the index keeps the scatter in range and the value is
-        # zeroed with it.
-        keep = ((targets >= 0) & (targets < width)).to(torch.int32)
-        row.index_add_(0, targets.clamp_(0, width - 1), slots.to(torch.int32) * keep)
+        return
+    b = int(counts.numel()) - epn
+    mapping = None
+    if b < 0:
+        _warn_once(
+            "compute-width",
+            "[moe-par] MoonEP compute note carries %d counts for %d home experts; "
+            "skipping the compute row of that layer",
+            int(counts.numel()),
+            epn,
+        )
+        return
+    if b:
+        if slot_experts is None or int(slot_experts.numel()) != b:
+            # One count per slot group and one expert id per slot group: the two
+            # come from the same plan, so a mismatch means a scatter that would put
+            # some rows nowhere.
+            _warn_once(
+                "compute-slots",
+                "[moe-par] MoonEP compute note carries %d slot groups but %d slot experts; "
+                "skipping the compute row of that layer",
+                b,
+                0 if slot_experts is None else int(slot_experts.numel()),
+            )
+            return
+        mapping = slot_experts.reshape(-1)
+    geo = (int(home_first), int(epn), b)
+    if _raw_geo is not None and _raw_geo != geo:
+        _warn_once(
+            "compute-layout",
+            "[moe-par] MoonEP compute rows moved from layout %s to %s; "
+            "skipping the compute row of that layer",
+            _raw_geo,
+            geo,
+        )
+        return
+    want = epn + 2 * b
+    buf = _ensure_raw_buf(want, counts.device)
+    if buf.shape[2] != want or buf.shape[1] <= layer_ord:
+        _warn_once(
+            f"compute-fit:{want}",
+            "[moe-par] staged compute row is %d wide but the buffer holds %d; skipping this layer",
+            want,
+            buf.shape[2],
+        )
+        return
+    _raw_geo = geo
+    # Counts first, mapping behind them, in one write each: two device-to-device
+    # copies per layer, against the ~10 the on-device fold needed.
+    buf[slot, layer_ord, : epn + b] = counts.to(torch.int32)
+    if b:
+        buf[slot, layer_ord, epn + b :] = mapping
     _scopes.add("compute")
+    _compute_ords[slot].add(layer_ord)
+
+
+def _fold_compute_row(raw_row: np.ndarray, home_first: int, epn: int, b: int, width: int) -> np.ndarray:
+    """One staged compute row in global expert coordinates, on the host.
+
+    The home block is a contiguous global range, so it is a slice copy; the slot
+    groups are scattered -- each holds whichever experts the plan pulled in -- so
+    they need an accumulating add. Nothing here depends on the analysis guessing the
+    plan: the mapping was recorded with the row.
+    """
+    row = np.zeros(width, dtype=np.int32)
+    row[home_first : home_first + epn] = raw_row[:epn]
+    if b:
+        slots = raw_row[epn : epn + b]
+        targets = raw_row[epn + b : epn + 2 * b].astype(np.intp)
+        # A slot the plan left empty (-1) received nothing and must not land on an
+        # expert; the index is clamped in range and the value is zeroed with it.
+        # ``add.at`` is the unbuffered one: two slots may hold the same expert (a
+        # replicated one), and their counts have to accumulate, not overwrite.
+        keep = (targets >= 0) & (targets < width)
+        np.add.at(row, np.where(keep, targets, 0), np.where(keep, slots, 0))
     return row
 
 
-def _counts_from_route_note(note: tuple[Any, int, int] | None) -> tuple[torch.Tensor | None, tuple[int, int] | None]:
-    """The note's histogram with this rank's pad block removed, plus which pads.
+def _route_note_row(note: tuple[Any, int, int] | None) -> tuple[torch.Tensor | None, tuple[int, int] | None]:
+    """The note's histogram as it stands, plus the pad block this rank must remove.
 
     The histogram is this rank's exact sending side, so the pads come off where
-    they were counted and the subtraction can never leave a negative amount of real
-    traffic -- unlike a subtraction against the receiving side, whose pad rows
-    share a slot with real rows of the same expert. One device-side subtraction per
-    layer: no host sync, no collective.
+    they were counted -- in the histogram's own space, which is why the subtraction
+    can never take away another expert's real traffic, unlike one against the
+    receiving side, where a pad row shares a slot with real rows of the same expert.
 
-    Returns ``(counts, pad)`` where ``pad`` is the removed ``(expert, pairs)`` block
-    (None when the layer did not pad), so the caller can write the pads as their own
-    row instead of losing them with the subtraction.
+    The subtraction itself waits for the flush (:func:`_flush`): it is one host add
+    on a row that is already on the host, and doing it here would put a device copy
+    and a device subtraction on the layer's critical path to no purpose. The
+    histogram is *not* copied here either -- the window write a moment later is the
+    snapshot, and an extra copy would land on the engine's own ``tpe``.
+
+    Returns ``(histogram, pad)`` where ``pad`` is the ``(expert, pairs)`` block to
+    remove, or None when the layer did not pad, so the caller can write the pads as
+    their own row instead of losing them with the subtraction.
     """
-    global _pad_notes_used, _pad_notes_misplaced, _pad_expert_used
+    global _pad_notes_used, _pad_notes_misplaced
     if note is None:
         return None, None
     histogram, pairs, index = note
-    # ``copy=True`` is load-bearing, not defensive: the dispatcher's histogram is
-    # already int32, and ``to()`` returns the *same* tensor when the dtype matches,
-    # so the subtraction below would otherwise land on the engine's ``tpe``. The
-    # plan does not read it back, but the recorder must not be the thing that finds
-    # out whether that stays true.
-    counts = histogram.reshape(-1).to(torch.int32, copy=True)
+    counts = histogram.reshape(-1)
     _pad_notes_used += 1
     _scopes.add("global")
     pad = None
     if pairs:
         if 0 <= index < counts.numel():
-            counts[index] -= pairs
-            _pad_expert_used = index
-            pad = (index, int(pairs))
+            pad = (int(index), int(pairs))
         else:
             # The dispatcher names the pad expert in the histogram's own space, so
             # this means the two disagreed about the model's expert count.
@@ -428,7 +518,7 @@ def record(layer: Any, expert_tokens: torch.Tensor | None, group_list_type: int,
         if _in_profile_run():
             # Profile and dummy forwards at startup would otherwise pollute the dump.
             return
-        counts, pad = _counts_from_route_note(note)
+        counts, pad = _route_note_row(note)
         if counts is None:
             counts = _to_counts(expert_tokens, group_list_type)
             _scopes.add("local")
@@ -459,9 +549,10 @@ def _ensure_buf(counts: torch.Tensor) -> None:
     _buf = _ensure_window(_buf, int(counts.numel()), counts.device, len(_ord_of))
 
 
-def _ensure_compute_buf(row: torch.Tensor) -> None:
-    global _buf_compute
-    _buf_compute = _ensure_window(_buf_compute, int(row.numel()), row.device, len(_ord_of))
+def _ensure_raw_buf(width: int, device) -> torch.Tensor:
+    global _buf_raw
+    _buf_raw = _ensure_window(_buf_raw, width, device, len(_ord_of))
+    return _buf_raw
 
 
 def _record(
@@ -486,10 +577,6 @@ def _record(
             width,
         )
         return
-    # Expanded only now: a layer is what gives the row its expert count, and a
-    # compute note whose geometry does not fit this dump's rows is dropped with the
-    # routing row below rather than written at a width of its own.
-    compute_row = _expand_compute(compute_note, width) if compute_note is not None else None
     _valid.add(layer_ord)
     _layers[layer_ord] = layer
 
@@ -517,11 +604,12 @@ def _record(
     while len(_compute_ords) <= _slot:
         _compute_ords.append(set())
     _buf[_slot, layer_ord, :] = counts.to(torch.int32)
-    if compute_row is not None:
-        _ensure_compute_buf(compute_row)
-        if _buf_compute.shape[2] == compute_row.numel() and _buf_compute.shape[1] > layer_ord:
-            _buf_compute[_slot, layer_ord, :] = compute_row
-            _compute_ords[_slot].add(layer_ord)
+    if compute_note is not None:
+        # Staged raw, folded at the flush. The routing row's width is the width the
+        # fold targets -- a layer is what gives the row its expert count -- and a
+        # compute note whose geometry does not fit it is dropped here rather than
+        # written at a width of its own.
+        _stage_compute(_slot, layer_ord, compute_note, width)
     if pad is not None:
         _pad_rows.append((_slot, layer_ord, int(pad[0]), int(pad[1])))
 
@@ -605,15 +693,28 @@ def _rewind_tail(out) -> None:
 
 
 def _flush() -> None:
-    """Copy the completed steps to host and append them to this rank's dump."""
+    """Copy the completed steps to host, fold the compute rows and append them."""
     global _slot, _step_base, _meta_written, _compute_rows_total, _compute_pairs_total, _pad_rows_total
-    global _pad_pairs_subtracted, _route_pairs_total
+    global _pad_pairs_subtracted, _route_pairs_total, _pad_expert_used
     if _slot == 0 or _buf is None:
         return
-    host = _clamp_negatives(_buf[:_slot].cpu().numpy())
-    compute = None
-    if _buf_compute is not None and any(_compute_ords):
-        compute = _clamp_negatives(_buf_compute[:_slot].cpu().numpy())
+    width = int(_buf.shape[2])
+    # The step's one device-to-host wait, and everything below reads these copies.
+    # The staged compute rows come over on the same sync: issued after the routing
+    # window, whose copy has already drained the stream, the second one transfers
+    # and returns without waiting on anything -- which is why the two windows do not
+    # have to share an allocation to cost one wait.
+    host = _buf[:_slot].cpu().numpy()
+    raw = _buf_raw[:_slot].cpu().numpy() if _buf_raw is not None else None
+    # Pads come off here, where they were counted: the routing note named the expert
+    # and the amount in the histogram's own space, so no other expert's traffic is
+    # touched. Doing it in the layer instead would be a device copy, a device
+    # subtraction and a device-to-device write back, all inside the critical path.
+    for slot, layer_ord, expert, pairs in _pad_rows:
+        if slot < _slot and 0 <= expert < width:
+            host[slot, layer_ord, expert] -= pairs
+            _pad_expert_used = expert
+    host = _clamp_negatives(host)
     out = _open()
     if not _meta_written:
         _write_meta(out)
@@ -635,9 +736,10 @@ def _flush() -> None:
                 f"step={step} layer={layer_ord} method={method}{mark} "
                 f"counts=[{','.join(str(v) for v in row)}]\n"
             )
-        if compute is not None:
+        if raw is not None and _raw_geo is not None:
+            home_first, epn, b = _raw_geo
             for layer_ord in sorted(_compute_ords[i]):
-                row = compute[i, layer_ord].tolist()
+                row = _clamp_negatives(_fold_compute_row(raw[i, layer_ord], home_first, epn, b, width)).tolist()
                 out.write(
                     f"step={step} layer={layer_ord} method={method} scope=compute "
                     f"counts=[{','.join(str(v) for v in row)}]\n"
