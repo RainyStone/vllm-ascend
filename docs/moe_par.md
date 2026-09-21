@@ -629,7 +629,7 @@ worker 是它们的子进程，一起被 SIGKILL 掉——不是 fork 的 `os._e
 所以 worker 里所有 `atexit` 打点（`[moonep-balance]`、`[moonep-stats]`、`[moonep-tstats]`）在服务化
 这条腿上**一行都不会出现**。两个对策：
 
-- dump 侧：`--flush-every 1`（工作区脚本 `start_service_mode.sh` 的负载腿已默认设成 1）。
+- dump 侧：`--flush-every 1`（本仓脚本 `scripts/dsv4flash_service/start_service_mode.sh` 的负载腿已默认设成 1）。
   每步落盘后，SIGKILL 丢掉的就从「不足一整批」缩到「**最后那一步**」——它是唯一还没收尾的一步，
   换谁来杀都留不下。
 - 账目侧：`MOONEP_BALANCE_STATS_EVERY=<层数>` 让账目行不再只在退出时打，而是**每 N 层打一行累计账**
