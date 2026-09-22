@@ -8,13 +8,15 @@
 # 三条腿的差异只有「模式变量」那一段（3 个 MOONEP* 环境变量 + enable_moonep），
 # 其余环境变量与命令行参数全部共用。日志按模式分开：start_service_<mode>.log。
 #
-# 四个可选的采集/账目开关，**全部默认关闭**：不加前缀 = 不采集、不加账、服务行为与以前完全一样。
+# 五个可选开关，**全部默认关闭**：不加前缀 = 不采集、不加账、服务行为与以前完全一样。
 # 要采什么就显式给什么，都用「命令前缀」：
 #   PROFILE=1     bash start_service_mode.sh slot   # 开 profiling 接口，见「profiling」
 #   MOE_PAR=1     bash start_service_mode.sh slot   # 采 MoE 负载（PAR），见「MoE 负载采集」
 #   BALANCE=1     bash start_service_mode.sh slot   # 加账目行（[moe-par-ledger] / [moonep-balance]）
 #   SLOT_STATS=1  bash start_service_mode.sh slot   # slot 的每层 slot 计数（默认关，见「模式变量」）
+#   SIM_ROUTE=... bash start_service_mode.sh slot   # 注入指定的专家选择分布，见「仿真路由」
 #   MOE_PAR=1 PROFILE=1 BALANCE=1 bash start_service_mode.sh slot
+#   MOE_PAR=1 SIM_ROUTE=@/tmp/sim_skew.txt bash start_service_mode.sh off   # 倾斜 + 采负载对账
 # 坑：bash 分不出「命令前缀」和「export」——两种写法在脚本里看到的环境一模一样，所以
 # export 过的 MOE_PAR=1 会一直生效，直到你自己 unset。别 export，用完即弃；
 # 要长期改就直接改本脚本（脚本不读外部同名变量来开关）。下面的路径变量（OUT_DIR 等）同理：
@@ -274,6 +276,49 @@ if [ "$MOE_PAR" = 1 ]; then
   export VLLM_ASCEND_MOE_PAR_FLUSH_EVERY=1               # 每步落盘，见注意 2
 fi
 
+# -------------------------------------------------------- 仿真路由 -- #
+# 默认关：SIM_ROUTE=<档案> bash start_service_mode.sh <mode> 才注入（命令前缀，别 export——见文件头）。
+# 用一份**指定的**专家选择分布替换 router 的输出，用来把「router 选专家的倾斜」变成自变量，
+# 再去量它下游的 rank 级计算与通信（因变量）。实现见 ops/fused_moe/moe_sim_route.py。
+# 三种写法（含 `:` 就是稀疏式，未列出的专家均分剩余）。**E / K / 层数都从模型现取**，
+# 下面括号里的数字都是本 checkpoint（E=256, K=6, 43 层）的值，换模型自己换算：
+#   SIM_ROUTE=@/tmp/sim_skew.txt        # 文件里是列表，推荐：E=256 手写列表不现实
+#   SIM_ROUTE=0:16,7:10                 # 稀疏：专家 0 占 16%、专家 7 占 10%，其余均分
+#   SIM_ROUTE=1.5,3.2,...               # 完整列表，E 项（本模型 256），和必须等于 100
+# **硬上限 max(share) <= 100/top_k（本模型 K=6 → 16.67%；K=8 则是 12.5%）**：真实 topk 每个
+# token 的 K 个专家互异，任何专家最多被 T 个 token 选中。超过这个值直接报错退出，不是告警。
+# 该上限只由 K 决定，与 E 无关——换 E 不用改档案。
+# 日志：T 变化时打一张 E 行的完整表（req% / 期望条数 / 实际条数 / 偏差 + home-rank rows），
+# 之后复用同一份分配（按 T 缓存，层间与同长步之间完全一致），每 SIM_ROUTE_EVERY 次调用打一行
+# 复用确认。SUM_act 必须等于 T×K；max|dev| 应 <= 1（最大余数法保证）。
+# home-rank rows 是**预测的** rank 级行数分布，正是要测的因变量，但假定无 EPLB（恒等 log2phy）。
+# 真值拿 MOE_PAR=1 的 dump 对：off 腿的 counts_scope=local 行是 E/R 项（本模型 32），
+# sum 即该 rank 实际计算的行数。
+# home-rank rows 只在 E 能被 R 整除时打得出来（本模型 E=256：R=8 → 32/rank）。E % R != 0 时
+# 那一行会明说「不可预测」而不是消失。
+# 注意 owner 腿的 rank 负载会被 planning 核的 rebalancer 抹平，看真实 rank 级计算请用 off/slot 腿。
+unset VLLM_ASCEND_MOE_SIM_ROUTE VLLM_ASCEND_MOE_SIM_ROUTE_SEED \
+      VLLM_ASCEND_MOE_SIM_ROUTE_EVERY VLLM_ASCEND_MOE_SIM_ROUTE_TABLE
+if [ -n "${SIM_ROUTE:-}" ]; then
+  # 档案要在 worker 那边读（每个 rank 各自解析一次），所以文件不存在就地失败，
+  # 别等模型加载完 5 分钟才在 worker 里报 FileNotFoundError。
+  case "$SIM_ROUTE" in
+    @*) SPEC_FILE="${SIM_ROUTE#@}"
+        if [ ! -r "$SPEC_FILE" ]; then
+          echo "[仿真路由] 档案文件不可读：$SPEC_FILE（SIM_ROUTE=$SIM_ROUTE）" >&2
+          echo "    用绝对路径；worker 是 spawn 出来的，cwd 不可靠。" >&2
+          exit 2
+        fi ;;
+  esac
+  export VLLM_ASCEND_MOE_SIM_ROUTE="$SIM_ROUTE"
+  export VLLM_ASCEND_MOE_SIM_ROUTE_SEED="${SIM_ROUTE_SEED:-0}"
+  export VLLM_ASCEND_MOE_SIM_ROUTE_EVERY="${SIM_ROUTE_EVERY:-43}"   # 43 = MoE 层数 = 一步一次
+  export VLLM_ASCEND_MOE_SIM_ROUTE_TABLE="${SIM_ROUTE_TABLE:-1}"
+  SIM_ROUTE_DESC="on（SIM_ROUTE=$SIM_ROUTE  seed=${VLLM_ASCEND_MOE_SIM_ROUTE_SEED}  EVERY=${VLLM_ASCEND_MOE_SIM_ROUTE_EVERY}  TABLE=${VLLM_ASCEND_MOE_SIM_ROUTE_TABLE}；专家选择被整体替换，看 [sim-route rN]）"
+else
+  SIM_ROUTE_DESC="off（默认：走真实 router，行为与改动前完全一致）"
+fi
+
 # --------------------------------------------------------- profiling -- #
 # 默认关：PROFILE=1 bash start_service_mode.sh <mode> 才开（命令前缀，别 export——见文件头）。
 # 这里只加命令行参数，不带任何 env 开关——这套 vLLM 里 profiling 只能由 --profiler-config
@@ -370,6 +415,7 @@ cat <<EOF | tee -a "$LOG_FILE"
              PROFILE=${PROFILE:-0} → $PROFILE_DIR（= OUT_DIR/profiling）
  负载计数    BALANCE=$BALANCE   MOONEP_BALANCE_STATS=${MOONEP_BALANCE_STATS:-未设}   EVERY=${MOONEP_BALANCE_STATS_EVERY:-0} —— $BALANCE_DESC
              SLOT_STATS=$SLOT_STATS —— $SLOT_STATS_DESC
+ 仿真路由    SIM_ROUTE=${SIM_ROUTE:-未设} —— $SIM_ROUTE_DESC
  服务        http://$HOST:$PORT   api-server-count=$API_SERVER_COUNT   dp=$DP tp=$TP ep=on   served-model-name=$SERVED_NAME
  模型        $MODEL
  负载口径    max-num-seqs=$MAX_NUM_SEQS   max-num-batched-tokens=$BATCHED_TOKENS   max-model-len=$MAX_MODEL_LEN   gpu-mem-util=$GPU_UTIL   chunked-prefill=on
