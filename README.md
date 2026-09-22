@@ -217,6 +217,23 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
 | `ASCEND_MOONEP_TIME_STATS=1` | 库内分段计时（barrier/planning 核/dispatch 核/边界拷贝，`[moonep-lib-tstats]`） |
 | `MOONEP_CAP_TRACE=1` | 打印每步选中的 dispatch 容量 |
+| `VLLM_ASCEND_MOE_SIM_ROUTE=<档案>` | **仿真路由注入**：用一份指定的专家选择分布替换 router 的输出（[moe_sim_route.py](vllm_ascend/ops/fused_moe/moe_sim_route.py)）。三种写法：`@/abs/file`、稀疏 `0:16,7:10`（未列出者均分剩余）、完整列表。占比之和须为 100。**E/K/层数均从模型现取**（本 checkpoint：E=256, K=6, 43 层），编号是逻辑专家号 `[0,E)` |
+| `VLLM_ASCEND_MOE_SIM_ROUTE_SEED` | 分配随机种子（默认 0）；同 seed + 同 T → 逐位一致，便于跨腿对比 |
+| `VLLM_ASCEND_MOE_SIM_ROUTE_EVERY` | 每 N 次调用打一行复用确认（默认 43 = 本模型一步的 MoE 层数；换层数不同的模型要改） |
+| `VLLM_ASCEND_MOE_SIM_ROUTE_TABLE` | 置 0 时只打 per-rank 汇总行，不打逐专家的全表（本模型 256 行） |
+
+上表 `SIM_ROUTE` 的硬上限是 **`max(share) ≤ 100/top_k`**（本模型 K=6 → 16.67%；K=8 → 12.5%）：
+真实 topk 每个 token 的 K 个专家互异，任何专家最多被 T 个 token 选中。**该上限只由 K 决定，与 E
+无关**——`0:16,...` 这种档案在 E=256 和 E=384 上都合法，不用改。超过直接报错退出，不是告警。
+
+仿真路由的日志读法：T 变化时一张全表（`req%` / 期望条数 / 实际条数 / 偏差），随后同 T 复用同一份
+分配（层间与同长步之间逐位一致），每 `_EVERY` 次调用一行复用确认。**`SUM_act` 必须等于 `T×top_k`**，
+`max|dev|` 应 `<= 1`（最大余数法保证）。最后一行 `home-rank rows` 是**预测的** rank 级行数分布——
+即路由倾斜作用到 rank 级计算上的那一项，但假定无 EPLB（恒等 `log2phy`）且专家按 `E/R` 连续分片；
+有 EPLB 时它失效，以 dump 为准。`E` 不被 `R` 整除时该行会明说「不可预测」而不是消失（真实 EP
+布局不应走到这里）。
+真值对账用 `MOE_PAR=1` 的 dump：off 腿 `counts_scope=local` 的行按本地专家槽索引（`E/R` 项，
+本模型 32），`sum` 即该 rank 实际计算的行数，逐 rank 与 `home-rank rows[r]` 对比即可。
 
 ## 限制与已知问题（重要）
 
@@ -246,6 +263,15 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 3. **planning 要求 B == E/R**；GPU 原版“推理用小 B”在 Ascend 移植库上暂不支持。
 4. **超容量/倾斜**：owner 模式在极端路由倾斜下可能丢行（见模块注释的容量包络）；
    计划中增加 `plan.remote_stats` 保护（越界自动回退原生 comm）。
+   **用仿真路由（`VLLM_ASCEND_MOE_SIM_ROUTE`）造倾斜时尤其要注意**：owner 模式下规划核的
+   rebalancer 会把 rank 级负载抹平，dispatch 核再把超出该 rank 容量 `S×top_k` 的行**静默丢弃**——
+   于是「路由倾斜 → rank 级计算」这条链在 owner 腿上是断的（rank 级计算反映的是再平衡结果，
+   不是路由本身）。**要测路由倾斜对 rank 级计算的直接影响，用 off 腿或 slot 腿**：off 腿
+   AlltoAll 直测接收行数；slot 腿行留本地，rank 负载与路由解耦。
+   丢行本身**不打日志**（comm 路径静默，见上），只有账目行里的 `dropped=` 记着数——
+   `BALANCE=1 MOE_PAR=1` 起 owner 腿，`grep -c 'dropped=' start_service_owner.log`：**0 = 没丢行**，
+   ≥1 即越过包线（该项为零时根本不打印，所以 grep 不到就是没丢）。
+   仿真路由的 `home-rank rows` 是预测的**分发前**分布，超没超包线要靠这个 `dropped=` 判。
 5. 量化只支持 W4A8MXFP（DeepSeek-V4 布局）且 slot 模式要求 **EP≥8**（显存账见
    [moonep_slot_quant.md](docs/moonep_slot_quant.md) §3）；无 dynamic EPLB/mix、tp=1..N 均可
    （EP 跨 TP 组）；需 `--enforce-eager`（MoonEP 集体内核不能进 CUDA 图）。
