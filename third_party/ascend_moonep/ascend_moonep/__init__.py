@@ -170,13 +170,12 @@ def __getattr__(name):
         return _BUF_API_CACHE[name]
     raise AttributeError(f"module 'ascend_moonep' has no attribute {name!r}")
 
-from .launchers import launch_grad_reduce, launch_prefetch
+from .launchers import launch_prefetch
 
 __all__ = [
     "ShmemInstance",
     "AllGatherMatmul",
     "GradReduce",
-    "launch_grad_reduce",
     "Buffer",
     "MoonEPCommPlan",
     "ShmemRuntime",

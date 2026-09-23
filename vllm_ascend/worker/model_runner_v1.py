@@ -3841,9 +3841,15 @@ class NPUModelRunner(GPUModelRunner):
         maybe_install_early_router_probe(self.model)
         # MOONEP_EARLY_PREFETCH=1 (no-op otherwise): predict the plan during
         # attention and prefetch the mirrored experts on a side stream
-        from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_early_prefetch
+        from vllm_ascend.ops.fused_moe.moonep_balance import (
+            maybe_install_early_prefetch,
+            maybe_install_pf_stream,
+        )
 
         maybe_install_early_prefetch(self.model)
+        # MOONEP_PF_STREAM=1 (no-op otherwise): prefetch 发到 side stream，
+        # 与同层的 dispatch 并行，GEMM 前才 join
+        maybe_install_pf_stream(self.model)
 
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:

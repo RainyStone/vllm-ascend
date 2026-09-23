@@ -1,6 +1,7 @@
 # moonep_dev — load-balance / capacity measurements (dev branch)
 
-Tooling behind `docs/dev_results_2026-09-16.md`. Everything here is
+Tooling behind `docs/dev_results_2026-09-16.md` and `docs/dev_results_2026-09-20.md`
+(topology: why MoonEP trails all-gather). Everything here is
 harness-only: nothing in this directory ships with the model path.
 
 ## What each file is
@@ -16,6 +17,13 @@ harness-only: nothing in this directory ships with the model path.
 | `probe_lazy_buffer.py` | checks whether a `Buffer` can be created after `ShmemRuntime.init_with_buffer` (it cannot: `cannot register a symmetric descriptor after buffer-backed shmem initialization`) |
 | `analyze_skew_time.py` | per-layer group skew vs synchronised MLP time correlation (decode plateau only) |
 | `cmp_tokids.py` | compares `DUMP_TOKENS` output of two legs (identical / first divergence) |
+| `serve_moonep.sh` | online-serving leg: starts `vllm serve` and **asserts the MoE route from runtime evidence** (greps `[moonep-init r<N>]` and requires it on all DP ranks) — `MOONEP=1` is inert in vllm_ascend, so a typo'd flag otherwise silently measures the SoC default. `MAXLEN`/`MAXSEQS`/`ROUTES`/`DETAIL` are env knobs. |
+| `serve_probe.py` | the online probe: TTFT, engine steps (`vllm:iteration_tokens_total_count` delta), **per-layer** load skew from `routed_experts`, and connection warm-up. See §10 of `docs/dev_results_2026-09-20.md` for the accounting traps. |
+| `make_long_prompts.py` | stitches GSM8K questions into prompts of an **exact** token length (binary-searches the prefix, because decode→encode is not a round trip). |
+| `why_steps.py` | samples `/metrics` during one burst to explain why `steps` exceeds DP. |
+| `run_ladder_4card.sh` | ABCD TTFT ladder **on one UB cluster (cards 4-7)**: the 8-card ladder crosses a PCIe hop that all-gather's ring never uses, so this isolates topology from implementation |
+| `analyze_ladder4.py` | TTFT + per-layer communication time for the 4-card ladder (also documents the `disp_buf` and `no-tstats-for-ag` accounting traps) |
+| `peer_sweep.py` | per-peer SHMEM MTE put bandwidth, one peer at a time — this is what found the UB/PCIe split. **Needs `launch_put_bench`, a discarded kernel; see its docstring** |
 | `run_*.sh` | example invocations: plan dump, lazy-buffer probe, GSM8K MC2-vs-slot, release A/B, skew-time |
 
 ## How to run
@@ -35,8 +43,6 @@ VISIBLE=0,1,2,3,4,5,6,7 MOONEP_DEV_BASE=4 bash run_gsm8k_imbalance.sh
 
 | env | what it records |
 |---|---|
-| `MOE_ROW_STATS=1` | per-layer local-expert `group_list`: row sum, max group, non-zero group count → `/tmp/moe_rows_<TAG>_rank<r>.json`. Device-side accumulation, no per-layer sync. |
-| `MOE_ROW_TIMING=1` | additionally records each layer's *synchronised* MLP wall time (measurement-only: it serialises the step) → `/tmp/moe_rowtimes_<TAG>.json` |
 | `DUMP_TOKENS=1` | greedy token ids per prompt → `/tmp/bench_tokids_<TAG>_rank<r>.json` |
 
 ## Traps this tooling already ran into (don't repeat them)

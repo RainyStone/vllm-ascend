@@ -410,6 +410,26 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int) -> torch.Ten
 # speculative issue on the main stream (no overlap, for A/B).
 _EARLY_PF = os.environ.get("MOONEP_EARLY_PREFETCH", "0") == "1"
 _EARLY_PF_DEV = os.environ.get("MOONEP_EARLY_PF_DEV", "1") == "1"
+
+# MOONEP_PF_STREAM=1: 把 prefetch 发到 side stream，与同层的 dispatch 并行。
+# 与 EARLY_PREFETCH 的区别：那个用「上一层的 plan 行」当预测、在 attention 前
+# 发；这个用本层的**真实 plan**，在 planning 之后、dispatch 之前发 —— 不需要
+# 预测，也不改变搬的东西。
+#
+# 必须配套 ASCEND_MOONEP_PREFETCH_RELAXED=1：prefetch 的两个跨卡 barrier 要
+# 摘掉。不摘的话它们会跟着跑到 side stream 上，各 rank 的栅栏代际错开 → 死锁
+# （prefetch.cpp:101 的注释写明了 RELAXED 就是为 side-stream 发射准备的）。
+# MOONEP_PF_STREAM:
+#   0 = 关（默认）
+#   1 = 只走事件管道：钩子里 record_event + wait_event + 进出 stream 上下文都做，
+#       但 prefetch 仍留在主 stream —— 输出正确，用来单独量「事件管道的开销」
+#   2 = 全量：prefetch 真正发到 side stream
+_PF_STREAM = int(os.environ.get("MOONEP_PF_STREAM", "0"))
+_PF_STREAMED = [0]
+
+# 与 moonep_comm._ALLOW_CAPTURE 同义（各自定义以避免模块级循环 import）。
+# MOONEP_ALLOW_CAPTURE=1 放开 run_slot_forward 的捕获守卫，供可行性实验用。
+_ALLOW_CAPTURE = os.environ.get("MOONEP_ALLOW_CAPTURE", "0") == "1"
 _PF: dict = {"pred": {}, "stream": None, "ev_spec": None, "ev_main": None, "main": None,
              "done": False, "fail": 0, "spec": 0, "install_logged": False,
              # predictor state: the *previous step's* real plan row per layer.
@@ -564,6 +584,84 @@ def maybe_install_early_prefetch(model) -> None:
         print(f"[early-pf] install failed: {exc}", flush=True)
 
 
+def maybe_install_pf_stream(model) -> None:
+    """MOONEP_PF_STREAM=1: 让 after_planning 钩子知道"当前是哪一层"。
+
+    钩子在库的 `_run_dispatch_on_current_stream` 里触发（planning 之后、
+    dispatch 之前），需要拿到本层的 `_LayerWeightState` 才能发 prefetch。
+    层的识别方式与 early-prefetch 一致：用 `experts.w13_weight` 的 id 当 key，
+    由 decoder 层的 forward pre-hook 在每层开始时记下。
+    """
+    if not _PF_STREAM or _PF["done"]:
+        return
+    try:
+        from vllm_ascend.ops.fused_moe import moonep_comm as mc
+
+        layers = mc._early_layers(model)
+        if not layers:
+            print("[pf-stream] no decoder layers found; disabled", flush=True)
+            return
+
+        def _pre(blk, args, kwargs):
+            try:
+                experts = getattr(getattr(blk, "mlp", None), "experts", None)
+                if experts is not None:
+                    _PF["cur_key"] = id(experts.w13_weight)
+            except Exception:  # noqa: BLE001 - 探测逻辑绝不能打断推理
+                pass
+            return None
+
+        for blk in layers:
+            blk.register_forward_pre_hook(_pre, with_kwargs=True)
+        _PF["done"] = True
+        print(f"[pf-stream] pre-hook installed on {len(layers)} decoder layers",
+              flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pf-stream] install failed: {exc}", flush=True)
+
+
+def _pf_stream_hook(buffer):
+    """装在库的 `after_planning_hook` 上的回调：在 side stream 上发 prefetch。
+
+    为什么必须挂在这里：prefetch 要读 planning 产出的 `experts_to_copy`，又希望
+    和随后的 dispatch 并行。如果在 `buffer.dispatch()` 返回之后（`run_slot_forward`
+    里）才 record_event，那事件已经把 dispatch 也圈进去了，side stream 会一直等
+    dispatch 完成 —— 没有重叠。只有在本钩子这个时间点，主 stream 上排在最前面的
+    才是 planning。
+    """
+    def _after(plan):
+        try:
+            key = _PF.get("cur_key")
+            state = _pf_state_for(key) if key is not None else None
+            if state is None:      # 本层第一次跑，还没建权重状态
+                return
+            import torch_npu
+
+            main = torch_npu.npu.current_stream()
+            if _PF_STREAM < 2:
+                # 诊断档：只走一遍事件管道，prefetch 留给 run_slot_forward 在主
+                # stream 上发。输出与档 0 完全一致，差值就是管道本身的开销。
+                main.record_event()
+                _PF_STREAMED[0] += 1
+                return
+            if _PF["stream"] is None:
+                _PF["stream"] = torch_npu.npu.Stream()
+            side = _PF["stream"]
+            side.wait_event(main.record_event())
+            with torch_npu.npu.stream(side):
+                _pf_prefetch(buffer, state, plan)
+            # 单槽握手：层是严格串行的，所以一个 slot 就够，run_slot_forward
+            # 取走之后下一层才会再写。
+            _PF["pf_ev"] = side.record_event()
+            _PF_STREAMED[0] += 1
+        except Exception as exc:  # noqa: BLE001 - 绝不能让探测逻辑打断推理
+            _PF["fail"] += 1
+            if _PF["fail"] in (1, 50):
+                print(f"[pf-stream] issue failed: {exc}", flush=True)
+
+    return _after
+
+
 # ---------------------------------------------------------------------------
 # Runtime forward: dispatch -> prefetch -> grouped GEMM on [epn+B] aliases
 # ---------------------------------------------------------------------------
@@ -585,8 +683,12 @@ def run_slot_forward(
         capturing = _EXTRA_CTX.capturing
     except Exception:
         capturing = False  # outside an engine forward context (harness use)
-    if capturing:
-        raise RuntimeError("MoonEP slot mode cannot run inside captured graphs.")
+    if capturing and not _ALLOW_CAPTURE:
+        raise RuntimeError(
+            "MoonEP slot mode cannot run inside captured graphs. "
+            "(MOONEP_ALLOW_CAPTURE=1 lifts this guard for the capture feasibility study; "
+            "it is a deliberate override, not a claim that capture works.)"
+        )
     plan_use = plan
     if _EARLY_PF:
         try:
@@ -665,8 +767,20 @@ def run_slot_forward(
                 print(f"[slot-cache] skipped: {exc}", flush=True)
             cache_plan = None
     _t_pf = time.perf_counter() if os.environ.get("MOONEP_TIME_STATS", "0") == "1" else None
+    pf_ev = None
+    if _PF_STREAM:
+        # 幂等安装：挂到本 buffer 的 ctx 上。第一次走到的 buffer 要从下一层
+        # 才生效（钩子必须在 dispatch 之前就位），首层退回原路径，无副作用。
+        _pf_ctx = buffer._require_ctx()
+        if _pf_ctx.get('after_planning_hook') is None:
+            _pf_ctx['after_planning_hook'] = _pf_stream_hook(buffer)
+        pf_ev = _PF.pop("pf_ev", None)
     if skip_prefetch:
         _PF_SKIPPED[0] += 1
+    elif pf_ev is not None:
+        # 本层的 prefetch 已由 after_planning 钩子发到 side stream 上，与
+        # dispatch 并行了；这里不重复发，只把 event 留到 GEMM 前 join。
+        pass
     else:
         buffer.prefetch_projections(
             plan=plan_use,
@@ -681,6 +795,14 @@ def run_slot_forward(
         acc = _MOONEP_TSTATS.setdefault("prefetch", [0.0, 0])
         acc[0] += time.perf_counter() - _t_pf
         acc[1] += 1
+    if pf_ev is not None:
+        # MOONEP_PF_STREAM：prefetch 在 side stream 上跑，主 stream 一路走到
+        # dispatch 结束都不用等它。但下面 cache 回填和 GEMM 都要读 slot，所以在
+        # 这里 join。此时 dispatch 的 host 时间和设备时间都已经过去，prefetch
+        # 的 279us 被盖掉了。
+        import torch_npu as _tn_pf
+
+        _tn_pf.npu.current_stream().wait_event(pf_ev)
     if cache_plan is not None:
         # stream-ordered after the prefetch: hits come from this layer's cache
         # (no remote GET), the fetched experts refill the cache for later steps

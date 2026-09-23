@@ -343,6 +343,12 @@ class SegmentedVAMapping:
 # 需要进对称空间的 VMM 区间（Buffer 通信 chunk + op workspace + 框架 full 张量）。
 _VMM_REGISTRY: list[VmmAllocation] = []
 
+# ``create_sym_tensor_from_source`` 的结果缓存，键见该函数。值里同时存了
+# allocation 引用，命中时用它做一次 ``_destroyed`` 存活检查 —— 这样既省掉
+# 线性扫描 + 两次 C++ 调用，又不会把已销毁 allocation 的悬垂 view 交出去。
+# 随 ``reset_symmetric_descriptors()`` 一起清空。
+_SYM_TENSOR_CACHE: dict = {}
+
 
 def register_symmetric_descriptor(allocation: VmmAllocation) -> None:
     """登记一个 VMM 区间，供框架收集进 buffer-backed 对称空间初始化。"""
@@ -382,6 +388,8 @@ def reset_symmetric_descriptors() -> None:
             "cannot reset symmetric descriptors before a successful "
             "collective shmem finalize")
     _VMM_REGISTRY.clear()
+    # 注册表清空 ⇒ 所有 source VA 都不再有效，缓存的 view 必须一起丢弃
+    _SYM_TENSOR_CACHE.clear()
 
 
 def _contiguous_strides(shape):
@@ -586,7 +594,23 @@ def create_sym_tensor_from_source(source_va, shape, dtype: torch.dtype, device,
     推导 ``epn=E/R``，但 kernel 实际只访问本地 ``epn`` 行。GradReduce 不得使用
     该豁免，因为其 native ABI 直接把第一维解释为 ``epn``。
     返回的张量 ``data_ptr()`` 即本地对称基址（统一对称槽位的本地部分）。
+
+    **结果按 ``(source_va, shape, dtype, device, allow_logical_extent)`` 缓存。**
+    prefetch 路径每层要构造 4 个（2 个 projection × home/slots），而 source VA
+    在整轮推理里不变 —— 原先每次都要做一遍「线性扫 ``_VMM_REGISTRY`` +
+    ``acl_shmem_get_buffer_ptr``（C++）+ 构造 storage」，实测约 85 us/次。
+    命中时只多一次 dict 查找和一次 ``_destroyed`` 属性检查，不做线性扫描。
     """
+    key = (int(source_va), tuple(int(d) for d in shape), dtype,
+           str(device), bool(allow_logical_extent))
+    hit = _SYM_TENSOR_CACHE.get(key)
+    if hit is not None:
+        cached_alloc, cached_tensor = hit
+        # 存活检查：allocation 被 destroy 之后缓存的 view 就是悬垂指针
+        if not getattr(cached_alloc, '_destroyed', False):
+            return cached_tensor
+        del _SYM_TENSOR_CACHE[key]
+
     source_va = int(source_va)
     allocation = next(
         (
@@ -607,7 +631,9 @@ def create_sym_tensor_from_source(source_va, shape, dtype: torch.dtype, device,
             f"but source allocation 0x{source_va:x} owns only "
             f"{int(allocation.size)} bytes")
     sym = map_to_sym_ptr(source_va, name)
-    return create_sym_tensor_from_ptr(sym, shape, dtype, device)
+    tensor = create_sym_tensor_from_ptr(sym, shape, dtype, device)
+    _SYM_TENSOR_CACHE[key] = (allocation, tensor)
+    return tensor
 
 
 class VmmProjection:

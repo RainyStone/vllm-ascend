@@ -207,8 +207,6 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
 | `MOONEP_RELEASE_WEIGHTS=0` | 关闭"释放 vllm 原权重"（默认开：home chunk 接管后释放原张量，省 13.8 GB/卡） |
 | `MOONEP_PAD_CUT=1` | 实验性：把补零行踢出 grouped GEMM。**实测错误，默认关**（见排障） |
-| `MOE_ROW_STATS=1` | 逐层记录本卡专家组行数（sum/max/非零组数），导出 `/tmp/moe_rows_<TAG>_rank*.json` |
-| `MOE_ROW_TIMING=1` | 追加逐层"同步"MLP 耗时（仅测量用，会串行化该步） |
 | `MOONEP_NO_SYNC=0` | 关闭零同步 dispatch（默认开；改回逐层 `.item()` + 切片语义） |
 | `MOONEP_REUSE_OUT=0` | 关闭库内 dispatch 输出复用（默认开） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |

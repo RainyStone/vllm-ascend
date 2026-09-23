@@ -379,6 +379,43 @@ atexit.register(_dump_balance_stats)
 
 # MOONEP_TIME_STATS=1: per-phase wall totals [total_s, calls]
 _TSTATS_ENABLED = os.environ.get("MOONEP_TIME_STATS", "0") == "1"
+
+# MOONEP_DUMP_PLAN=<dir>: 逐位比对用。把 buffer.dispatch 返回的 plan + cu 落到
+# <dir>/plan_r<rank>_<i>.pt。默认关(这是推理路径上的 D2H,会污染性能数字)。
+# 只落前 MOONEP_DUMP_PLAN_N 次(默认 96 = 2 个 step),好让 profile 剩下的部分干净。
+_DUMP_PLAN_DIR = os.environ.get("MOONEP_DUMP_PLAN") or None
+_DUMP_PLAN_N = int(os.environ.get("MOONEP_DUMP_PLAN_N", "96"))
+_DUMP_PLAN_I = [0]
+_DUMP_PLAN_FAIL = [0]
+
+
+def _dump_plan(plan, cu):
+    """把一次 planning 的产物整体落盘。只在 MOONEP_DUMP_PLAN 打开时调用。"""
+    i = _DUMP_PLAN_I[0]
+    _DUMP_PLAN_I[0] = i + 1
+    try:
+        rank = int(torch.npu.current_device()) - int(os.environ.get("MOONEP_DEV_BASE", "0"))
+        torch.save(
+            {
+                "dst": plan.dst.cpu(),
+                "experts_to_copy": plan.experts_to_copy.cpu(),
+                "dup_groups": plan.dup_groups.cpu(),
+                "dup_loffs": plan.dup_loffs.cpu(),
+                "dup_counts": plan.dup_counts.cpu(),
+                "cu": cu.cpu(),
+            },
+            os.path.join(_DUMP_PLAN_DIR, f"plan_r{rank}_{i:04d}.pt"),
+        )
+    except Exception as exc:  # noqa: BLE001 - 诊断用，绝不打断推理
+        _DUMP_PLAN_FAIL[0] += 1
+        if _DUMP_PLAN_FAIL[0] in (1, 50):
+            print(f"[moonep-dump-plan] failed: {exc}", flush=True)
+
+
+# MOONEP_ALLOW_CAPTURE=1: 图捕获可行性研究的实验开关 —— 放开 token_dispatch /
+# run_slot_forward 里那两道显式 raise。**这不是"声明图模式可用"**，只是把保守
+# 禁止去掉，好让真实的捕获报错暴露出来。默认 0（保持原行为）。
+_ALLOW_CAPTURE = os.environ.get("MOONEP_ALLOW_CAPTURE", "0") == "1"
 _MOONEP_TSTATS = {"dispatch": [0.0, 0], "disp_pre": [0.0, 0], "disp_pad": [0.0, 0],
                  "disp_tpe": [0.0, 0], "disp_buf": [0.0, 0],
                  "disp_lib": [0.0, 0], "disp_post": [0.0, 0],
@@ -908,11 +945,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ) -> MoETokenDispatchOutput[TMoECombineMetadata]:
-        _maybe_arm_udma_dump()
-        if _EXTRA_CTX.capturing:
+        if _EXTRA_CTX.capturing and not _ALLOW_CAPTURE:
             raise RuntimeError(
                 "MoonEP dispatch cannot run inside captured CUDA graphs; "
-                "run with --enforce-eager (or disable cudagraph) when enable_moonep is on."
+                "run with --enforce-eager (or disable cudagraph) when enable_moonep is on. "
+                "(MOONEP_ALLOW_CAPTURE=1 lifts this guard for the capture feasibility study; "
+                "it is a deliberate override, not a claim that capture works.)"
             )
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -1027,6 +1065,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             reuse_outputs=(not real_t) and _ENV_REUSE_OUT,
         )
         _t2 = time.perf_counter()
+        if _DUMP_PLAN_DIR is not None and _DUMP_PLAN_I[0] < _DUMP_PLAN_N:
+            _dump_plan(plan, cu)
 
         # Per-local-expert row counts = cu diff over this rank's owned global
         # expert range [rank*epn, (rank+1)*epn). Shard rows are prefix-packed
@@ -1294,48 +1334,3 @@ class MoonEPCommImpl(MoECommMethod):
         )
 
 atexit.register(_dump_slot_stats)
-
-
-# ---------------------------------------------------------------------------
-# UDMA stall watchdog: MOONEP_UDMA_DUMP=1 arms a background torch_npu profiler
-# at the first dispatch and dumps the device trace after a stall window, to
-# capture which kernel never completes when UDMA deadlocks inside the engine.
-# ---------------------------------------------------------------------------
-_udma_dump_armed = False
-
-
-def _maybe_arm_udma_dump() -> None:
-    global _udma_dump_armed
-    if _udma_dump_armed:
-        return
-    if os.environ.get("MOONEP_UDMA_DUMP", "0") != "1":
-        return
-    if os.environ.get("MOONEP_DISABLE_UDMA", "0") == "1":
-        return
-    _udma_dump_armed = True
-    wait = int(os.environ.get("MOONEP_UDMA_DUMP_WAIT", "45"))
-    import time
-
-    def _dump():
-        try:
-            import torch_npu
-            from torch_npu import profiler
-
-            d = f"/tmp/udma_dump_r{os.environ.get('LOCAL_RANK', '?')}"
-            os.makedirs(d, exist_ok=True)
-            pr = profiler.profile(
-                activities=[
-                    profiler.ProfilerActivity.CPU,
-                    profiler.ProfilerActivity.NPU,
-                ],
-                on_trace_ready=profiler.tensorboard_trace_handler(d),
-            )
-            pr.start()
-            time.sleep(wait)
-            print("[udma-dump] stopping profiler (stall window elapsed)", flush=True)
-            pr.stop()
-            print("[udma-dump] DUMP DONE -> " + d, flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[udma-dump] failed: {exc}", flush=True)
-
-    threading.Thread(target=_dump, daemon=True).start()

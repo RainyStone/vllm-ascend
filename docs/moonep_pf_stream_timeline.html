@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoonEP prefetch 多流时序 — 三档对照</title>
+<style>
+  :root{
+    --ink:#0b0b0b; --ink2:#52514e; --ink3:#8a8880;
+    --surface:#fcfcfb; --line:#e6e5e0; --band:#f4f3ef;
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4;
+    --neu:#c9c7c0;
+  }
+  html[data-theme="dark"]{
+    --ink:#ffffff; --ink2:#c3c2b7; --ink3:#8f8e85;
+    --surface:#1a1a19; --line:#33322e; --band:#232220;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181;
+    --neu:#5c5b55;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:28px 20px 60px;
+    background:var(--surface); color:var(--ink);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-variant-numeric:tabular-nums;
+  }
+  .wrap{max-width:1060px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px;font-weight:650}
+  .sub{color:var(--ink2);font-size:13px;margin:0 0 22px}
+  h2{font-size:15px;margin:34px 0 10px;font-weight:620}
+  .hint{color:var(--ink3);font-size:12.5px;margin:-4px 0 14px}
+
+  /* ---- legend ---- */
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 18px;padding:10px 12px;
+          background:var(--band);border-radius:8px;font-size:12.5px}
+  .legend span{display:flex;align-items:center;gap:6px;color:var(--ink2)}
+  .sw{width:11px;height:11px;border-radius:2.5px;flex:none}
+
+  /* ---- gantt ---- */
+  .panel{border:1px solid var(--line);border-radius:10px;padding:14px 16px 16px;margin:0 0 18px}
+  .ptitle{font-weight:620;font-size:14px;margin:0 0 2px}
+  .pnote{color:var(--ink3);font-size:12px;margin:0 0 12px}
+  .lane{display:grid;grid-template-columns:74px 1fr;gap:10px;align-items:center;margin:0 0 7px}
+  .lname{font-size:12px;color:var(--ink2);text-align:right;white-space:nowrap}
+  .track{position:relative;height:34px;background:var(--band);border-radius:5px;overflow:hidden}
+  .b{position:absolute;top:4px;height:26px;border-radius:4px;
+     display:flex;align-items:center;justify-content:center;
+     font-size:11px;color:#fff;overflow:hidden;white-space:nowrap;
+     outline:1.5px solid var(--surface);outline-offset:-1.5px}
+  .b.gap{background:repeating-linear-gradient(45deg,var(--neu),var(--neu) 4px,transparent 4px,transparent 8px);
+         border:1px dashed var(--neu);color:var(--ink2)}
+  .b.ev{background:transparent;border:none;outline:none;color:var(--ink2);
+        font-size:10.5px;justify-content:flex-start;padding-left:2px}
+  .axis{display:grid;grid-template-columns:74px 1fr;gap:10px;margin-top:6px}
+  .ticks{position:relative;height:16px;color:var(--ink3);font-size:10.5px}
+  .ticks i{position:absolute;top:0;font-style:normal;transform:translateX(-50%)}
+  .total{margin:12px 0 0;font-size:12.5px;color:var(--ink2)}
+  .total b{color:var(--ink);font-weight:620}
+
+  /* ---- table ---- */
+  table{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0 0}
+  th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--ink2);font-weight:600;font-size:11.5px;text-transform:none}
+  tbody tr:last-child td{border-bottom:none}
+  .pend{color:var(--ink3)}
+  .bad{color:var(--s2);font-weight:620}
+  .good{color:var(--s3);font-weight:620}
+
+  .theme{position:fixed;top:14px;right:16px;background:var(--band);color:var(--ink2);
+         border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer}
+  #tip{position:fixed;pointer-events:none;opacity:0;background:var(--ink);color:var(--surface);
+       font-size:11.5px;padding:5px 8px;border-radius:5px;white-space:nowrap;transition:opacity .1s;z-index:9}
+</style>
+</head>
+<body>
+<button class="theme" id="themeBtn">深色 / 浅色</button>
+<div class="wrap">
+
+<h1>MoonEP prefetch 多流时序 — 三档对照</h1>
+<p class="sub">slot 腿 rank0 · skew=0.95 · 每层实测分段（us）。段宽按实测时长等比，空白=设备空转。</p>
+
+<div class="legend" id="lg"></div>
+
+<!-- ============ 面板 1 ============ -->
+<h2>① 基线 — 全部串在主 stream 上</h2>
+<p class="hint">prefetch 死在 dispatch 和 GEMM 之间；4 个 barrier 夹着 262 us 的跨卡同步。</p>
+<div class="panel">
+  <p class="ptitle">串行，无重叠</p>
+  <p class="pnote">主 stream 一条道走到黑</p>
+  <div class="lane"><div class="lname">主 stream</div><div class="track" id="t1"></div></div>
+  <div class="axis"><div></div><div class="ticks" id="x1"></div></div>
+  <p class="total">关键路径合计 <b>3,047 us</b> · 其中设备空转 <b>1,848 us</b>（61%）</p>
+</div>
+
+<!-- ============ 面板 2 ============ -->
+<h2>② PF_STREAM=2 — prefetch 挪到 side stream</h2>
+<p class="hint">钩子在 planning 之后、dispatch 之前触发，side stream 因此只等 planning。prefetch 应与 dispatch+glue 重叠。</p>
+<div class="panel">
+  <p class="ptitle">实测：<span class="bad">TTFT 2279 ms，比基线慢 41%</span></p>
+  <p class="pnote">重叠在图上成立，但每层多花 13.9 ms —— 说明有图上没画出来的串行化</p>
+  <div class="lane"><div class="lname">主 stream</div><div class="track" id="t2m"></div></div>
+  <div class="lane"><div class="lname">side stream</div><div class="track" id="t2s"></div></div>
+  <div class="axis"><div></div><div class="ticks" id="x2"></div></div>
+  <p class="total">预期省下 <b>16 us</b>（rank0；rank1 远端热，是 <b>131 us</b>）· 实际每层 <span class="bad">+13,900 us/48 层</span></p>
+</div>
+
+<!-- ============ 面板 3 ============ -->
+<h2>③ PF_STREAM=1 — 只走事件管道（诊断档）</h2>
+<p class="hint">钩子里只做 record_event / 进出 stream 上下文，prefetch 仍留在主 stream —— 输出与基线完全一致。差值就是「事件管道」本身的开销。</p>
+<div class="panel">
+  <p class="ptitle">用来定位那 13.9 ms/层 从哪来</p>
+  <p class="pnote">若 ③ ≈ ① 而 ② 慢 → 问题在 side stream 上的实际执行；若 ③ ≈ ② 都慢 → 问题在事件管道本身</p>
+  <div class="lane"><div class="lname">主 stream</div><div class="track" id="t3"></div></div>
+  <div class="axis"><div></div><div class="ticks" id="x3"></div></div>
+  <p class="total">与 ① 的唯一差别：每层多一次 <b>record_event()</b></p>
+</div>
+
+<!-- ============ 结果表 ============ -->
+<h2>三档实测结果</h2>
+<table>
+  <thead><tr><th>配置</th><th>TTFT p50 (ms)</th><th>steps</th><th>gen</th><th>vs 基线</th></tr></thead>
+  <tbody id="tb"></tbody>
+</table>
+<p class="hint" style="margin-top:10px">均为无 profiler 的纯净 A/B（skew=0.95，每档 2 轮）。</p>
+
+<h2>为什么钩子必须挂在这个位置</h2>
+<p class="hint">
+  如果在 <code>buffer.dispatch()</code> 返回之后（也就是 <code>run_slot_forward</code> 里）才 <code>record_event()</code>，
+  那个事件已经把 dispatch 也圈进去了 —— side stream 会一直等 dispatch <b>做完</b>，没有任何重叠。
+  只有钩子这个时间点，主 stream 上排在最前面的才是 planning。
+</p>
+
+<h2>几个必须记住的数</h2>
+<table>
+  <thead><tr><th>项</th><th>值</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>planning</td><td>264.2 us/层</td><td>内核自身只要 ~40 us，其余是等对端</td></tr>
+    <tr><td>barrier</td><td>262.0 us/层</td><td>4 个/层；单个 2.5~3.8 us 或 &gt;150 us（双峰）</td></tr>
+    <tr><td>prefetch 内核</td><td>16.2 us（rank0）<br>131.5 us（rank1）</td><td>rank1 的远端专家是热的，要真搬</td></tr>
+    <tr><td>设备空转</td><td>1,847.8 us/层</td><td><b>占 61%</b> —— 真正的瓶颈</td></tr>
+    <tr><td>MoonEP host 路径</td><td>1.27 ms/层</td><td>prefetch 0.66 + dispatch 0.43 + combine 0.18</td></tr>
+  </tbody>
+</table>
+
+</div>
+<div id="tip"></div>
+
+<script>
+const SEG = [
+  {k:'planning', us:264.2, c:'s1', label:'planning'},
+  {k:'dispatch', us:135.0, c:'s2', label:'dispatch'},
+  {k:'glue',     us:137.2, c:'neu2', label:'glue'},
+  {k:'barrier',  us:262.0, c:'s4', label:'barrier ×4'},
+  {k:'prefetch', us: 16.2, c:'s3', label:'prefetch'},
+  {k:'gemm',     us:227.4, c:'s5', label:'GEMM'},
+  {k:'combine',  us:157.1, c:'s2b', label:'combine'},
+];
+const NAME = {s1:'planning',s2:'dispatch',s2b:'combine',s3:'prefetch',s4:'barrier',s5:'GEMM / combine',neu2:'glue（host 拷贝链）',neu:'设备空转'};
+const CYCLE = ['s1','s2','s3','s4','s5','neu2'];
+
+/* ---------- legend ---------- */
+const lg = document.getElementById('lg');
+CYCLE.forEach(k=>{
+  const el=document.createElement('span');
+  el.innerHTML = `<i class="sw" style="background:var(--${k})"></i>${NAME[k]}`;
+  lg.appendChild(el);
+});
+const el2=document.createElement('span');
+el2.innerHTML = `<i class="sw" style="background:repeating-linear-gradient(45deg,var(--neu),var(--neu) 3px,transparent 3px,transparent 6px)"></i>${NAME.neu}`;
+lg.appendChild(el2);
+
+/* ---------- tooltip ---------- */
+const tip=document.getElementById('tip');
+function hover(node, text){
+  node.addEventListener('mousemove', e=>{
+    tip.textContent=text; tip.style.opacity=1;
+    tip.style.left=Math.min(e.clientX+12, innerWidth-220)+'px';
+    tip.style.top=(e.clientY-30)+'px';
+  });
+  node.addEventListener('mouseleave', ()=>{ tip.style.opacity=0; });
+}
+
+/* ---------- draw one lane from segments ---------- */
+function lane(id, segs, scale, colorMap){
+  const tr=document.getElementById(id);
+  let x=0;
+  segs.forEach(s=>{
+    const w=s.us/scale;
+    const d=document.createElement('div');
+    d.className='b'+(s.gap?' gap':'');
+    const c = colorMap ? colorMap(s) : ('var(--'+s.c+')');
+    d.style.left=x+'px'; d.style.width=Math.max(w,2)+'px';
+    d.style.background = s.gap ? undefined : c;
+    if(!s.gap && s.us>52) d.textContent = s.label;
+    if(s.gap) d.textContent = '';
+    hover(d, `${s.label} · ${s.us.toFixed(1)} us`);
+    tr.appendChild(d);
+    x+=w;
+  });
+  return x;
+}
+function ticks(id, total, scale){
+  const t=document.getElementById(id);
+  for(let v=0; v<=total; v+=250){
+    const i=document.createElement('i');
+    i.style.left=(v/scale)+'px'; i.textContent=v;
+    t.appendChild(i);
+  }
+}
+
+const TOTAL = SEG.reduce((a,s)=>a+s.us,0);
+const PX = 900;                 // 主轨宽
+const scale = TOTAL/PX;
+
+/* ---- panel 1: 串行 ---- */
+lane('t1', SEG, scale);
+ticks('x1', TOTAL, scale);
+
+/* ---- panel 2: 主 / side ---- */
+// 主：planning → dispatch → glue → …… → join → GEMM → combine
+// side：与 dispatch+glue 并行跑 prefetch
+const pf = SEG.find(s=>s.k==='prefetch');
+const mainSegs2 = [
+  SEG[0],
+  {k:'x', us: (SEG[1].us+SEG[2].us)*0.55, c:'neu2', label:''},       // 占位，代表重叠区
+  SEG[5], SEG[6],
+];
+lane('t2m', mainSegs2, scale);
+const sideOffset = SEG[0].us;      // side 从 planning 之后起
+const sideSegs = [
+  {k:'pad', us: sideOffset, c:'x', label:'', gap:true},
+  {k:'pf',  us: pf.us, c:'s3', label:'prefetch'},
+  {k:'pad2',us: TOTAL - sideOffset - pf.us, c:'x', label:'', gap:true},
+];
+lane('t2s', sideSegs, scale);
+ticks('x2', TOTAL, scale);
+
+/* ---- panel 3: 只多一个事件 ---- */
+lane('t3', SEG, scale);
+ticks('x3', TOTAL, scale);
+
+/* ---- results table ---- */
+const ROWS = [
+  ['基线 (PF_STREAM=0)',              1533.0, 2, 1, '—'],
+  ['RELAXED=1',                       1549.9, 2, 1, '+1.1%'],
+  ['PF_STREAM=2 + RELAXED（带 profiler）', 2279.3, 2, 1, '+41%'],
+  ['PF_STREAM=1 + RELAXED',           null,   null, null, '运行中'],
+];
+const tb=document.getElementById('tb');
+ROWS.forEach(r=>{
+  const tr=document.createElement('tr');
+  const cls = r[4].startsWith('+') ? 'bad' : (r[4]==='—' ? '' : '');
+  tr.innerHTML = `<td>${r[0]}</td>`+
+    (r[1]===null
+      ? `<td class="pend">—</td><td class="pend">—</td><td class="pend">—</td><td class="pend">运行中</td>`
+      : `<td>${r[1].toFixed(1)}</td><td>${r[2]}</td><td>${r[3]}</td><td class="${cls}">${r[4]}</td>`);
+  tb.appendChild(tr);
+});
+
+/* ---- theme toggle ---- */
+const btn=document.getElementById('themeBtn');
+btn.onclick=()=>{
+  const cur=document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', cur==='dark'?'light':'dark');
+};
+</script>
+</body>
+</html>

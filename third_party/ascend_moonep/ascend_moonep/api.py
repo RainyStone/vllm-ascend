@@ -40,6 +40,9 @@ from .planning import MoonEPCommPlan, allocate_planning_outputs
 import time as _time
 
 _TSTATS_ON = os.environ.get("ASCEND_MOONEP_TIME_STATS", "0") == "1"
+# 跳过每层 3 次的 host 侧全设备同步 + 跨进程栅栏（见 _reconcile_async_ranks）。
+# 必须配套 ASCEND_MOONEP_PREFETCH_RELAXED=1 使用，否则有死锁风险。
+_NO_RECONCILE = os.environ.get("ASCEND_MOONEP_NO_RECONCILE", "0") == "1"
 _TRACE_ON = os.environ.get("ASCEND_MOONEP_TRACE", "0") == "1"
 _TSTATS: dict = {}
 
@@ -71,7 +74,6 @@ _atexit.register(_dump_lib_tstats)
 from .ops import (
     CombineOp,
     DispatchOp,
-    GradReduceOp,
     PlanningOp,
     PrefetchOp,
 )
@@ -344,10 +346,9 @@ def _create_context(
         'dispatch': DispatchOp(ws_bytes=ws, num_sms=num_sms),
         'combine': CombineOp(ws_bytes=ws, num_sms=num_sms),
         'prefetch': PrefetchOp(ws_bytes=0, num_sms=num_sms),
-        'grad_reduce': GradReduceOp(ws_bytes=0, num_sms=num_sms),
     }
     ctx_udma_flags = {'planning': False, 'dispatch': True, 'combine': True,
-                      'prefetch': True, 'grad_reduce': True}
+                      'prefetch': True}
     requested_udma = {name: bool(use_udma) for name in ctx_udma_flags}
     if udma_flags:
         requested_udma.update({name: bool(value) for name, value in udma_flags.items()})
@@ -375,7 +376,6 @@ def _create_context(
         '_dispatch_use_udma': effective_udma['dispatch'],
         '_combine_use_udma': effective_udma['combine'],
         '_prefetch_use_udma': effective_udma['prefetch'],
-        '_grad_reduce_use_udma': effective_udma['grad_reduce'],
         # shmem symmetric chunks (tensors; tensor.data_ptr() is the symmetric
         # base for peer addressing / device RMA — no separate Buffer handles).
         'hidden_buf': hidden_buf,
@@ -582,7 +582,20 @@ class Buffer:
         ``torch.npu.synchronize`` 保持步调所以正常，见本文件注释）。这里同步设备
         + ``dist.barrier`` 重新对齐各 rank；代价是 async 实际为同步执行（与本仓库
         "仅保留 event 返回以满足 async_finish 契约"的兼容 shim 设计一致）。
+
+        ``ASCEND_MOONEP_NO_RECONCILE=1`` 跳过这段。它每层要执行 3 次（dispatch /
+        prefetch / combine 各一次），每次 ``npu.synchronize()`` 都把设备排空 ——
+        实测设备空转因此占 51~60%，host 也永远跑不到设备前面（多流/预取这类
+        靠"host 跑在前面"的优化因此全部失效）。
+
+        跳过它的**前提是 `ASCEND_MOONEP_PREFETCH_RELAXED=1`**：那样 prefetch 的
+        两个 host barrier 不再参与 ``sync_counter``，counter 上只剩 planning /
+        dispatch / combine 三个**设备内联** barrier，而这三个每个 rank 都按同样
+        顺序、同样次数执行，代际天然一致，不需要再靠 host 侧重排对齐。
+        没有 RELAXED 而单独开这个开关有死锁风险。
         """
+        if _NO_RECONCILE:
+            return
         torch_npu.npu.synchronize()
         if dist.is_initialized():
             dist.barrier(group=ctx.get('group'))
@@ -676,8 +689,6 @@ class Buffer:
         return (
             plan.dst,
             plan.experts_to_copy,
-            plan.zero_fill_ranges,
-            plan.remote_stats,
             plan.dup_groups,
             plan.dup_loffs,
             plan.dup_counts,
@@ -728,6 +739,15 @@ class Buffer:
             _t = _ts("disp_plan_kernel", _t)
             if _dbg:
                 print(f"[moonep-trace r{ctx['rank']}] dispatch: planning compute done", flush=True)
+            # 钩子点：planning 已发射、dispatch 尚未发射。此刻主 stream 上排在
+            # 最前面的只有 planning，所以调用方在这里 record_event() 再让 side
+            # stream wait_event()，side stream 等到的就是「planning 完成」而不是
+            # 「dispatch 完成」—— prefetch 才能与 dispatch 真正重叠。
+            # 放在 dispatch 之后再挂事件就晚了：那时事件已经把 dispatch 也算进去。
+            after_planning = ctx.get('after_planning_hook')
+            if after_planning is not None:
+                after_planning(plan)
+                _t = _ts("disp_after_plan_hook", _t)
 
         if _dbg:
             print(f"[moonep-trace r{ctx['rank']}] dispatch: dispatch kernel enter", flush=True)
@@ -808,9 +828,16 @@ class Buffer:
         与 kernel ``owner = expert/epn``、``source = (expert%epn)*H*Hp`` 寻址吻合
         （analysis §4.2）。
         """
+        # MOONEP_TIME_STATS=1：prefetch 的 host 开销是 MoonEP host 路径里最大的一项
+        # （实测 0.66 ms/层，而整个 host 路径 1.27 ms/层），但静态排查只解释了
+        # ~0.1-0.2 ms。这些探针把剩下的落到具体那一步上；不开开关时每次只花一次
+        # 分支判断。读数看 dpshim 打的 api._TSTATS。
+        _t = _time.perf_counter()
         self._ensure_shmem_views()
+        _t = _ts("pf1_views", _t)
         E = int(ctx['E'])
         local_experts = experts_to_copy[int(ctx['rank'])]  # this rank's [B] row
+        _t = _ts("pf2_localexp", _t)
         # 算子层要求 shmem tensor 指向"对称内存的本地部分"：本 rank 的本地
         # home chunk / [B] slot chunk，且所有 rank 的 chunk 占据统一对称槽位。
         # kernel 用 owner=expert/epn、source=(expert%epn)*H*Hp 经 aclshmem_ptr
@@ -821,11 +848,13 @@ class Buffer:
         #   ``_moonep_slot_source_va``  —— 本 rank 本地 slot chunk 的 source VA
         # Buffer 用 get_buffer_ptr 翻译成本地对称基址，再构造 shmem 张量。
         B = int(ctx['B'])
+        _t = _ts("pf3_prep", _t)
         for full_weight in weight_prefetch_args:
             H = int(full_weight.shape[1])
             Hp = int(full_weight.shape[2])
             owner_src = getattr(full_weight, _OWNER_SOURCE_VA_ATTR, None)
             slot_src = getattr(full_weight, _SLOT_SOURCE_VA_ATTR, None)
+            _t = _ts("pf4_getsrcref", _t)
             if owner_src is None or slot_src is None:
                 raise RuntimeError(
                     "full_weight is missing _moonep_owner_source_va / "
@@ -837,9 +866,11 @@ class Buffer:
             weight_home = create_sym_tensor_from_source(
                 owner_src, [E, H, Hp], torch.bfloat16, full_weight.device,
                 'weight_home', allow_logical_extent=True)
+            _t = _ts("pf5_home", _t)
             weight_slots = create_sym_tensor_from_source(
                 slot_src, [B, H, Hp], torch.bfloat16, full_weight.device,
                 'weight_slots')
+            _t = _ts("pf6_slots", _t)
             ctx['kernels']['prefetch'].compute(
                 ctx,
                 weight_home,
@@ -847,72 +878,7 @@ class Buffer:
                 local_experts,
                 shmem_instance_id=0,
             )
-
-    def _run_reduce_grad_on_current_stream(
-        self,
-        ctx: dict,
-        experts_to_copy: torch.Tensor,
-        projection_grads,
-        reduce_buffers,
-    ) -> None:
-        """Reduce duplicated experts' weight grads back to their home ranks.
-
-        仅 buffer-backed：``full_grad``（``[E+B,H,H']`` fp32）与 ``reduce_buffer``
-        （``[R,B,H,H']`` 兼容视图或 ``[B,H,H']`` 本地 slot carrier）是框架侧
-        VMM 张量，翻译成本地对称基址后构造算子要的
-        *本地* shmem 张量（analysis §4.3）：
-          - ``full_grad_home`` = 本 rank 的 home grad 行（物理 ``[E/R]``，data_ptr
-            指向本地 home 基址）；
-          - ``reduce_slots``   = 本 rank 的本地归约槽位 ``[B, H, H']``。
-        ``experts_to_copy`` 仍传完整 ``[R, B]`` plan。
-        """
-        self._ensure_shmem_views()
-        rank = int(ctx['rank'])
-        E = int(ctx['E'])
-        R = int(ctx['R'])
-        if R <= 0 or E % R:
-            raise RuntimeError(
-                f'invalid expert layout for grad reduce: E={E}, R={R}')
-        epn = E // R
-        B = int(ctx['B'])
-        num_sms = int(ctx['num_sms'])
-        for full_grad, reduce_buffer in zip(projection_grads, reduce_buffers):
-            # 仅 buffer-backed：full_grad / reduce_buffer -> 本地 shmem 张量。
-            # 框架把本 rank 本地物理段的 source_va 附加到张量上
-            # （``_moonep_owner_source_va`` / ``_moonep_slot_source_va``），
-            # Buffer 用 get_buffer_ptr 翻译成本地对称基址：
-            #   full_grad_home = 本 rank home grad chunk 的对称基址（物理 shape
-            #     [epn=E/R]，data_ptr 指向本地 home backing）。GradReduce 的
-            #     native ABI 自 43aba6a 起直接接收 epn；将该 view 伪装成 [E]
-            #     会使 kernel 在 EP>1 时越过 caller-owned physical allocation。
-            #   reduce_slots   = 本 rank 本地 reduce 槽位 chunk 的对称基址。
-            H = int(full_grad.shape[1])
-            Hp = int(full_grad.shape[2])
-            owner_src = getattr(full_grad, _OWNER_SOURCE_VA_ATTR, None)
-            slot_src = getattr(reduce_buffer, _SLOT_SOURCE_VA_ATTR, None)
-            if owner_src is None or slot_src is None:
-                raise RuntimeError(
-                    "full_grad / reduce_buffer missing "
-                    "_moonep_owner_source_va / _moonep_slot_source_va: the "
-                    "framework must attach this rank's local home/slot chunk "
-                    "source VAs (buffer_c.attach_local_source_vas) so the "
-                    "Buffer can translate them via get_buffer_ptr (analysis "
-                    "§4.3 / §6)")
-            full_grad_home = create_sym_tensor_from_source(
-                owner_src, [epn, H, Hp], torch.float32, full_grad.device,
-                'full_grad_home')
-            reduce_slots = create_sym_tensor_from_source(
-                slot_src, [B, H, Hp], torch.float32, reduce_buffer.device,
-                'reduce_slots')
-            ctx['kernels']['grad_reduce'].compute(
-                ctx,
-                full_grad_home,
-                reduce_slots,
-                experts_to_copy,
-                rank=rank,
-                num_sms=num_sms,
-                shmem_instance_id=0,
-            )
+            _t = _ts("pf7_opcall", _t)
 
     # ------------------------------------------------------------------
     # Public API (identical signatures to moonep.api.Buffer)
@@ -1200,126 +1166,3 @@ class Buffer:
         done = torch_npu.npu.current_stream().record_event()
 
         return hidden_sh, route_weights_sk, done
-
-    def reduce_grad(
-        self,
-        plan: MoonEPCommPlan | None = None,
-        async_finish: bool = False,
-        full_gate_grad: torch.Tensor | None = None,
-        full_up_grad: torch.Tensor | None = None,
-        full_down_grad: torch.Tensor | None = None,
-        gate_reduce_buffer: torch.Tensor | None = None,
-        up_reduce_buffer: torch.Tensor | None = None,
-        down_reduce_buffer: torch.Tensor | None = None,
-    ):
-        """Reduce duplicated experts' weight grads back to their home ranks
-        (dispatch bwd, weight side).
-
-        Same layout contract as ``moonep.api.Buffer.reduce_grad``: each
-        ``full_*_grad`` is ``[E+B, H, H']`` fp32 — rows ``[0, E)`` are this
-        rank's home grads, rows ``[E, E+B)`` are backed by the reduce buffer —
-        and each ``*_reduce_buffer`` is the full ``[R, B, H, H']`` fp32 view
-        (all R ranks' reduce buffers mapped as one).
-        """
-        projection_grads = (full_gate_grad, full_up_grad, full_down_grad)
-        reduce_buffers = (
-            gate_reduce_buffer, up_reduce_buffer, down_reduce_buffer)
-        assert all(t is not None for t in (*projection_grads, *reduce_buffers)), \
-            "reduce_grad tensors must be provided together"
-        # Preserve the legacy entry point and its historical [R,B,H,H'] view;
-        # only the generic entry point exposes local [B,H,H'] carriers.
-        ctx = self._require_ctx()
-        for reduce_buffer in reduce_buffers:
-            assert reduce_buffer.ndim == 4
-            assert tuple(reduce_buffer.shape[:2]) == (
-                int(ctx['R']), int(ctx['B']))
-        return self.reduce_projection_grads(
-            plan=plan,
-            projection_grads=tuple(zip(projection_grads, reduce_buffers)),
-            async_finish=async_finish,
-        )
-
-    def reduce_projection_grads(
-        self,
-        plan: MoonEPCommPlan | None,
-        projection_grads: (
-            Sequence[tuple[torch.Tensor, torch.Tensor]] |
-            Sequence[torch.Tensor]
-        ),
-        reduce_buffers: Sequence[torch.Tensor] | None = None,
-        async_finish: bool = False,
-    ):
-        """Reduce an arbitrary non-empty sequence of projection gradients.
-
-        The primary contract is ``projection_grads=Sequence[(full_grad,
-        reduce_buffer)]``. ``full_grad`` is contiguous fp32 ``[E+B,M,N]`` and
-        carries this rank's ``_moonep_owner_source_va``. ``reduce_buffer`` may be
-        either the historical cross-rank compatibility view
-        ``[R,B,M,N]`` or a contiguous local ``[B,M,N]`` carrier.  In both
-        cases it must carry this rank's ``_moonep_slot_source_va``; the kernel
-        performs peer addressing from that local symmetric slot VA, so a
-        framework does not need to construct a secondary peer-import alias.
-
-        For source compatibility, callers may alternatively pass separate
-        ``projection_grads`` and ``reduce_buffers`` sequences.
-        """
-        ctx = self._require_ctx()
-        assert isinstance(plan, MoonEPCommPlan), \
-            "Buffer.reduce_projection_grads: plan is required"
-        assert isinstance(projection_grads, Sequence) and len(projection_grads) > 0, \
-            "reduce_projection_grads requires a non-empty projection sequence"
-        if reduce_buffers is None:
-            projection_pairs = tuple(projection_grads)
-            assert all(
-                isinstance(pair, Sequence) and len(pair) == 2
-                for pair in projection_pairs
-            ), "projection_grads must contain (full_grad, reduce_buffer) pairs"
-            projection_grads = tuple(pair[0] for pair in projection_pairs)
-            reduce_buffers = tuple(pair[1] for pair in projection_pairs)
-        else:
-            assert isinstance(reduce_buffers, Sequence), \
-                "reduce_buffers must be a sequence"
-            assert len(projection_grads) == len(reduce_buffers), \
-                "projection_grads and reduce_buffers must have equal length"
-            projection_grads = tuple(projection_grads)
-            reduce_buffers = tuple(reduce_buffers)
-        for full_grad, reduce_buffer in zip(projection_grads, reduce_buffers):
-            assert full_grad.dtype == torch.float32 and full_grad.is_contiguous()
-            assert full_grad.ndim == 3
-            assert int(full_grad.shape[0]) == int(ctx['E']) + int(ctx['B'])
-            assert all(int(dimension) > 0 for dimension in full_grad.shape[1:])
-            matrix_shape = tuple(int(dimension) for dimension in full_grad.shape[1:])
-            assert reduce_buffer.dtype == torch.float32
-            local_shape = (int(ctx['B']), *matrix_shape)
-            compatibility_shape = (int(ctx['R']), *local_shape)
-            assert tuple(reduce_buffer.shape) in (local_shape, compatibility_shape), \
-                ("reduce buffer must be local [B,M,N] or compatibility "
-                 "[R,B,M,N]")
-            if reduce_buffer.ndim == 3:
-                assert reduce_buffer.is_contiguous(), \
-                    "local [B,M,N] reduce-buffer carrier must be contiguous"
-            assert getattr(reduce_buffer, _SLOT_SOURCE_VA_ATTR, None) is not None, \
-                "reduce buffer must carry _moonep_slot_source_va"
-
-        if not async_finish:
-            self._run_reduce_grad_on_current_stream(
-                ctx,
-                plan.experts_to_copy,
-                projection_grads,
-                reduce_buffers,
-            )
-            return None
-
-        # 同 dispatch async：跨 rank kernel 在独立 comm stream 上启动会因设备侧
-        # 全 rank 栅栏失步而死锁，改在当前 stream 执行（见 dispatch 的注释）。
-        self._run_reduce_grad_on_current_stream(
-            ctx,
-            plan.experts_to_copy,
-            projection_grads,
-            reduce_buffers,
-        )
-        # 同步设备 + 跨 rank 重排，避免连续 async 操作共享 shmem 栅栏代际而死锁。
-        self._reconcile_async_ranks(ctx)
-        done = torch_npu.npu.current_stream().record_event()
-
-        return done

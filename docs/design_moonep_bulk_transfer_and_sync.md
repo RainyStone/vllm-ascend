@@ -1,3 +1,12 @@
+> **状态：已证伪并回退（2026-09-20）。**
+>
+> 本方案（A：dispatch/combine 搬运大块化）已实现并实测：**在生产规模上收益为零**。
+> MTE put 在 ≥2 KB 后每核饱和在 1.40 GB/s、耗时与字节数严格成正比，所以"把块做大"
+> 在 2 KB 以上没有任何空间；S=11000 时 bulk 与 legacy 完全同速（39.2 vs 38.9 ms）。
+> 代码已回退，本文保留作为"试过并证伪"的记录。
+>
+> **真正的原因**是跨 socket 的 PCIe 扇出，见 `dev_results_2026-09-20.md`。
+
 # 设计：MoonEP dispatch/combine 的搬运大块化与栅栏收敛
 
 > 依据来自 `docs/ladder_T_ttft_imbalance.html`（T 阶梯实测）与 `dev_results_2026-09-16.md`

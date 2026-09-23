@@ -16,8 +16,6 @@ import torch
 class MoonEPCommPlan:
     dst: torch.Tensor
     experts_to_copy: torch.Tensor
-    zero_fill_ranges: torch.Tensor
-    remote_stats: torch.Tensor
     N: int
     R: int
     E: int
@@ -42,10 +40,6 @@ class MoonEPCommPlan:
         assert self.dst.numel() == N
         assert self.experts_to_copy.dtype == torch.int32 and self.experts_to_copy.is_contiguous()
         assert tuple(self.experts_to_copy.shape) == (R, B)
-        assert self.remote_stats.dtype == torch.int32 and self.remote_stats.is_contiguous()
-        assert tuple(self.remote_stats.shape) == (2,)
-        assert self.zero_fill_ranges.dtype == torch.int32 and self.zero_fill_ranges.is_contiguous()
-        assert tuple(self.zero_fill_ranges.shape) == (E + B, 2)
         assert self.dup_groups.dtype == torch.int32 and self.dup_groups.is_contiguous()
         assert tuple(self.dup_groups.shape) == (NvS, 3)
         assert self.dup_loffs.dtype == torch.int32 and self.dup_loffs.is_contiguous()
@@ -59,8 +53,6 @@ class MoonEPCommPlan:
         return type(self)(
             dst=self.dst.clone(),
             experts_to_copy=self.experts_to_copy.clone(),
-            zero_fill_ranges=self.zero_fill_ranges.clone(),
-            remote_stats=self.remote_stats.clone(),
             dup_groups=self.dup_groups.clone(),
             dup_loffs=self.dup_loffs.clone(),
             dup_counts=self.dup_counts.clone(),
@@ -98,10 +90,6 @@ def allocate_planning_outputs(ctx: dict):
     experts_to_copy = torch.empty(_round4(ctx['R'] * B), dtype=torch.int32, device=dev)[
         :ctx['R'] * B
     ].view(ctx['R'], B)
-    zero_fill_ranges = torch.empty(
-        _round4((E + B) * 2), dtype=torch.int32, device=dev
-    )[:(E + B) * 2].view(E + B, 2)
-    remote_stats = torch.empty(_round4(2), dtype=torch.int32, device=dev)[:2]
     dup_groups = torch.empty(
         _round4(NvS * 3), dtype=torch.int32, device=dev
     )[:NvS * 3].view(NvS, 3)
@@ -111,8 +99,6 @@ def allocate_planning_outputs(ctx: dict):
     plan = MoonEPCommPlan(
         dst=dst,
         experts_to_copy=experts_to_copy,
-        zero_fill_ranges=zero_fill_ranges,
-        remote_stats=remote_stats,
         dup_groups=dup_groups,
         dup_loffs=dup_loffs,
         dup_counts=dup_counts,
