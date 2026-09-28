@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成 MoonEP off / slot 性能差异与优化点报告（gsm8k 四条腿）。
+"""生成 MoonEP off / slot 性能差异与优化点报告（gsm8k 四次运行）。
 
 用法（本脚本在 <仓根>/scripts/dsv4flash_service/ 下，与它生成的报告同目录）::
 
@@ -8,14 +8,14 @@
 数据来源（全部只读，不占卡）——跑测产物在工作区的 ``$WS/scripts/`` 下，不在本仓内:
 
 * 客户端日志  ``$WS/scripts/gsm8k_profiling*/..._test_gsm8k.log``   —— ais_bench 端到端指标
-* 负载 payload ``$WS/scripts/gsm8k_profiling_moepar_moonep_*/`` 的腿报告 ``*_report.html``
+* 负载 payload ``$WS/scripts/gsm8k_profiling_moepar_moonep_*/`` 的运行报告 ``*_report.html``
                （记录器 dump 就在它的内嵌 JSON 里，直接取，避免重跑分析器）
 * 设备侧导出   ``/tmp/prof3/{off,slot}/merged/**/mindstudio_profiler_output/``
                （由 ``msprof --export=on --output=<rank0 的 *_ascend_pt 目录>`` 离线导出；
                CANN 9.2 的产物是 op_summary / op_statistic / task_time* 等，
                没有老布局的 kernel_details.csv / step_trace_time.csv）
 
-所有数字都在本脚本里现算，报告里不写死任何常量，便于换腿重跑。
+所有数字都在本脚本里现算，报告里不写死任何常量，便于换运行重跑。
 """
 
 from __future__ import annotations
@@ -32,25 +32,25 @@ import numpy as np
 import pandas as pd
 
 # 本文件在 <工作区根>/vllm_ascend_moonep/scripts/dsv4flash_service/ 下：仓根 = parents[2]，
-# 而腿目录、日志、payload 报告这些跑测产物仍在工作区的 $WS/scripts/ 里（不在本仓内）。
+# 而运行目录、日志、payload 报告这些跑测产物仍在工作区的 $WS/scripts/ 里（不在本仓内）。
 REPO = Path(__file__).resolve().parents[2]
 WS = REPO.parent
 SCRIPTS = WS / "scripts"
 
-# ---------------------------------------------------------------- 腿配置
-# 名字 -> 腿目录。g1 = 干净端到端；g2 = 同一配置 + moe_par dump（flush_every=1）
+# ---------------------------------------------------------------- 运行配置
+# 名字 -> 运行目录。g1 = 干净端到端；g2 = 同一配置 + moe_par dump（flush_every=1）
 LEGS = {
     "g1_off": "gsm8k_profiling_moonep_off",
     "g1_slot": "gsm8k_profiling_moonep_slot",
     "g2_off": "gsm8k_profiling_moepar_moonep_off",
     "g2_slot": "gsm8k_profiling_moepar_moonep_slot",
 }
-# 设备侧导出根目录（按腿）
+# 设备侧导出根目录（按运行）
 PROF_ROOTS = {
     "off": Path("/tmp/prof3/off/merged"),
     "slot": Path("/tmp/prof3/slot/merged"),
 }
-# moe_par dump payload：直接从腿报告的 <script id="payload"> 里取
+# moe_par dump payload：直接从运行报告的 <script id="payload"> 里取
 PAYLOAD_SRC = {
     "off": SCRIPTS / "gsm8k_profiling_moepar_moonep_off/gsm8k_profiling_moepar_moonep_off_report.html",
     "slot": SCRIPTS / "gsm8k_profiling_moepar_moonep_slot/gsm8k_profiling_moepar_moonep_slot_report.html",
@@ -63,8 +63,8 @@ N_LAYERS = 43      # MoE 层数
 OUT_DEFAULT = Path(__file__).resolve().parent / "gsm8k_moonep_off_vs_slot_perf_report.html"
 
 # 「空转步」下限：该步所有 rank 加起来只有极少真实 token，但池子仍按 capacity 算。
-# off 腿 D 波：8 rank × 1 token = 8 token ⇒ 计算行 = 8 × topk = 48
-# slot 腿 D 波：capacity 下限 128 ⇒ 计算行 = 128 × topk = 768
+# off 运行 D 波：8 rank × 1 token = 8 token ⇒ 计算行 = 8 × topk = 48
+# slot 运行 D 波：capacity 下限 128 ⇒ 计算行 = 128 × topk = 768
 FLOOR_ROWS = {"off": 8 * TOP_K, "slot": 128 * TOP_K}
 DUMMY_TOK = {"off": 1, "slot": 1}   # 空转步里每个 rank 的真实 token 数（off 是 1，slot 池化后按 1 记）
 
@@ -321,11 +321,11 @@ def _iv_sub(a, b) -> list:
 
 
 def window_stats(leg: str) -> dict:
-    """窗口与占空比（本报告统一口径，两条腿同一套算法）。
+    """窗口与占空比（本报告统一口径，两次运行同一套算法）。
 
     数据源两处：
       · task_time*.csv      —— 逐 task 实例（含 DMA / notify / event 等非算子任务），
-        只用来定窗口：min(start) → max(stop)。两条腿导出的文件名不同
+        只用来定窗口：min(start) → max(stop)。两次运行导出的文件名不同
         （off 是 task_time_slice_0/1，slot 是 task_time），glob 都覆盖；
       · op_summary*.csv     —— 算子任务，带 Task Type，用来分片：
         计算 = AI_CORE / AI_VECTOR_CORE / MIX_AIC / MIX_AIV；通信 = COMMUNICATION（hcom_*）；
@@ -368,7 +368,7 @@ def window_stats(leg: str) -> dict:
 
 
 # ---------------------------------------------------------------- 4. 算子家族
-# 每条腿关心的算子（按名字子串匹配）。列 = (内部键, 显示名)
+# 每次运行关心的算子（按名字子串匹配）。列 = (内部键, 显示名)
 FAMILIES = {
     "off": [
         ("hcom_ag", "hcom_allGather_AicpuKernel", "通信：all-gather"),
@@ -843,7 +843,7 @@ def insn_table(DEV) -> str:
                 b["unit"], f"{b['ratio']:.1f}%" if b["ratio"] is not None else "—",
                 f"{b['rest']:.1f}%" if b["rest"] is not None else "—",
             ])
-    return tbl(["腿", "算子", "核类型", "调用数", "平均时长 (µs)",
+    return tbl(["运行", "算子", "核类型", "调用数", "平均时长 (µs)",
                 "主计算单元占比", "最忙单元", "最忙占比", "该核其余（等通知/等数据）"], rows)
 
 
@@ -887,7 +887,7 @@ def build_diff_opt(DEV, RU, P, T, W, B) -> str:
             f"+{sl['n_D'] - off['n_D']}"],
            ["空转步每 cell 计算行 M", fnum(off["floor"], 0), fnum(sl["floor"], 0),
             (f"{sl['floor'] / off['floor']:.0f}×", "bad")],
-           ["pad 行占本腿计算量", "0%",
+           ["pad 行占本次运行计算量", "0%",
             pct_share(P["slot"]["compute_pad_total"],
                       P["slot"]["compute_pad_total"] + P["slot"]["real_total"]),
             ("—", "")],
@@ -934,10 +934,10 @@ slot 固定算 {fnum(sl['floor'],0)} 行（128 token × K / rank）。slot 全�
 
     A('<h2 id="s7">7. 可能的优化点</h2>')
     A(f"""<p>按「收益 × 可验证性」排序。所有收益都是按本轮的设备侧实测外推，
-<b>必须实跑一腿确认</b>（跑法见 §8）；每一条都给了验证口径与风险。</p>""")
+<b>必须实跑一次运行确认</b>（跑法见 §8）；每一条都给了验证口径与风险。</p>""")
 
     A(opt("p1", "O1 · 把池子下限降下来（只改环境变量）", f"""
-<p>现状：<code>MOONEP_MIN_DISPATCH_TOKENS = 128</code>（源码常量，也是池子阶梯的起点），
+<p>现状：<code>MOONEP_MIN_DISPATCH_TOKENS = 128</code>（默认值，也是池子阶梯的起点；同名环境变量可调低），
 空转步只有 1 个真实 token 也要按 128 token 池化 ⇒ 每 cell 固定算 {fnum(sl['floor'],0)} 行。
 plan 的开销跟着池子体积走，实测三档：</p>
 {tbl(["池容量 cap", "cell 数", "步数", "plan µs/cell", "plan ÷ cap (µs/token)", "combine µs/cell", "barrier µs/cell"],
@@ -951,13 +951,13 @@ plan 的开销跟着池子体积走，实测三档：</p>
 <b>{sec(save_lo/1e6)} – {sec(save_hi/1e6)}（{pct_share(save_lo, W['slot']['win']*1e6)} –
 {pct_share(save_hi, W['slot']['win']*1e6)}）</b>，作用对象是 {fnum(nD,0)} 个空转 cell；
 <code>combine</code> 与 GEMM 随之同向下降（再省约 0.3–1.6 s）。</p>
-<p><b>怎么改</b>：<code>MOONEP_POOL_CAPS=16,32,64,128,256,512</code>（覆盖整条阶梯，记得末档要包含
-<code>max_num_batched_tokens</code>，代码会自动补）——纯环境变量，不改代码。等价的一行源码改法是把
-<code>MOONEP_MIN_DISPATCH_TOKENS</code> 改成 32。</p>
+<p><b>怎么改</b>：<code>MOONEP_MIN_DISPATCH_TOKENS=32</code>（同时改阶梯起点与每步的取档下限，
+纯环境变量）或 <code>MOONEP_POOL_CAPS=16,32,64,128,256,512</code>（直接覆盖整条阶梯，记得末档要包含
+<code>max_num_batched_tokens</code>，代码会自动补）——两种都不改代码。</p>
 <p><b>风险</b>：池容量必须各 rank 一致（代码里 <code>_step_token_count</code> 走 DP 元数据的
 all-reduce，取 max_tokens_across_dp，已经保证对称）；小池子可能触发 kernel 的最小 M 约束或改变
 分片数，需要确认 plan/combine 的正确性。</p>
-<p><b>验证</b>：同一条 gsm8k 腿加 <code>MOONEP_POOL_CAPS=16,32,64,128,256,512</code> 重跑，
+<p><b>验证</b>：同一条 gsm8k 运行加 <code>MOONEP_POOL_CAPS=16,32,64,128,256,512</code> 重跑，
 对比 (a) TTFT 均值/P99，(b) 三套准确率基线 mc2 0.9492 / owner 0.9409 / slot 0.9515，
 (c) 复跑本报告的 dump，看 plan µs/cell 是否按预期下降。</p>"""))
 
@@ -974,7 +974,7 @@ all-reduce，取 max_tokens_across_dp，已经保证对称）；小池子可能�
 {fnum(plan128,0)} µs/cell（空转波）里的等待全去掉，但不可能全回收，保守按 30%–50% 估算
 ≈ {sec(plan128 * 0.3 * nD / 1e6)}–{sec(plan128 * 0.5 * nD / 1e6)}。</p>
 <p><b>风险</b>：plan 的等待多半是算法要求的同步点，乱动会导致各 rank 容量不一致（集体通信错乱）。
-<b>验证</b>：与 O1 同一套——先看 dump 里 plan/barrier 的等待点，再跑腿比 TTFT 与准确率。</p>"""))
+<b>验证</b>：与 O1 同一套——先看 dump 里 plan/barrier 的等待点，再跑运行比 TTFT 与准确率。</p>"""))
 
     A(opt("p1", "O3 · 合并每层的 8 次流屏障", f"""
 <p>实测每 cell 有 <b>8 次</b> <code>_Z24barrier_on_stream_kernelim</code>
@@ -1001,7 +1001,7 @@ MC2/本地路径（或直接短路成 dense 计算）：上限是把 slot 空转
 省 {sec((tot_cell(r_sl, 'D') - tot_cell(r_off, 'D')) * nD / 1e6)}（全轮每 rank）；
 按回收一半算，现实收益 ~{sec((tot_cell(r_sl, 'D') - tot_cell(r_off, 'D')) * nD / 1e6 * 0.5)} 量级
 （{pct_share((tot_cell(r_sl,'D')-tot_cell(r_off,'D'))*nD*0.5, W['slot']['win']*1e6)} 窗口）。</p>
-<p><b>风险</b>：两条路径的数值/量化必须完全一致（slot 腿是 fp8 池化路径），否则准确率会掉；
+<p><b>风险</b>：两条路径的数值/量化必须完全一致（slot 运行是 fp8 池化路径），否则准确率会掉；
 且混合路径会让「哪一步用哪条」的判定成为新的同步点。<b>验证</b>：先只对 <code>capacity == 池下限</code>
 的步走短路径，比准确率三件套。</p>"""))
 
@@ -1018,7 +1018,7 @@ MC2/本地路径（或直接短路成 dense 计算）：上限是把 slot 空转
 「UDMA 分支未验证」（<code>kernels/prefetch_udma.cpp</code> 的字节账要单独复核）。
 <b>先解决初始化失败</b>才有得测，而它排在 O1–O4 之后。</p>
 <p><b>怎么改</b>：换支持 <code>aclshmemx</code> 的机器/驱动组合，或按
-<code>docs/cross_repo_fixes.md</code> 的失败点逐个排查；再跑同一套 gsm8k 腿对比。
+<code>docs/cross_repo_fixes.md</code> 的失败点逐个排查；再跑同一套 gsm8k 运行对比。
 <b>结论</b>：优先级低于 O1–O4。</p>"""))
 
     A(opt("p3", "O6 · 跳过 pad 行的 GEMM", f"""
@@ -1216,7 +1216,7 @@ def build(B, P, T, DEV, RU) -> str:
 <main>
 <h1>MoonEP off / slot 性能差异与优化点分析</h1>
 <p class="sub">DSV4-Flash · DP8/TP1/EP8 · gsm8k 1319 例 @ 并发 16 · 每请求恰好 1 个输出 token（TTFT ≡ E2EL）<br>
-数据：<code>scripts/gsm8k_profiling{{_prof|_moepar}}_moonep_{{off,slot}}</code> 四条腿 · 设备侧为 rank0 离线导出 · 生成于 {now}</p>""")
+数据：<code>scripts/gsm8k_profiling{{_prof|_moepar}}_moonep_{{off,slot}}</code> 四次运行 · 设备侧为 rank0 离线导出 · 生成于 {now}</p>""")
 
     # TL;DR
     o_avg1, s_avg1 = tstat(g1_o, "TTFT", "avg"), tstat(g1_s, "TTFT", "avg")
@@ -1228,7 +1228,7 @@ def build(B, P, T, DEV, RU) -> str:
           f"{fnum(o_avg1,1)} → {fnum(s_avg1,1)} ms；{fnum(o_avg2,1)} → {fnum(s_avg2,1)} ms"))
     A(kpi(f"{sec(W['off']['mech'])} → {sec(W['slot']['mech'])}",
           "MoE 机制时间（每 rank 整轮）",
-          f"比值 {W['slot']['mech']/W['off']['mech']:.2f}×；但两腿的墙钟窗口只差 {sec(abs(W['slot']['win']-W['off']['win']))}——off 侧有约 {sec(abs(W['off']['win']-W['off']['occ']))} 的设备空转在替它挡刀。"))
+          f"比值 {W['slot']['mech']/W['off']['mech']:.2f}×；但两次运行的墙钟窗口只差 {sec(abs(W['slot']['win']-W['off']['win']))}——off 侧有约 {sec(abs(W['off']['win']-W['off']['occ']))} 的设备空转在替它挡刀。"))
     A(kpi(f"{fnum(DEV['slot']['fam']['plan']['percell_D'],0)} µs/cell",
           "slot 空转波的规划 plan 开销",
           f"占 slot 空转波每 cell {pct_share(DEV['slot']['fam']['plan']['percell_D'], sum((RU['slot'][k]['percell_D'] or 0) for k in SEG_ORDER))}；plan 逐 cell 时间随池子体积线性走"))
@@ -1258,8 +1258,8 @@ off 没有这一步。</li>
 
     # §1
     A('<h2 id="s1">1. 实验与口径</h2>')
-    A('<h3>1.1 四条腿</h3>')
-    A(tbl(["腿目录", "开关", "profiling", "moe_par dump", "用途"], [
+    A('<h3>1.1 四次运行</h3>')
+    A(tbl(["运行目录", "开关", "profiling", "moe_par dump", "用途"], [
         ["gsm8k_profiling_moonep_off", "<code>enable_moonep=false</code>", "是", "否", "干净端到端（无 dump 开销）"],
         ["gsm8k_profiling_moonep_slot", "<code>MOONEP_SLOT_MODE=1</code>", "是", "否", "干净端到端"],
         ["gsm8k_profiling_moepar_moonep_off", "<code>enable_moonep=false</code>", "是", "是（flush_every=1）", "负载结构 + 设备侧归因"],
@@ -1270,9 +1270,9 @@ off 没有这一步。</li>
 <b>1)</b><div>每次请求只产出 1 个 token，因此 <b>TTFT ≡ E2EL</b>，端到端延迟就是首 token 前的步数 × 每步墙钟。</div>
 <b>2)</b><div>每步墙钟 = ais_bench 的 <code>Benchmark Duration</code> ÷ 192 步（两组的步数都是 192）。</div>
 <b>3)</b><div><b>两类波</b>：真实波（R，这一步有真实路由）与空转波（D，DP 对齐造成的“只有 token 却仍要池化”的步）。
-off 腿的判定是「该步每层计算行 == 8 rank × 1 token × K = 48」，slot 腿是「池容量 == 池下限 128
+off 运行的判定是「该步每层计算行 == 8 rank × 1 token × K = 48」，slot 运行是「池容量 == 池下限 128
 （即每层每 rank 计算行 == 128 × K = 768）」。</div>
-<b>4)</b><div><b>池下限</b>：<code>MOONEP_MIN_DISPATCH_TOKENS = 128</code>，slot 每 rank 每层恒算 <code>capacity × K</code> 行；
+<b>4)</b><div><b>池下限</b>：<code>MOONEP_MIN_DISPATCH_TOKENS = 128</code>（默认值，本轮用的就是它；可用同名环境变量调低），slot 每 rank 每层恒算 <code>capacity × K</code> 行；
 off 不池化，按真实 token 数算。</div>
 <b>5)</b><div>设备侧只分析 <b>rank0</b>（每 rank 一个设备，DP8 对称）；通信类算子的时间以通信核计时为准，
 不与计算核重叠计数。</div>
@@ -1280,8 +1280,8 @@ off 不池化，按真实 token 数算。</div>
 
     # §2
     A('<h2 id="s2">2. 端到端结果</h2>')
-    A('<h3>2.1 四条腿的原始指标</h3>')
-    A(tbl(["腿（目录名）", "TTFT 均值 (ms)", "中位", "P90", "P99", "最大",
+    A('<h3>2.1 四次运行的原始指标</h3>')
+    A(tbl(["运行（目录名）", "TTFT 均值 (ms)", "中位", "P90", "P99", "最大",
            "请求吞吐 (req/s)", "Benchmark 时长 (s)", "每步墙钟 (ms)"], bench_rows()))
     A('<h3>2.2 slot 相对 off 的劣化</h3>')
     A(tbl(["组", "off 均值", "slot 均值", "Δ", "off 中位", "slot 中位", "Δ",
@@ -1310,11 +1310,11 @@ P99 涨得更多（+{pct_up(tstat(g1_o,'TTFT','p99'), tstat(g1_s,'TTFT','p99')).
            "每 rank 该步计算行（×43 层）"], ladder_rows("slot")))
     A(f"""<div class="note">关键区别：<b>off 的“空转步”是 8 个真实 token（每 rank 1 个）也会各自发 6 行</b>，
 而 <b>slot 的空转步被池下限抬到 {fnum(FLOOR_ROWS['slot']//TOP_K,0)} token（每 rank 每层 {fnum(FLOOR_ROWS['slot'],0)} 行）</b>。
-两条腿的步数构成：off {DEV['off']['n_R']} 真实步 / {DEV['off']['n_D']} 空转步，
+两次运行的步数构成：off {DEV['off']['n_R']} 真实步 / {DEV['off']['n_D']} 空转步，
 slot {DEV['slot']['n_R']} 真实步 / {DEV['slot']['n_D']} 空转步。</div>""")
 
     A('<h3>3.2 真实行 / pad 行</h3>')
-    A(tbl(["腿", "真实行（8 rank 合计）", "pad 行（8 rank 合计）", "合计计算行", "pad 占比"], [
+    A(tbl(["运行", "真实行（8 rank 合计）", "pad 行（8 rank 合计）", "合计计算行", "pad 占比"], [
         ["off", fnum(P["off"]["real_total"], 0), "0（无 compute 视图）",
          fnum(P["off"]["compute_pad_total"] + P["off"]["real_total"], 0), "0.0%"],
         ["slot", fnum(P["slot"]["real_total"], 0), fnum(P["slot"]["compute_pad_total"], 0),
@@ -1322,7 +1322,7 @@ slot {DEV['slot']['n_R']} 真实步 / {DEV['slot']['n_D']} 空转步。</div>"""
          pct_share(P["slot"]["compute_pad_total"],
                    P["slot"]["compute_pad_total"] + P["slot"]["real_total"])],
     ]))
-    A(f"""<div class="note">两条腿的路由量几乎一样（{fnum(P['off']['route_total'],0)} vs {fnum(P['slot']['route_total'],0)} 行，
+    A(f"""<div class="note">两次运行的路由量几乎一样（{fnum(P['off']['route_total'],0)} vs {fnum(P['slot']['route_total'],0)} 行，
 差 {pct_share(abs(P['off']['route_total']-P['slot']['route_total']), P['off']['route_total'], 2)}），
 但 slot 多算了 <b>{fnum(P['slot']['compute_pad_total'],0)} 行 pad</b>（占其计算量
 {pct_share(P['slot']['compute_pad_total'], P['slot']['compute_pad_total']+P['slot']['real_total'])}）。
@@ -1341,12 +1341,12 @@ pad 行不过路由、但要过 grouped matmul，<b>它是 slot 计算量的主�
       f'真实波 = HCCL 集合通信；slot 两种波都以 planning_kernel 与 barrier 为主。点/悬停可见明细。<br>'
       f'读表注意：<code>最大 (µs)</code> 是<b>单条任务</b>的时长，含从入队到结束的等待，个别任务能到几百 ms'
       f'（off 的 allGather 最大 {us(DEV["off"]["fam"]["hcom_ag"]["us_max"])}，'
-      f'slot 的 plan 最大 {us(DEV["slot"]["fam"]["plan"]["us_max"])}）；跨腿可比的是<code>均值</code>与 <code>µs/cell</code>。</p>')
+      f'slot 的 plan 最大 {us(DEV["slot"]["fam"]["plan"]["us_max"])}）；跨运行可比的是<code>均值</code>与 <code>µs/cell</code>。</p>')
 
     A('<h2 id="s4">4. 设备侧归因</h2>')
     o = DEV["off"]
     A('<h3>4.1 off：真实波走 HCCL，空转波走 MC2</h3>')
-    A(f"""<p>off 腿的跨卡机制由两条完全不同的路径组成，两条都在设备侧看得见：
+    A(f"""<p>off 运行的跨卡机制由两条完全不同的路径组成，两条都在设备侧看得见：
 真实波（R）走<b>通信核</b>上的 HCCL 集合通信，空转波（D）走 MC2 的
 <code>MoeDistributeDispatch/Combine</code> 融合算子。每 rank 的调用数正好是
 「步数 × 43 层 × 每 cell 次数」，可以逐条对上：</p>""")
@@ -1421,7 +1421,7 @@ off 的空转波则是反过来：<code>MoeDistributeDispatchV3</code> 的
     A('<p class="cap">图：plan / barrier 的每 cell 时间随池容量（128 / 256 / 512 token）。</p>')
 
     A("<h3>4.5 设备占用 vs 墙钟窗口（为什么差距只有十几 %）</h3>")
-    A(tbl(["腿", "设备窗口 (s)", "计算占比", "通信占比（未重叠）", "空闲占比",
+    A(tbl(["运行", "设备窗口 (s)", "计算占比", "通信占比（未重叠）", "空闲占比",
            "设备占用 (s)", "空闲 (s)", "机制时间 (s)", "机制 ÷ 占用"],
           [[leg, sec(W[leg]["win"]), pct_share(W[leg]["sh_c"]*100, 100), pct_share(W[leg]["sh_k"]*100, 100),
             pct_share(W[leg]["sh_i"]*100, 100), sec(W[leg]["occ"]), sec(W[leg]["win"]-W[leg]["occ"]),
@@ -1439,7 +1439,7 @@ slot 只有 {pct_share(W['slot']['sh_i']*100,100)}。</p>
 
     # §5
     A('<h2 id="s5">5. 官方 profiling-analysis skill 的判定（含口径警告）</h2>')
-    A(tbl(["腿", "计算占比", "通信占比", "空闲占比", "判定"],
+    A(tbl(["运行", "计算占比", "通信占比", "空闲占比", "判定"],
           [["off", pct_share(W["off"]["sh_c"]*100, 100), pct_share(W["off"]["sh_k"]*100, 100),
             pct_share(W["off"]["sh_i"]*100, 100), "【下发问题】Hostbound"],
            ["slot", pct_share(W["slot"]["sh_c"]*100, 100), pct_share(W["slot"]["sh_k"]*100, 100),
@@ -1467,15 +1467,15 @@ slot 只有 {pct_share(W['slot']['sh_i']*100,100)}。</p>
     L2o, L2s = LEGS["g2_off"], LEGS["g2_slot"]
     A('<h2 id="s8">8. 复现与数据出处</h2>')
     A('<h3>8.1 复现命令（后三步零卡时）</h3>')
-    A(f"""<pre># ① 跑一条腿：MOE_PAR=1 才带负载 dump，PROFILE=1 才带 profiling（脚本内部会等上一腿的设备释放）
+    A(f"""<pre># ① 跑一次运行：MOE_PAR=1 才带负载 dump，PROFILE=1 才带 profiling（脚本内部会等上一次运行的设备释放）
 #    产物默认落在脚本旁边 serve_&lt;mode&gt;/，要落在工作区就像下面这样显式给 OUT_DIR
-MOE_PAR=1 PROFILE=1 OUT_DIR=$WS/scripts/腿目录名 \\
+MOE_PAR=1 PROFILE=1 OUT_DIR=$WS/scripts/运行目录名 \\
     bash $WS/vllm_ascend_moonep/scripts/dsv4flash_service/start_service_mode.sh {{off|slot}}
 
-# ② 记录器分析：把该腿的 dump 聚合成负载报告（腿名 = 输出目录名，报告名自带腿名）
+# ② 记录器分析：把该运行的 dump 聚合成负载报告（运行名 = 输出目录名，报告名自带运行名）
 python $WS/vllm_ascend_moonep/scripts/moe_par/analyze_moe_par.py \\
     --run {L2o}=$WS/scripts/{L2o}/moe_par \\
-    -o $WS/scripts/{L2o}/{L2o}_report.html          # slot 腿同理，换目录名即可
+    -o $WS/scripts/{L2o}/{L2o}_report.html          # slot 另一次运行同理，换目录名即可
 
 # ③ 设备侧离线导出：profiling 目录在只读共享盘上，msprof 要往里面写中间文件，
 #    所以用 overlayfs 把 rank0 目录叠成可写视图（只叠加，不动原始数据）
@@ -1485,15 +1485,15 @@ mount -t overlay overlay -o lowerdir=$WS/scripts/{L2o}/profiling/{_rank0('g2_off
 msprof --export=on --output=/tmp/prof3/off/merged      # 约 5 分钟，产出 op_summary / task_time*
 umount /tmp/prof3/off/merged
 
-# ④ 本报告：所有数字现算，报告里没有写死常量（换腿只改脚本头的 LEGS / PROF_ROOTS / PAYLOAD_SRC）
+# ④ 本报告：所有数字现算，报告里没有写死常量（换运行只改脚本头的 LEGS / PROF_ROOTS / PAYLOAD_SRC）
 python $WS/vllm_ascend_moonep/scripts/dsv4flash_service/gen_moonep_off_vs_slot_perf_report.py</pre>""")
     A("""<h3>8.2 已知的口径陷阱（换数据前先读这一节）</h3>
 <ul>
 <li><b>通信核任务不在 <code>task_time</code> 里</b>：CANN 9.2 导出的 <code>task_time*.csv</code> 只覆盖一部分实例
-（slot 腿的 <code>task_time_*.csv</code> 还把 kernel 名字塞进了类型列、<code>kernel_name</code> 是 N/A）。
+（slot 运行的 <code>task_time_*.csv</code> 还把 kernel 名字塞进了类型列、<code>kernel_name</code> 是 N/A）。
 所以本脚本<b>窗口取自 <code>task_time*.csv</code>，而三类区间（计算 / 通信 / AI CPU）全部取自
 <code>op_summary</code> 的 <code>Task Type</code></b>——两边混用会整段漏掉 off 的 HCCL（约 7.35 s）。</li>
-<li><b>两腿的导出文件名不同</b>：off 只有 <code>task_time_slice_0/1_*.csv</code>（外加 <code>communication_statistic_*.csv</code>），
+<li><b>两次运行的导出文件名不同</b>：off 只有 <code>task_time_slice_0/1_*.csv</code>（外加 <code>communication_statistic_*.csv</code>），
 slot 只有 <code>task_time_*.csv</code>（外加 <code>aicpu_*.csv</code>）；老布局的 <code>kernel_details.csv</code> /
 <code>step_trace_time.csv</code> 在 CANN 9.2 里都不存在。脚本用 glob 兜住两种，别照抄文件名。</li>
 <li><b><code>*_ratio</code> 是并行流水占比，不能相加</b>：它是「该流水单元占本核 cycle 的比例」，
@@ -1510,7 +1510,7 @@ cube / mte2 / scalar 是并行的，加起来会超过 100%；有信息的是<b>
 <li><b>单 rank 口径</b>：设备侧只分析 rank0。DP8 对称，但若某 rank 路由显著偏斜，绝对值会有出入。</li>
 </ul>""")
     A('<h3>8.3 数据出处</h3>')
-    A(tbl(["腿", "端到端日志（ais_bench）", "负载报告（payload 来源）", "设备侧导出", "用途"], [
+    A(tbl(["运行", "端到端日志（ais_bench）", "负载报告（payload 来源）", "设备侧导出", "用途"], [
         [f"<code>{esc(L1o)}</code>", _src(SCRIPTS / L1o / f"{L1o}_test_gsm8k.log"), "—", "—", "干净端到端 off"],
         [f"<code>{esc(L1s)}</code>", _src(SCRIPTS / L1s / f"{L1s}_test_gsm8k.log"), "—", "—", "干净端到端 slot"],
         [f"<code>{esc(L2o)}</code>", _src(SCRIPTS / L2o / f"{L2o}_test_gsm8k.log"),
@@ -1519,7 +1519,7 @@ cube / mte2 / scalar 是并行的，加起来会超过 100%；有信息的是<b>
          _src(PAYLOAD_SRC["slot"]), _src(PROF_ROOTS["slot"]), "负载结构 + 设备归因 slot"],
     ]))
     A(f"""<div class="cap">设备侧只导出 rank0 一份：已核对 8 个 rank 的 <code>*_ascend_pt</code> 目录都在，
-两腿的窗口差（{sec(W['off']['win'])} vs {sec(W['slot']['win'])}）与客户端日志的
+两次运行的窗口差（{sec(W['off']['win'])} vs {sec(W['slot']['win'])}）与客户端日志的
 Benchmark Duration 差（{sec(B['g2_off']['common']['Benchmark Duration'][0]/1000, 1)} vs
 {sec(B['g2_slot']['common']['Benchmark Duration'][0]/1000, 1)}）同量级，说明单 rank 的窗口是可信的。</div>""")
     A(f"""<div class="foot">本报告由 <code>scripts/dsv4flash_service/gen_moonep_off_vs_slot_perf_report.py</code> 生成于 {now}；

@@ -221,11 +221,12 @@ fi
 unset ftp_proxy https_proxy http_proxy
 source /usr/local/Ascend/cann/set_env.sh
 
-WS=/mnt/share/x00893896/vllm_ascend_moonep_integration # vllm、vllm_ascend、vllm_ascend_moonep仓在该目录下
-export HCCL_IF_IP=141.61.73.103          # 本机 IP，ifconfig 查
-export GLOO_SOCKET_IFNAME=eth0           # 下面三个都是上面这个 IP 对应的网卡
-export TP_SOCKET_IFNAME=eth0
-export HCCL_SOCKET_IFNAME=eth0
+
+WS=/home/x00893896/vllm_ascend_moonep_integration # vllm、vllm_ascend、vllm_ascend_moonep仓在该目录下
+export HCCL_IF_IP=90.90.93.34          # 本机 IP，ifconfig 查
+export GLOO_SOCKET_IFNAME=ens6f1np1           # 下面三个都是上面这个 IP 对应的网卡
+export TP_SOCKET_IFNAME=ens6f1np1
+export HCCL_SOCKET_IFNAME=ens6f1np1
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024                # HCCL 缓冲大小；首次跨 engine 集合通信需要这个量级
 export OMP_PROC_BIND=false
@@ -288,6 +289,12 @@ fi
 # **硬上限 max(share) <= 100/top_k（本模型 K=6 → 16.67%；K=8 则是 12.5%）**：真实 topk 每个
 # token 的 K 个专家互异，任何专家最多被 T 个 token 选中。超过这个值直接报错退出，不是告警。
 # 该上限只由 K 决定，与 E 无关——换 E 不用改档案。
+# 两种「步太小」的情形都不会打挂引擎，且都照常注入：T < top_k（如 dp=4 时每 rank 只剩 1 条序列
+# 的 decode，拼批后 T=4）只打一行 warning（每进程一次），因为一行本来就 K 个槽、一个 token 就能
+# 填满一行的互异专家，真正的约束是 count[e] <= T；DP 同步用的 dummy step（T 恒为 1，
+# NPUWorker.execute_dummy_batch）也必须注入——挂起注入会让它走真实 router，而 DSv4 的 hash gate
+# （MoeGatingTopKHash）正好在 N=1 这个形状上打挂 AI core（所有空闲 DP rank 同时，errcode 263,95），
+# 同一个核在 startup profile 与真实步的成批尺寸上都正常。不带 SIM_ROUTE 的腿同样会撞到它。
 # 日志：T 变化时打一张 E 行的完整表（req% / 期望条数 / 实际条数 / 偏差 + home-rank rows），
 # 之后复用同一份分配（按 T 缓存，层间与同长步之间完全一致），每 SIM_ROUTE_EVERY 次调用打一行
 # 复用确认。SUM_act 必须等于 T×K；max|dev| 应 <= 1（最大余数法保证）。
@@ -349,7 +356,7 @@ REPORT_FILE=$OUT_DIR/${LEG_NAME}_report.html
 
 # ------------------------------------------------------------ 起服务 -- #
 # 服务参数集中在这里：下面命令行和「启动核对」横幅用的是同一批变量，改一处就够。
-MODEL=/mnt/weight/A5-weights/DeepSeek-V4-Flash   # 权重目录
+MODEL=/mnt/data/models/DeepSeek-V4-Flash   # 权重目录
 SERVED_NAME=test_auto                           # 客户端要填的 model 名
 HOST=0.0.0.0                                     # 监听地址（0.0.0.0 = 本机所有网卡）
 PORT=8444                                        # 服务端口；curl 采集接口也是这个
@@ -357,7 +364,7 @@ API_SERVER_COUNT=1                               # 单前端 + DPCoordinator 做
 DP=8                                             # DSV4-Flash 受 DSA 头数约束只能 TP=1，靠 DP 铺开
 TP=1
 MAX_NUM_SEQS=16                                  # 并发上限；与离线负载腿同一取点
-BATCHED_TOKENS=16384                              # 每步 token 预算，同时是 MoonEP dispatch 的容量 S
+BATCHED_TOKENS=16384                              # 每步 token 数上限（max_num_batched_tokens），同时是 MoonEP dispatch 的容量 S
 MAX_MODEL_LEN=40960                               # 40k:40960
 GPU_UTIL=0.80                                    # slot 模式的 non-torch 占用约 20 GiB，别直接上 0.90
 # 命令行里写死的三个开关（不做成变量）：
