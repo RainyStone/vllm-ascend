@@ -262,6 +262,97 @@ def _registry_keys() -> set[tuple]:
 
 
 # ---------------------------------------------------------------------------
+# AICPU custom 调度器预热：必须排在"建立跨设备映射"之前，否则整个 DP wave 挂死。
+#
+# 驱动约束（2026-09-22 定位，2 卡最小复现脚本 scripts/repro_aicpu_vs_moonep_order.py）：
+# 本进程 VA 里一旦已经存在**跨设备**的 task group 映射——MoonEP 的对称堆正是在
+# collective init 时把其它 rank 的物理内存映射进本地 VA 空间——之后再启动本进程的
+# AICPU custom 调度器，驱动就会拒绝：
+#   dmesg  : [svm] um_smm_mmap_pre_handle Task group map dst_devid should be consistent
+#            with src_devid. (dst_udevid=0; src_udevid=1) → event_sched ret=3
+#   deviceN: [svm_attach_task_group] Notice master failed. (ret=3) →
+#            Failed to halMemBindSibling ... ret[3] →
+#            Aicpu custom schedule start failed, ret[22201]
+# 同一条约束对"跨设备映射之后才新建/首次使用的 HCCL 通信域"一样成立（表现为
+# ret=3 / HCCL error 19）。
+# 而 vllm-ascend 的 A5 attention metadata 算子（csrc/attention/*_metadata，按
+# add_modules_sources_aicpu 编译）正是 AICPU custom 算子：调度器起不来 → 算子永不
+# 执行 → host 卡在紧随其后的 .item()，该步在 DP 上永远等不齐 → 全体停住
+# （2026-09-22 14:32 的 DSv4 slot 运行实测：device-0 aicpu 日志 ret[22201]、8 卡
+#  再无输出、14:41 强杀）。
+# 调度器是在第一个 AICPU custom 任务**提交**时同步起来的，所以这里随便跑一个最小的
+# metadata 算子就够；起来之后即使已有 peer 映射，再跑 aicpu 算子也正常（已实测）。
+# 失败只告警不抛：真没有它最多是回到旧行为，不该把 MoonEP 起链整块拖垮。
+# ---------------------------------------------------------------------------
+_AICPU_WARMUP_OP = "npu_vllm_quant_lightning_indexer_metadata"
+
+
+def _warmup_aicpu_custom_scheduler() -> bool:
+    """在建立跨设备映射之前，先把本进程的 AICPU custom 调度器拉起来。
+
+    返回是否成功（失败原因见上）。可用 ``MOONEP_AICPU_WARMUP=0`` 关掉。
+    """
+    rank = get_ep_group().rank_in_group
+    if os.environ.get("MOONEP_AICPU_WARMUP", "1") == "0":
+        print(f"[moonep-init r{rank}] stage=aicpu-warmup skipped (MOONEP_AICPU_WARMUP=0)", flush=True)
+        return False
+    try:
+        # 本函数在 load_model 末尾被调，此时通常**没有** forward context
+        # （vllm 的 get_forward_context() 会直接 assert），所以只能防御性读取。
+        capturing = bool(_EXTRA_CTX.capturing)
+    except Exception:  # noqa: BLE001
+        capturing = False
+    if capturing:
+        # 图捕获期间不能插新算子、更不能 host 同步。
+        print(f"[moonep-init r{rank}] stage=aicpu-warmup skipped (capturing)", flush=True)
+        return False
+    try:
+        op = getattr(torch.ops._C_ascend, _AICPU_WARMUP_OP)
+    except Exception:  # noqa: BLE001 - 别的模型/版本可能没有这个算子
+        print(
+            f"[moonep-init r{rank}] stage=aicpu-warmup skipped "
+            f"(op {_AICPU_WARMUP_OP} not registered)",
+            flush=True,
+        )
+        return False
+    dev = f"npu:{torch.npu.current_device()}"
+    lens = torch.ones(1, dtype=torch.int32, device=dev)
+    try:
+        # 1 token 的最小调用：只为了触发调度器启动，忽略输出。
+        op(
+            num_heads_q=64,
+            num_heads_k=1,
+            head_dim=128,
+            query_quant_mode=0,
+            key_quant_mode=0,
+            actual_seq_lengths_query=lens.clone(),
+            actual_seq_lengths_key=lens.clone(),
+            batch_size=1,
+            max_seqlen_q=1,
+            max_seqlen_k=1,
+            layout_query="TND",
+            layout_key="PA_BSND",
+            sparse_count=512,
+            sparse_mode=3,
+            pre_tokens=(1 << 63) - 1,
+            next_tokens=(1 << 63) - 1,
+            cmp_ratio=4,
+            device=dev,
+        )
+        torch.npu.synchronize()
+    except Exception as exc:  # noqa: BLE001 - 预热失败不许改变原有行为
+        print(
+            f"[moonep-init r{rank}] stage=aicpu-warmup FAILED "
+            f"({type(exc).__name__}: {exc}) —— AICPU custom 调度器可能没起来，"
+            f"后续 aicpu 算子（A5 attention metadata）有挂住的风险",
+            flush=True,
+        )
+        return False
+    print(f"[moonep-init r{rank}] stage=aicpu-warmup done op={_AICPU_WARMUP_OP}", flush=True)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Runtime pool: one ascend_moonep.Buffer per unique (E, K, H) layer shape.
 # Construction registers CANN VMM descriptors only; ShmemRuntime is initialized
 # once, after every Buffer has been created (two-phase, collective).
@@ -386,6 +477,10 @@ class _MoonEPRuntime:
             self._state_by_w13 = {id(st._w13_src): st for st in states}
 
         if not ShmemRuntime.is_initialized():
+            # 必须在下面的 collective init 之前：它会把 peer 的物理内存映射进本地
+            # VA，之后就再也起不了 AICPU custom 调度器了（见上方
+            # _warmup_aicpu_custom_scheduler 的驱动约束注释）。
+            _warmup_aicpu_custom_scheduler()
             # Engine 环境默认走 ipport/config-store bootstrap：uid 路径要在
             # 每个 worker 的 HCCL 组上做 UID 广播（dist.broadcast over HCCL），
             # 在引擎里与刚创建的 UDMA-flagged VMM 上下文及模型加载后的设备态
@@ -433,6 +528,11 @@ def ensure_runtime_initialized() -> None:
     the first forward worked for the MTE path but the UDMA path stalls in the
     engine; early collective init on an otherwise-quiet device state is the
     MindSpeed pattern that keeps the UDMA/URMA kernels healthy.
+
+    一并把 AICPU custom 调度器预热提前到这里（collective init 之前）：
+    ``_initialize_locked`` 里若先建了跨设备映射，A5 attention metadata 这类
+    AICPU custom 算子就再也起不来了，整个 DP wave 会挂死——见
+    ``_warmup_aicpu_custom_scheduler``。
 
     Idempotent; no-op when MoonEP is not enabled or EP world size <= 1.
     """

@@ -29,6 +29,7 @@ vllm-ascend `releases/v0.23.0`（本仓为其 fork）、vllm v0.23.0、ascend-mo
 | 3 | `aclrtMemSetAccess(va=..., size=...) failed with 507899` | `ascend-moonep/csrc` + 两份 Python 层 | **一半已实施**（vendored Python 层）；C++ 侧待批准 |
 | 4 | DSv4 的 W4A8 路径 `AttributeError`，找 `pad_and_split_input_ids` | **本仓** `moonep_comm.py` | 已实施（见 commit `fix(moonep): delegate pad_and_split_input_ids`） |
 | 5 | `errcode:22007 / 507018 aicpu exception`，`kernelName=KvQuantSparseAttnSharedkvMetadata` | 上游 A5 稀疏注意力算子 + 模型配置 | **A5 侧待确认**（moonep/baseline 两条腿都一样，与本仓无关）；DP2+TP1 可绕开头数约束，**DSV4-Flash + MoonEP 已按此端到端跑通**（跨 engine 挂死根因是 `expandable_segments`，改 `False` 即可，见 §5 末） |
+| 6 | DP8+MoonEP 服务化**无报错硬挂**；dmesg `Task group map dst_devid should be consistent with src_devid`；device 日志 `Aicpu custom schedule start failed, ret[22201]` | **本仓** `moonep_comm.py`（AICPU 调度器启动顺序） | 已实施并验证（§6，2 卡复现 + 8 卡服务化 32/32） |
 
 ---
 
@@ -317,8 +318,13 @@ def pad_and_split_input_ids(self, input_ids):
 - `MOONEP_SLOT_MODE` 可开（W4A8MXFP 已打通到单层产品路径 bit-identical，端到端待 EP≥8 空卡；
   见 [moonep_slot_quant.md](moonep_slot_quant.md)）；
 - 关闭 dynamic EPLB / mix_placement；
-- token 数 ≤ `max_num_batched_tokens` 时走 SHMEM，超出会回落到 MC2 / all-to-all
-  （所以 `method=` 列里可能混着出现，见 [moe_par.md](moe_par.md) 第 6 节）；
+- 按芯片分派本来会选 all-gather / all-to-all 的 step 走 SHMEM；超出 SHMEM 容量 S 的 step
+  现在**直接抛 `RuntimeError`**（2026-09-23 之前是静默回落到 MC2 / all-to-all），默认配置下
+  `method=` 列全是 `MoonEPCommImpl`；开 `MOONEP_KEEP_MC2=1` 时 MC2 档的 step 留在 MC2，
+  `method=` 才会混着出现（见 [moe_par.md](moe_par.md) 第 6 节）；
+- 拉起时必须**同时**开 expert parallel（`--enable-expert-parallel`）：开了 `enable_moonep` 但
+  EP 没开（或 EP 只有 1 个 rank）现在**直接抛 `RuntimeError`**（2026-09-23 之前是静默退化，
+  tag/bench.json 看起来还是 MoonEP 的运行）；
 - 拉起前要有 `ASCEND_MOONEP_BUILD_DIR` 或 `LD_LIBRARY_PATH`（见第 2、3 条）；
 - 用 `ASCEND_RT_VISIBLE_DEVICES` 选空闲卡。
 
@@ -564,6 +570,66 @@ DSV4 走不了 `scripts/moe_par/moe_par_bench.py` 的 TP 路径（会被 64/128 
    q tensor 的实际头数（每 rank 32），所以即便 metadata 改成传全局，也过不了消费者那关。
 2. 需要 device 侧日志才能定位的这类 AICPU 报错，别只看 host plog——`22007 inner error` 只表示
    kernel `return false`，原因在 `/root/ascend/log/debug/device-*/`（按次生成，不滚动，跑完立刻看）。
+
+---
+
+## 6. AICPU custom 调度器必须早于 MoonEP 的跨设备映射启动（否则整步挂死）
+
+**现象**
+
+DP8 + MoonEP slot 的服务化运行（`scripts/dsv4flash_service/sim_route_4hot_profiling_moepar_moonep_slot.log`，
+2026-09-22 14:26 起）里**没有任何报错行**，是硬挂：引擎 14:31:05 起完（8 rank 都打出
+`stage=shmem-init-done`），14:32:04 之后只剩 `shm_broadcast.py:705 No available shared memory
+broadcast block found in 60 seconds` 反复刷，直到 14:41:14 被强杀。日志里连一条 `[sim-route r0]`
+都没有——DP0 一次都没走到 MoE 路由。
+
+**根因**（三条证据缺一不可）
+
+1. `dmesg`：`[svm] um_smm_mmap_pre_handle Task group map dst_devid should be consistent with
+   src_devid. (dst_udevid=0; src_udevid=1)`，紧随 `[event_sched] Pre proc failed (ret=3; event_id=27)`；
+2. `/root/ascend/log/debug/device-0/device-<pid>_*.log`：
+   `[svm_attach_task_group] Notice master failed. (ret=3)` → `Failed to halMemBindSibling …
+   ret[3]` → `Compute process start failed, ret[1]` → `Aicpu custom schedule start failed, ret[22201]`；
+3. `csrc/attention/vllm_quant_lightning_indexer_metadata/CMakeLists.txt:11` 用
+   `add_modules_sources_aicpu(...)` 编译 ⇒ DSv4 prefill 的 attention metadata 算子是 **AICPU custom 算子**，
+   而 `vllm_ascend/attention/dsa_v1.py` 紧接着要对它的输出做 `.item()`。
+
+驱动规则：**本进程 VA 里一旦已经存在跨设备（peer）的 task group 映射，之后再启动本进程的
+AICPU custom 调度器（`halMemBindSibling`）就会被拒**。MoonEP 的对称堆正是在 collective
+`ShmemRuntime.init_with_ip_port` / `init_with_buffer` 时把其它 rank 的物理内存映射进本地 VA，
+于是顺序变成「先 peer 映射、后调度器启动」→ 被拒 → metadata 算子永不执行 → host 卡在 `.item()` →
+该步在 DP 上永远等不齐 → 8 卡全停。
+同一条约束对**跨设备映射之后新建/首次使用的 HCCL 通信域**一样成立（同样 ret=3，表现为 HCCL error 19）。
+
+**为什么 2 卡探针一直是 PASS**：`scripts/smoke_slots.py`、`scripts/probe_slots_multi.py` 不跑任何
+AICPU custom 算子，没有"调度器启动"这一步可拒。2026-09-15 那次 DP2 端到端为什么没撞上，没有留下
+可比的日志，尚未查清；本节的结论只依赖下面的复现证据。
+
+**解法（本仓改动，`vllm_ascend/ops/fused_moe/moonep_comm.py`）**
+
+`_initialize_locked` 在 collective init **之前**先做一次 AICPU custom 调度器预热
+（`_warmup_aicpu_custom_scheduler()`：1 token 调一次
+`torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata` + `torch.npu.synchronize()`；
+`MOONEP_AICPU_WARMUP=0` 关掉，失败只告警不抛——没有它只是回到旧行为）。
+调度器是在第一个 AICPU custom 任务**提交**时同步起来的，所以预热一次就够：之后即使 peer 映射已存在，
+再跑 aicpu 算子也正常（实测）。
+
+**验证**
+
+- 2 卡最小复现 `scripts/repro_aicpu_vs_moonep_order.py`（R=2，卡 0/1）：
+  `--when after`（先 moonep init、再跑 aicpu 算子）复现出**同一份 dmesg 拒绝 + 同一串 aicpu 日志**，
+  然后挂住（timeout 杀掉）；`--when mid`（预热插在 collective init 之前，即本次改动的位置）全绿：
+  预热 OK、moonep init OK、之后 aicpu 算子 OK。
+- 8 卡服务化（`fix_slot_4hot`，2026-09-22 15:10 起，开关与负载同失败那次）：8 rank 都打出
+  `stage=aicpu-warmup done`，`vllm bench serve` **32/32 成功、0 失败、26.4 s**，8 rank dump 齐全，
+  dmesg 无新的 task-group 拒绝。
+
+**遗留**
+
+- 只预热了 DSv4 用到的那个 metadata 算子。别的模型若用 `store_kv_block_metadata` /
+  `sparse_attn_sharedkv_metadata`，同样能触发调度器启动，但当前代码没覆盖（算子不存在时只告警 skip）。
+- owner 腿（`MOONEP_SLOT_MODE=0`）走同一条落链，**预期有同样隐患**，尚未单独跑过。
+- 同一条驱动约束的另一面：MoonEP init 之后不要再新建/首次使用 HCCL 通信域。
 
 ---
 
