@@ -68,12 +68,19 @@ def _patch_select_moe_comm_method_deps(
     enable_fused_mc2: int = 0,
     is_moe: bool = True,
     spec_decode_enabled: bool = False,
+    enable_moonep: bool = False,
+    moonep_tokens_capacity: int | None = None,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_moonep=enable_moonep),
+    )
+    monkeypatch.setattr(afc, "get_moonep_tokens_capacity", lambda: moonep_tokens_capacity)
     monkeypatch.setattr(
         afc,
         "speculative_enable_dispatch_gmm_combine_decode",
@@ -245,3 +252,94 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     )
 
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
+
+
+def _patch_moonep_a5(monkeypatch, *, moonep_tokens_capacity: int, keep_mc2: bool = False):
+    """A5 / DP4 / top_k=6 / mc2 capacity 16 — this deployment's shape."""
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=16,
+        ep_world_size=4,
+        enable_moonep=True,
+        moonep_tokens_capacity=moonep_tokens_capacity,
+    )
+    monkeypatch.setattr(afc.envs, "MOONEP_KEEP_MC2", keep_mc2)
+    return _make_vllm_config(world_size=4, top_k_experts=6)
+
+
+def test_select_moe_comm_method_moonep_replaces_allgather(monkeypatch):
+    vllm_config = _patch_moonep_a5(monkeypatch, moonep_tokens_capacity=16384)
+
+    # 8192 > mc2 capacity: the SoC default is ALLGATHER, which MoonEP replaces.
+    assert afc.select_moe_comm_method(8192, vllm_config) == MoECommType.SHMEM
+
+
+def test_select_moe_comm_method_moonep_takes_mc2_sized_steps_by_default(monkeypatch):
+    vllm_config = _patch_moonep_a5(monkeypatch, moonep_tokens_capacity=16384)
+
+    # 1 <= mc2 capacity: the SoC default is MC2, still overridden without MOONEP_KEEP_MC2.
+    assert afc.select_moe_comm_method(1, vllm_config) == MoECommType.SHMEM
+
+
+def test_select_moe_comm_method_moonep_keep_mc2_only_spares_mc2_steps(monkeypatch):
+    vllm_config = _patch_moonep_a5(monkeypatch, moonep_tokens_capacity=16384, keep_mc2=True)
+
+    assert afc.select_moe_comm_method(1, vllm_config) == MoECommType.MC2
+    assert afc.select_moe_comm_method(8192, vllm_config) == MoECommType.SHMEM
+
+
+def test_select_moe_comm_method_moonep_raises_when_step_exceeds_capacity(monkeypatch):
+    vllm_config = _patch_moonep_a5(monkeypatch, moonep_tokens_capacity=8192, keep_mc2=True)
+
+    with pytest.raises(RuntimeError, match="static SHMEM capacity"):
+        afc.select_moe_comm_method(16384, vllm_config)
+
+
+def test_select_moe_comm_method_moonep_without_ep_raises(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=16,
+        ep_world_size=1,
+        enable_moonep=True,
+        moonep_tokens_capacity=8192,
+    )
+    vllm_config = _make_vllm_config(enable_expert_parallel=False, world_size=4, top_k_experts=6)
+
+    # MoonEP would never take effect here: every step would silently keep the
+    # SoC default while the run still looks like a MoonEP run.
+    with pytest.raises(RuntimeError, match="needs expert parallel"):
+        afc.select_moe_comm_method(16384, vllm_config)
+
+
+def test_select_moe_comm_method_moonep_with_single_ep_rank_raises(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=16,
+        ep_world_size=1,
+        enable_moonep=True,
+        moonep_tokens_capacity=8192,
+    )
+    vllm_config = _make_vllm_config(enable_expert_parallel=True, world_size=1, top_k_experts=6)
+
+    with pytest.raises(RuntimeError, match="ep_world_size=1"):
+        afc.select_moe_comm_method(8192, vllm_config)
+
+
+def test_select_moe_comm_method_moonep_without_moe_stays_silent(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=16,
+        ep_world_size=1,
+        enable_moonep=True,
+        moonep_tokens_capacity=8192,
+        is_moe=False,
+    )
+    vllm_config = _make_vllm_config(enable_expert_parallel=False, world_size=4, top_k_experts=6)
+
+    # A dense model has no MoE dispatch at all, so `enable_moonep` is unused
+    # rather than ineffective.
+    assert afc.select_moe_comm_method(16384, vllm_config) is None

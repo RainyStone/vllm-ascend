@@ -129,6 +129,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Default off — MoonEP then runs owner-only dispatch. Requires MOONEP_B ==
     # E/R and --enforce-eager (the MoonEP collective kernels cannot be captured).
     "MOONEP_SLOT_MODE": lambda: bool(int(os.getenv("MOONEP_SLOT_MODE", "0"))),
+    # MoonEP small-step policy: when enable_moonep is on, keep the steps whose
+    # SoC-default selection is MC2 (num_tokens <= mc2_tokens_capacity) on MC2 and
+    # replace only the all-gather / all-to-all selections with SHMEM. Default
+    # off: every step within the SHMEM capacity S goes to MoonEP. MC2 needs the
+    # HCCL UB_MEM link, which a cross-UB-domain card group does not have
+    # (aclnnMoeDistributeDispatchV4 561000), so enable this only on one UB domain.
+    "MOONEP_KEEP_MC2": lambda: bool(int(os.getenv("MOONEP_KEEP_MC2", "0"))),
     # Number of prefetch slots; defaults to E/R (the library plan requires B == E/R,
     # other values are rejected).
     "MOONEP_B": lambda: os.getenv("MOONEP_B", None),

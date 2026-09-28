@@ -41,6 +41,11 @@ import time as _time
 
 _TSTATS_ON = os.environ.get("ASCEND_MOONEP_TIME_STATS", "0") == "1"
 _TRACE_ON = os.environ.get("ASCEND_MOONEP_TRACE", "0") == "1"
+# ASCEND_MOONEP_TIME_STATS_EVERY=N: also print the (cumulative) ledger every N calls
+# of the dispatch entry mark. N = MoE layer count -> one line per step. Same reason as
+# the vllm-side MOONEP_TIME_STATS_EVERY: a served engine is force-killed at shutdown,
+# so the atexit print never runs and the ledger would be lost.
+_TSTATS_EVERY = int(os.environ.get("ASCEND_MOONEP_TIME_STATS_EVERY", "0") or 0)
 _TSTATS: dict = {}
 
 
@@ -52,6 +57,10 @@ def _ts(name, t0):
     acc = _TSTATS.setdefault(name, [0.0, 0])
     acc[0] += now - t0
     acc[1] += 1
+    # "disp_hdr" is the first mark of every dispatch call (= once per MoE layer per
+    # step), so it doubles as the step counter for the periodic ledger.
+    if _TSTATS_EVERY and name == "disp_hdr" and acc[1] % _TSTATS_EVERY == 0:
+        _dump_lib_tstats()
     return now
 
 

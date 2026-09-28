@@ -11,6 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -347,6 +348,14 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
        and the EP size is large enough; otherwise use all-gather when
        EP size is smaller than num of topK experts or all-to-all.
+    7. With MoonEP (``enable_moonep``) and expert parallel, a step that fits
+       the static SHMEM capacity S replaces the all-gather / all-to-all
+       selection above with SHMEM; with ``MOONEP_KEEP_MC2`` an MC2-sized step
+       keeps MC2 instead. A step that exceeds S raises instead of falling back
+       to the SoC default.
+    8. MoonEP without expert parallel (or with a single EP rank) raises as
+       well: it would never take effect, so every step would silently keep the
+       SoC default while the run looks like a MoonEP run.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -355,6 +364,8 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     Raises:
         ValueError: If the soc version is unsupported.
+        RuntimeError: If MoonEP is enabled but not applicable (no expert
+            parallel / single EP rank) or the step exceeds its capacity S.
 
     Returns:
         MoECommType | None: The selected MoE communication method.
@@ -362,17 +373,20 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not is_moe_model(vllm_config):
         return None
 
-    # MoonEP override: expert-parallel MoE steps whose token count fits the
-    # static SHMEM capacity S are routed through ascend-moonep dispatch;
-    # anything larger falls through to the SoC default (MC2/ALLTOALL/etc.).
-    if (
-        get_ascend_config().enable_moonep
-        and vllm_config.parallel_config.enable_expert_parallel
-        and get_ep_group().world_size > 1
-        and get_moonep_tokens_capacity() is not None
-        and num_tokens <= get_moonep_tokens_capacity()
+    # MoonEP only replaces the MoE dispatch of an expert-parallel step, so
+    # without EP every step would silently keep the SoC default while the run
+    # still looks like a MoonEP run. A dense model is different: it has no MoE
+    # dispatch at all, so `enable_moonep` is simply unused there and the early
+    # return above stays silent.
+    if get_ascend_config().enable_moonep and (
+        not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size <= 1
     ):
-        return MoECommType.SHMEM
+        raise RuntimeError(
+            f"MoonEP: enable_moonep needs expert parallel over more than one rank, but got "
+            f"enable_expert_parallel={vllm_config.parallel_config.enable_expert_parallel}, "
+            f"ep_world_size={get_ep_group().world_size}; MoonEP would never take effect and every step would "
+            "keep the SoC default. Enable expert parallel or drop enable_moonep."
+        )
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
@@ -401,6 +415,28 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
+
+    # MoonEP override, applied on top of the SoC default selected above: an
+    # expert-parallel MoE step whose token count fits the static SHMEM capacity
+    # S is routed through ascend-moonep dispatch. With ``MOONEP_KEEP_MC2`` only
+    # the all-gather / all-to-all selections are replaced, so MC2-sized steps
+    # stay on MC2. A step that fits nowhere is a hard error: a silent fallback
+    # changes the communication and (in slot mode) also the compute path, so a
+    # run that looks like full MoonEP could quietly contain other methods.
+    # with the EP precondition checked above, an enabled MoonEP is always applicable here
+    if get_ascend_config().enable_moonep:
+        moonep_tokens_capacity = get_moonep_tokens_capacity()
+        keep_mc2_step = envs.MOONEP_KEEP_MC2 and moe_comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2)
+        if moonep_tokens_capacity is not None and not keep_mc2_step:
+            if num_tokens > moonep_tokens_capacity:
+                raise RuntimeError(
+                    f"MoonEP: step has {num_tokens} tokens > static SHMEM capacity S={moonep_tokens_capacity} "
+                    f"(SoC default would be {moe_comm_type.name}). Raise --max-num-batched-tokens to cover the "
+                    "step or disable enable_moonep; MoonEP does not fall back to the SoC default "
+                    "(MOONEP_KEEP_MC2=1 keeps MC2-sized steps on MC2)."
+                )
+            moe_comm_type = MoECommType.SHMEM
+
     logger.debug(
         "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
         soc_version,

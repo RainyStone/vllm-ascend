@@ -146,7 +146,7 @@ python scripts/moe_par/moe_par_bench.py --help
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--batch-size` / `--max-num-seqs` | `32` | decode 并发数，即 batch size；**这是控制纯 decode 步 token 数的手段** |
-| `--max-num-batched-tokens` | `1024` | 每步 token 预算；**通信方式是按这个数逐 step 选的** |
+| `--max-num-batched-tokens` | `1024` | 每步 token 数上限（也是 MoonEP 的容量 S）；**通信方式是按这个数逐 step 选的** |
 
 **parallelism**
 
@@ -192,8 +192,9 @@ python scripts/moe_par/moe_par_bench.py --help
 
 ### 护栏与提示
 
-- `--no-ep --moonep` 目前是**静默无效组合**：EP 关掉时通信方式退化为 all-gather，但 tag 里仍会带
-  `moonep`。属于已知坑，不是特性；要对比就两个参数配套使用。
+- `--no-ep --moonep` 是**自相矛盾的组合**，现在会在第一个 forward 前直接抛 `RuntimeError`
+  （`select_moe_comm_method`；2026-09-23 之前是静默退化成 all-gather、tag 里却仍带 `moonep`）。
+  要么两个参数配套用，要么把 `--moonep` 去掉。
 - `moe_par_bench.py` 会先把开关写进环境变量，**再** `import vllm`——因为打点模块在 import 时读这些
   变量（见下节）。
 - 采集目录里若已有**同一个** tag 的 dump，只警告并覆盖；若已有**别的** tag 的 dump，直接报错退出，
@@ -341,34 +342,28 @@ step=0 layer=0 method=MC2CommImpl counts=[12,0,45,...]
 一句话：**每个 forward step 开始时决定一次，判据是该步的 token 数加一组静态配置**；同一步内所有
 MoE 层共用同一种方式，与层号无关（所以按 `(step, layer)` 打标签是成立的）。
 
-选型链路（`ascend_forward_context.py:99-104`，建立 forward context 时）：
+选型链路（`ascend_forward_context.py:100-104`，建立 forward context 时）：
 
 | 步骤 | 代码 | 说明 |
 |---|---|---|
-| ① 取本步 token 数 | `max_num_tokens = num_tokens_across_dp.max()`（`:99`） | 取 **DP 组内各 rank 的最大值**，好让整个 EP 组选出同一种方式（否则集合通信会错配）；没有 DP 时就用本 rank 的 `num_tokens` |
-| ② 选类型 | `select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)`（`:100`，定义在 `:335`） | 返回一个 `MoECommType`（或 `None`） |
-| ③ 取实现 | `get_moe_comm_method(moe_comm_type)`（`:101`，定义在 `moe_comm_method.py:51`） | 从注册表取**单例**；注册发生在 `setup_moe_comm_method`（`moe_comm_method.py:55`），在建 MoE 层时调用一次（`AscendMoERunner.__init__`，`fused_moe.py:440`），逐 step 只是选哪个 |
+| ① 取本步 token 数 | `max_num_tokens = num_tokens_across_dp.max()`（`:100`） | 取 **DP 组内各 rank 的最大值**，好让整个 EP 组选出同一种方式（否则集合通信会错配）；没有 DP 时就用本 rank 的 `num_tokens` |
+| ② 选类型 | `select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)`（`:101`，定义在 `:336`） | 返回一个 `MoECommType`（或 `None`） |
+| ③ 取实现 | `get_moe_comm_method(moe_comm_type)`（`:104`，定义在 `moe_comm_method.py:51`） | 从注册表取**单例**；注册发生在 `setup_moe_comm_method`（`moe_comm_method.py:55`），在建 MoE 层时调用一次（`AscendMoERunner.__init__`，`fused_moe.py:440`），逐 step 只是选哪个 |
 | ④ 记进 dump | `moe_par_stats.record(..., type(_EXTRA_CTX.moe_comm_method).__name__)`（`fused_moe.py:716`） | 记的就是**这一步实际用的那个**，与 ② 的选择一一对应 |
 
 注册表里有什么（`moe_comm_method.py:55-68`）：`ep_size > 1` 时注册 all-to-all / all-gather / MC2 / fused-MC2，
 开了 `enable_moonep` 再注册 MoonEP (SHMEM)；`ep_size == 1` 时**只注册 all-gather**。
 
-判定顺序（`select_moe_comm_method`，`ascend_forward_context.py:335-411`）：
+判定顺序（`select_moe_comm_method`，`ascend_forward_context.py:336-431`）：
 
 ```text
 select_moe_comm_method(num_tokens)
 │
 ├─ 1. 不是 MoE 模型 ───────────────────────────────→ None
 │
-├─ 2. MoonEP 覆盖（插在最前，优先级最高）：
-│     enable_moonep 且 enable_expert_parallel
-│     且 ep_group.world_size > 1
-│     且 SHMEM 容量 S 已建好
-│     且 num_tokens <= S ─────────────────────────→ SHMEM（MoonEP）
+├─ 2. 没开 EP，或 ep_group.world_size == 1 ───────→ ALLGATHER
 │
-├─ 3. 没开 EP，或 ep_group.world_size == 1 ───────→ ALLGATHER
-│
-└─ 4. 按芯片分派（soc_version）：
+└─ 3. 按芯片分派（soc_version）：
       ├─ A2：每卡专家数 <= 24 且 ep >= 16
       │      且 num_tokens <= mc2容量 ────────────→ MC2
       │      否则 ─────────────────────────────────→ ALLGATHER
@@ -388,16 +383,34 @@ select_moe_comm_method(num_tokens)
       │      否则 ──────────────────────────────────→ ALLTOALL
       │
       └─ 310P ──────────────────────────────────────→ ALLGATHER
+│
+└─ 4. MoonEP 覆盖（盖在第 3 步选出的结果之上）：
+      enable_moonep 且 SHMEM 容量 S 已建好：
+        ├─ 没开 EP 或 ep_group.world_size <= 1 ─────→ 抛 RuntimeError
+        │                                             （MoonEP 不可能生效，
+        │                                              别让 tag/命令行看起来像开了）
+        ├─ MOONEP_KEEP_MC2=1 且第 3 步选中的是 MC2 /
+        │  FUSED_MC2 ────────────────────────────────→ 保持 MC2
+        ├─ num_tokens <= S ─────────────────────────→ SHMEM（MoonEP）
+        └─ 否则（num_tokens > S）───────────────────→ 抛 RuntimeError
+                                                      （不再静默回落）
 ```
 
-MoonEP 是**插在最前面的覆盖**：只要条件成立就选它，连 A3 上的 fused-MC2 也排在它后面。
+MoonEP 是**盖在按芯片分派结果之上的覆盖**：它只替换 all-gather / all-to-all 的选择，所以「开 moonep
+= 整轮每步都走 MoonEP」只在 `MOONEP_KEEP_MC2` 为默认 0 时成立；置 1 时 MC2 档的 step 留在 MC2，
+同一轮里 MC2 与 MoonEP 会交替出现。超过 S 的 step 直接抛 `RuntimeError`（2026-09-23 之前是
+静默退回芯片默认规则，那种回落会同时换掉通信方式与 slot 模式下的计算路径，让「全 MoonEP」的
+判断失去依据）。**开了 `enable_moonep` 却没有 EP（或 EP 只有 1 个 rank）同样直接抛错**：那种配置下
+每一步都会悄悄走芯片默认规则，而 tag、命令行、`bench.json` 看起来都是 MoonEP 的运行——
+dense 模型是例外（没有 MoE dispatch 可换，`select_moe_comm_method` 在非 MoE 模型上直接返回 `None`，
+不会因为 `enable_moonep` 报错）。
 
 两个容量是两码事，分界就靠它们：
 
 | 容量 | 谁设 | 值 | 作用 |
 |---|---|---|---|
-| **MoonEP 容量 `S`** | `set_moonep_tokens_capacity`（`:232`），在 model_runner 初始化时无条件调用（`worker/model_runner_v1.py:502`，v2 在 `worker/v2/model_runner.py:130`） | `max_num_batched_tokens`，有 cudagraph capture 时取其上限的较大者 | 对称内存的每 rank 静态容量。**调度器一步永远不会超过 `max_num_batched_tokens`，所以只要第 2 步其余条件成立，整轮每一步都走 MoonEP**（dump 里每一行都是 `MoonEPCommImpl`，不会 MC2、MoonEP 交替出现） |
-| **MC2 容量** | `set_mc2_tokens_capacity`（`:204`），同样在 model_runner 初始化时（`model_runner_v1.py:501`） | 开 `enable_prefill_mc2` 时取 `max_num_batched_tokens`，否则取 cudagraph capture 上限，再否则 `max_num_reqs × uniform_decode_query_len`；按 TP 上取整后**截到 512/rank**，最后 `× tp_size` | 判「这一步的 token 数放不放得进 MC2 融合算子」 |
+| **MoonEP 容量 `S`** | `set_moonep_tokens_capacity`（`:233`），在 model_runner 初始化时无条件调用（`worker/model_runner_v1.py:502`，v2 在 `worker/v2/model_runner.py:130`） | `max_num_batched_tokens`，有 cudagraph capture 时取其上限的较大者 | 对称内存的每 rank 静态容量。**调度器一步永远不会超过 `max_num_batched_tokens`，所以在 `MOONEP_KEEP_MC2` 保持默认 0 时，只要第 4 步其余条件成立，整轮每一步都走 MoonEP**（dump 里每一行都是 `MoonEPCommImpl`）。置 1 时 MC2 档的 step 留在 MC2，`method=` 列就会混着出现 |
+| **MC2 容量** | `set_mc2_tokens_capacity`（`:205`），同样在 model_runner 初始化时（`model_runner_v1.py:501`） | 开 `enable_prefill_mc2` 时取 `max_num_batched_tokens`，否则取 cudagraph capture 上限，再否则 `max_num_reqs × uniform_decode_query_len`；按 TP 上取整后**截到 512/rank**，最后 `× tp_size` | 判「这一步的 token 数放不放得进 MC2 融合算子」 |
 
 **本机是 A5**（Ascend950PR；`get_ascend_device_type()` 按 `soc_version == 260` 判定，`utils.py:857`），
 所以本机不开 moonep 时走的是上表的 A5 分支；A2 / A3 / 310P 的规则不同，换机器别照搬。
@@ -405,8 +418,9 @@ MoonEP 是**插在最前面的覆盖**：只要条件成立就选它，连 A3 �
 对读报告的意义：
 
 - **「这次跑的是不是 MoonEP」只能看 dump 的 `method=` 或报告的「通信方式」列，不能看命令行**：
-  开了 `--moonep` 但没开 EP、或 EP 只有 1 个 rank 时，第 2 步不成立，会**静默退回**芯片默认规则，
-  dump 里一行 `MoonEPCommImpl` 都不会有；
+  开了 `--moonep` 但没开 EP、或 EP 只有 1 个 rank 时，第 4 步直接抛 `RuntimeError`（MoonEP 不可能
+  生效，拒绝启动而不是静默退化成 all-gather）；反过来，MoonEP 生效时**不会再静默退回**——超过 S 的
+  step 直接抛 `RuntimeError`。开了 `MOONEP_KEEP_MC2=1` 时 MC2 档的 step 留在 MC2 是设计内的，别当成回落；
 - 一次运行里出现多种 `method=` 是正常的（不开 moonep 的一次实跑里同时出现过
   `AllGatherCommImpl` 与 `MC2CommImpl`，逐 step 交替）；报告按 step 列出通信方式，三种 PAR 口径也按 step 分组；
 - **负载口径跟着 `method=` 走**：只有 MoonEP 的计数含容量 pad、只有 MoonEP 的 dump 是
@@ -485,8 +499,9 @@ MoonEP 是**插在最前面的覆盖**：只要条件成立就选它，连 A3 �
 MoonEP（`MoonEPCommImpl`，即 `enable_moonep` 且本步 token 数在 SHMEM 容量内）的调度器
 （`moonep_comm.py` 的 `TokenDispatcherWithMoonEP`）**每步先把 MoE 的输入 pad 到池化容量**再通信：
 
-1. 容量取 `MOONEP_MIN_DISPATCH_TOKENS = 128` 起的 2 的幂阶梯（`MOONEP_POOL=1`，默认开），
-   所以 `capacity ≥ 本 rank 本步的 token 数 T`；
+1. 容量取 `MOONEP_MIN_DISPATCH_TOKENS`（默认 128；同名环境变量可调低，如
+   `MOONEP_MIN_DISPATCH_TOKENS=16`，同时改阶梯起点与每步的取档下限）起的 2 的幂阶梯
+   （`MOONEP_POOL=1`，默认开），所以 `capacity ≥ 本 rank 本步的 token 数 T`；
 2. pad 出来的行 `hidden` 置零、`topk` 全部写成**本 rank 的第一个本地专家**
    `pad_expert = rank × local_experts`（`MOONEP_PAD_EXPERT0=1` 时改写成全局 0 号专家）；
 3. pad 行数 = `(capacity − T) × topk`。
@@ -959,7 +974,10 @@ pad 落在 pad 专家上且**归该专家的持有者**、`has_compute=False`（
    `--flush-every 1` 把窗口压到最小。这个坑的表现是「dump 看起来正常、数值也自洽，只是总量比 bench 少
    百分之几」，不查对账不容易发现。
 10. **开了 `--moonep` 不等于这次走的就是 MoonEP**：通信方式是逐 step 选的（见 §6「这个 `method=`
-    是怎么选出来的」），条件不满足时会静默退回芯片默认规则（本机 A5 是 MC2 / all-to-all / all-gather）。
+    是怎么选出来的」），条件不满足时走的是芯片默认规则（本机 A5 是 MC2 / all-to-all / all-gather）；
+    以前这是静默的，现在只剩一种「不是 MoonEP 但也不是回落」的情形：开着 `MOONEP_KEEP_MC2=1` 且这一步
+    按默认规则选中了 MC2（设计内）。**没开 EP / EP 只有 1 个 rank 时直接抛错**（MoonEP 不可能生效），
+    超过 S 也直接抛错。
     判断依据只有 dump 的 `method=` 或报告的「通信方式」列；命令行开关和 `bench.json` 里的配置项
     （`config.moonep` 等）只说明**要求了什么**，不说明**实际走了什么**。
 

@@ -165,6 +165,11 @@ _MOONEP_TSTATS = {"dispatch": [0.0, 0], "disp_pre": [0.0, 0], "disp_pad": [0.0, 
                  "disp_tpe": [0.0, 0], "disp_buf": [0.0, 0],
                  "disp_lib": [0.0, 0], "disp_post": [0.0, 0],
                  "combine": [0.0, 0], "comb_pre": [0.0, 0], "comb_buf": [0.0, 0]}
+# MOONEP_TIME_STATS_EVERY=N: also print the (cumulative) ledger every N dispatch
+# calls (N = MoE layer count -> one line per step). Same reason as
+# MOONEP_BALANCE_STATS_EVERY: a served engine is force-killed at shutdown, so the
+# atexit print may never run; the periodic line keeps a near-final ledger in the log.
+_TSTATS_EVERY = int(os.environ.get("MOONEP_TIME_STATS_EVERY", "0") or 0)
 
 
 def _dump_tstats():
@@ -199,7 +204,18 @@ def _dump_slot_stats():
 # full-capacity buffer every step pads to max_num_batched_tokens and the
 # planning/dispatch/combine kernels plus the grouped GEMM run over the full
 # ``S*K`` row space. A pow2 pool lets decode-sized steps use a fraction of it.
-MOONEP_MIN_DISPATCH_TOKENS = 128
+# This floor is both the ladder's first entry and the per-step clamp, so
+# ``MOONEP_MIN_DISPATCH_TOKENS=32`` (env) lowers both at once; 128 is the
+# historic default.
+def _min_dispatch_tokens() -> int:
+    value = int(os.environ.get("MOONEP_MIN_DISPATCH_TOKENS", "128"))
+    if value < 1:
+        # The ladder doubles from the floor, so 0 would never reach s_max.
+        raise ValueError(f"MOONEP_MIN_DISPATCH_TOKENS must be >= 1, got {value}")
+    return value
+
+
+MOONEP_MIN_DISPATCH_TOKENS = _min_dispatch_tokens()
 
 
 def _moonep_pool_capacities(s_max: int) -> list[int]:
@@ -631,6 +647,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         acc = _MOONEP_TSTATS[name]
         acc[0] += dt
         acc[1] += 1
+        # "dispatch" is accounted once per dispatch call (= once per MoE layer per
+        # step), so it doubles as the step counter for the periodic ledger.
+        if name == "dispatch" and _TSTATS_EVERY and acc[1] % _TSTATS_EVERY == 0:
+            _dump_tstats()
 
     def token_dispatch(
         self,
