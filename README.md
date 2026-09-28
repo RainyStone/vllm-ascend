@@ -226,6 +226,17 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 真实 topk 每个 token 的 K 个专家互异，任何专家最多被 T 个 token 选中。**该上限只由 K 决定，与 E
 无关**——`0:16,...` 这种档案在 E=256 和 E=384 上都合法，不用改。超过直接报错退出，不是告警。
 
+两种「步太小」的情形都不会把引擎打挂：
+**`T < top_k`**（例如 `dp=4` 时每个 rank 只剩 1 条序列的 decode，拼批后 `T = dp × 每 rank 最大 token 数 = 4`）
+照常注入——一行本来就 `top_k` 个槽，一个 token 就能填满一行的互异专家，真正的约束是 `count[e] ≤ T`
+（`_apportion` 负责修）；只是粒度变粗，所以打一行 warning（每进程一次）而不是把引擎打挂。
+**DP 同步用的 dummy step**（`NPUWorker.execute_dummy_batch`，恒为 `T=1`）**也照常注入**——这是踩过坑的：
+把注入挂起、让 dummy 走真实 router，DSv4 的 hash gate（`MoeGatingTopKHash`）正好在这个形状上打挂
+AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of range`，所有空闲 DP rank
+同时报），而同一个核、同一组 attrs/dtype/（全零的）input_ids 在 startup profile 与真实步的成批尺寸上
+都正常——**N=1 是唯一的变量**。dummy 是引擎自身的记账前向、输出被丢弃，注入对它没有语义影响。
+注意**这不是仿真路由独有的坑**：不带 `SIM_ROUTE` 的腿也会从同一个 dummy step 撞上同一个核。
+
 仿真路由的日志读法：T 变化时一张全表（`req%` / 期望条数 / 实际条数 / 偏差），随后同 T 复用同一份
 分配（层间与同长步之间逐位一致），每 `_EVERY` 次调用一行复用确认。**`SUM_act` 必须等于 `T×top_k`**，
 `max|dev|` 应 `<= 1`（最大余数法保证）。最后一行 `home-rank rows` 是**预测的** rank 级行数分布——

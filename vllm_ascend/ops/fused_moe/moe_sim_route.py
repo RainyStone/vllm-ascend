@@ -40,9 +40,31 @@ Three properties the caller depends on:
   every same-length step share one allocation. ``select_experts`` sees no step counter;
   keying on ``T`` sidesteps needing one and makes a run bit-reproducible.
 
+``T < K`` is not an error. A token's ``K`` experts are distinct, but they are *that
+token's* slots, so one token still fills a full row of ``K`` distinct experts; the
+constraint the allocation actually has to respect is ``count[e] <= T``, which
+``_apportion`` repairs. Small-``T`` steps happen for real -- the DP-padded batch is
+``dp_size * max_tokens_across_dp``, so a tail decode with one in-flight sequence per
+rank is ``T=4`` at ``dp=4`` -- and refusing them would take the engine down mid-run
+instead of at a place the experiment can see. They inject at the coarsest granularity
+the profile allows, and say so once.
+
 The startup dummy forward (``in_profile_run``) is skipped entirely. That forward exists
 only to size the KV cache, and letting it see a skewed allocation would give each leg a
 different cache size and destroy cross-leg comparability.
+
+The DP sync dummy batch (``NPUWorker.execute_dummy_batch``) is *not* skipped, and must not
+be. It is a 1-token decode shape whose only job is to keep the DP collectives moving while
+a rank has nothing to execute, which makes it look like the obvious place to stay neutral.
+But the real DSv4 hash gate (``MoeGatingTopKHash``) faults on exactly that shape -- all
+idle DP ranks at once, ``errcode:(263, 95) ... The DDR address of the MTE instruction is
+out of range`` -- while the very same kernel, op attrs, dtypes and (zero-filled) input_ids
+run without complaint at the padded sizes the startup profile and the real steps use; N=1
+is the only variable left. Suspending the injection there does not make the dummy neutral,
+it makes it the one forward in the leg that dies, so the injection stays on and keeps the
+vendor gate off the engine's own bookkeeping forward. The 1-token shape then takes the
+``T < top_k`` branch below like any other small step. Note this is not a sim-route-only
+trap: a leg without ``SIM_ROUTE`` reaches the same kernel from the same dummy batch.
 """
 
 from __future__ import annotations
@@ -84,6 +106,7 @@ _SINCE_FULL = 0
 _ALLOC_ID = 0
 _EP_WORLD: int | None = None
 _MIX_WARNED = False
+_SMALL_T_WARNED = False
 
 
 def active() -> bool:
@@ -382,7 +405,7 @@ def maybe_select_experts(
     mix_placement: bool,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Synthetic ``(topk_weights, topk_ids)``, or None to fall through to the real router."""
-    global _LAST_T, _SINCE_FULL, _ALLOC_ID, _MIX_WARNED
+    global _LAST_T, _SINCE_FULL, _ALLOC_ID, _MIX_WARNED, _SMALL_T_WARNED
 
     if not active():
         return None
@@ -413,10 +436,18 @@ def maybe_select_experts(
         return None
 
     tokens = int(hidden_states.shape[0])
-    if tokens < top_k:
-        raise ValueError(
-            f"VLLM_ASCEND_MOE_SIM_ROUTE: T={tokens} < top_k={top_k}; a token cannot take "
-            f"{top_k} distinct experts out of only {tokens} slots"
+    if tokens < top_k and not _SMALL_T_WARNED:
+        # Not fatal, and not silent either: at this size the profile is honoured as
+        # coarsely as integrality allows (no expert can take more than ``tokens`` routes),
+        # which is the best a step this small can do. Killing the engine here would end
+        # the run instead of showing up as a coarser allocation in the dump.
+        _SMALL_T_WARNED = True
+        logger.warning(
+            "VLLM_ASCEND_MOE_SIM_ROUTE: T=%d < top_k=%d; the allocation stays exact-total "
+            "and per-row distinct, but a step this small resolves the profile only "
+            "coarsely. Expected for decode-shaped steps; warned once.",
+            tokens,
+            top_k,
         )
 
     key = (tokens, str(hidden_states.device), hidden_states.dtype)

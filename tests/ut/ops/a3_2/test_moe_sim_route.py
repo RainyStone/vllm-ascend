@@ -48,6 +48,7 @@ def reset_module_state(monkeypatch):
     moe_sim_route._ALLOC_ID = 0
     moe_sim_route._EP_WORLD = None
     moe_sim_route._MIX_WARNED = False
+    moe_sim_route._SMALL_T_WARNED = False
     yield
 
 
@@ -184,6 +185,16 @@ class TestMaybeSelectExperts(PytestBase):
         monkeypatch.setattr(moe_sim_route, "_EXTRA_CTX", SimpleNamespace(in_profile_run=True))
         assert moe_sim_route.maybe_select_experts(make_hidden(8), TOP_K, NUM_EXPERTS, False) is None
 
+    def test_one_token_step_still_injects(self, monkeypatch):
+        # The DP sync dummy batch runs at T=1 (NPUWorker.execute_dummy_batch) and must keep
+        # the injection: with it suspended the step reaches the real DSv4 hash gate, which
+        # faults the AI core at this shape. One token still fills a full row of K distinct
+        # experts, so the contract holds.
+        monkeypatch.setenv("VLLM_ASCEND_MOE_SIM_ROUTE", "0:16,7:10")
+        weights, ids = moe_sim_route.maybe_select_experts(make_hidden(1), TOP_K, NUM_EXPERTS, False)
+        assert ids.shape == (1, TOP_K) and weights.shape == (1, TOP_K)
+        assert len(set(ids[0].tolist())) == TOP_K
+
     def test_contract_shape_dtype_and_counts(self, monkeypatch):
         monkeypatch.setenv("VLLM_ASCEND_MOE_SIM_ROUTE", "0:16,7:10")
         monkeypatch.setenv("VLLM_ASCEND_MOE_SIM_ROUTE_SEED", "0")
@@ -240,10 +251,37 @@ class TestMaybeSelectExperts(PytestBase):
             moe_sim_route.maybe_select_experts(make_hidden(64), TOP_K, NUM_EXPERTS, False)
         assert capsys.readouterr().out == ""
 
-    def test_rejects_tokens_below_top_k(self, monkeypatch):
+    def test_tokens_below_top_k_injects_at_the_coarsest_granularity(self, monkeypatch):
+        # Not a hard error: a row *has* top_k slots, so one token fills a full row of
+        # distinct experts, and the only real constraint is count[e] <= T. Steps this
+        # small do happen (the DP-padded batch is dp_size * max_tokens_across_dp), and
+        # killing the engine there ends the run instead of showing up in the dump.
         monkeypatch.setenv("VLLM_ASCEND_MOE_SIM_ROUTE", "0:16,7:10")
-        with pytest.raises(ValueError, match="distinct experts"):
-            moe_sim_route.maybe_select_experts(make_hidden(TOP_K - 1), TOP_K, NUM_EXPERTS, False)
+        tokens = TOP_K - 1
+        weights, ids = moe_sim_route.maybe_select_experts(make_hidden(tokens), TOP_K, NUM_EXPERTS, False)
+        assert ids.shape == (tokens, TOP_K) and weights.shape == (tokens, TOP_K)
+        counts = ids.reshape(-1).bincount(minlength=NUM_EXPERTS).tolist()
+        assert sum(counts) == tokens * TOP_K
+        assert max(counts) <= tokens
+        assert counts[0] == pytest.approx(0.16 * tokens * TOP_K, abs=1)
+        assert all(len(set(row)) == TOP_K for row in ids.tolist())
+
+    def test_one_token_still_fills_a_row(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_MOE_SIM_ROUTE", "0:16,7:10")
+        _, ids = moe_sim_route.maybe_select_experts(make_hidden(1), TOP_K, NUM_EXPERTS, False)
+        assert ids.shape == (1, TOP_K)
+        assert len(set(ids[0].tolist())) == TOP_K
+
+    def test_tokens_below_top_k_warns_once(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_MOE_SIM_ROUTE", "0:16,7:10")
+        warned: list[tuple] = []
+        monkeypatch.setattr(moe_sim_route.logger, "warning", lambda *args, **kwargs: warned.append(args))
+        for tokens in (TOP_K - 1, 1, TOP_K - 2):
+            moe_sim_route.maybe_select_experts(make_hidden(tokens), TOP_K, NUM_EXPERTS, False)
+        assert len(warned) == 1
+        # At or above top_k the allocation is no longer coarse, so nothing is reported.
+        moe_sim_route.maybe_select_experts(make_hidden(TOP_K), TOP_K, NUM_EXPERTS, False)
+        assert len(warned) == 1
 
     def test_full_list_length_mismatch_is_loud(self, monkeypatch):
         # A sparse spec always expands to the model's expert count, so only a full list
