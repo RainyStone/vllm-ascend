@@ -40,6 +40,9 @@ from .planning import MoonEPCommPlan, allocate_planning_outputs
 import time as _time
 
 _TSTATS_ON = os.environ.get("ASCEND_MOONEP_TIME_STATS", "0") == "1"
+# 跳过每层 3 次的 host 侧全设备同步 + 跨进程栅栏（见 _reconcile_async_ranks）。
+# 必须配套 ASCEND_MOONEP_PREFETCH_RELAXED=1 使用，否则有死锁风险。
+_NO_RECONCILE = os.environ.get("ASCEND_MOONEP_NO_RECONCILE", "0") == "1"
 _TRACE_ON = os.environ.get("ASCEND_MOONEP_TRACE", "0") == "1"
 # ASCEND_MOONEP_TIME_STATS_EVERY=N: also print the (cumulative) ledger every N calls
 # of the dispatch entry mark. N = MoE layer count -> one line per step. Same reason as
@@ -126,6 +129,41 @@ def _num_sms_dedup_from_env(max_sms: int) -> int:
     return value
 
 
+def _planning_num_sms(default: int, routes: int) -> int:
+    """Block count for the planning kernel alone.
+
+    Planning is almost pure fixed cost: one cross-rank ``barrier_all_vec`` plus
+    14 grid-wide ``SyncAll<true>``, and a grid sync gets dearer with every extra
+    block. Measured on 4 ranks, all 4 arriving together (isolated bench, NPU
+    events, host latency excluded):
+
+        routes (S*K)     128    512   2048   8192  32768  65536
+        8 blocks        48.7   52.6   54.3   61.1  111.5  188.3  us
+        32 blocks       58.3   60.5   61.6   63.7   71.7   85.8  us
+        56 blocks       67.1   72.5   72.4   74.4      -      -  us
+
+    So the narrow grid wins everywhere the engine actually runs decode
+    (64 tokens/rank -> 512 routes) and small prefill, by ~8 us/call, and loses
+    once the route count is large enough for the per-route stages to matter.
+    Dispatch / combine / prefetch deliberately keep the full ``num_sms``: they
+    are bandwidth-bound (prefetch measured 96% MTE2-busy) and want every block.
+
+    ``MOONEP_PLANNING_NUM_SMS`` overrides the choice outright.
+    """
+    raw = os.environ.get("MOONEP_PLANNING_NUM_SMS")
+    if raw:
+        value = int(raw)
+    elif routes <= 8192:
+        value = 8
+    else:
+        value = max(8, min(default, 32))
+    if not 8 <= value <= 56:
+        raise ValueError(
+            f"planning block dim must be in [8, 56], got {value} "
+            "(the planning kernel validates core_num)")
+    return value
+
+
 def _op_ws_bytes_from_env(default: int = OP_WS_BYTES_DEFAULT) -> int:
     """Per-op symmetric workspace bytes (tunable for benchmarks).
 
@@ -180,7 +218,9 @@ def _log_context_buffer_size(ctx: dict) -> None:
         f"R={ctx['R']}, S={ctx['S']}, H={ctx['H']}, E={ctx['E']}, "
         f"K={ctx['K']}, NvS={ctx['NvS']}",
         "  sm_count               : "
-        f"num_sms={ctx['num_sms']}, num_sms_dedup={ctx['num_sms_dedup']}",
+        f"num_sms={ctx['num_sms']}, "
+        f"planning_num_sms={ctx.get('planning_num_sms', ctx['num_sms'])}, "
+        f"num_sms_dedup={ctx['num_sms_dedup']}",
         f"  hidden_chunk           : {format_nbytes(hidden_chunk_bytes)}",
         f"  meta_vars              : {format_nbytes(meta_vars_bytes)}",
         f"  local_temp             : {format_nbytes(local_temp_bytes)}",
@@ -262,8 +302,11 @@ def _create_context(
         "planning requires 0 < S*K < int32_max: "
         f"S={S}, K={K}, S*K={N}, int32_max={int32_max}"
     )
+    # The planning workspace layout is derived from the planning block dim, so
+    # this must resolve before the sizing call and be reused by PlanningOp.
+    planning_num_sms = _planning_num_sms(num_sms, N)
     planning_local_elems, planning_symmetric_bytes = planning_workspace_sizes(
-        S, K, E, NvS, R, num_sms
+        S, K, E, NvS, R, planning_num_sms
     )
     # ================================================================
     # Allocate communication chunks as CANN VMM physical chunks (collective).
@@ -308,7 +351,8 @@ def _create_context(
     # ================================================================
     ws = _op_ws_bytes_from_env()
     kernels = {
-        'planning': PlanningOp(ws_bytes=planning_symmetric_bytes, num_sms=num_sms),
+        'planning': PlanningOp(ws_bytes=planning_symmetric_bytes,
+                               num_sms=planning_num_sms),
         'dispatch': DispatchOp(ws_bytes=ws, num_sms=num_sms),
         'combine': CombineOp(ws_bytes=ws, num_sms=num_sms),
         'prefetch': PrefetchOp(ws_bytes=0, num_sms=num_sms),
@@ -333,6 +377,7 @@ def _create_context(
         'B': B,
         'N': N, 'NvS': NvS,
         'num_sms': num_sms,
+        'planning_num_sms': planning_num_sms,
         'num_sms_dedup': num_sms_dedup,
         'device': device,
         '_udma_supported': udma_supported,
@@ -549,7 +594,20 @@ class Buffer:
         ``torch.npu.synchronize`` 保持步调所以正常，见本文件注释）。这里同步设备
         + ``dist.barrier`` 重新对齐各 rank；代价是 async 实际为同步执行（与本仓库
         "仅保留 event 返回以满足 async_finish 契约"的兼容 shim 设计一致）。
+
+        ``ASCEND_MOONEP_NO_RECONCILE=1`` 跳过这段。它每层要执行 3 次（dispatch /
+        prefetch / combine 各一次），每次 ``npu.synchronize()`` 都把设备排空 ——
+        实测设备空转因此占 51~60%，host 也永远跑不到设备前面（多流/预取这类
+        靠"host 跑在前面"的优化因此全部失效）。
+
+        跳过它的**前提是 `ASCEND_MOONEP_PREFETCH_RELAXED=1`**：那样 prefetch 的
+        两个 host barrier 不再参与 ``sync_counter``，counter 上只剩 planning /
+        dispatch / combine 三个**设备内联** barrier，而这三个每个 rank 都按同样
+        顺序、同样次数执行，代际天然一致，不需要再靠 host 侧重排对齐。
+        没有 RELAXED 而单独开这个开关有死锁风险。
         """
+        if _NO_RECONCILE:
+            return
         torch_npu.npu.synchronize()
         if dist.is_initialized():
             dist.barrier(group=ctx.get('group'))
@@ -695,6 +753,15 @@ class Buffer:
             _t = _ts("disp_plan_kernel", _t)
             if _dbg:
                 print(f"[moonep-trace r{ctx['rank']}] dispatch: planning compute done", flush=True)
+            # 钩子点：planning 已发射、dispatch 尚未发射。此刻主 stream 上排在
+            # 最前面的只有 planning，所以调用方在这里 record_event() 再让 side
+            # stream wait_event()，side stream 等到的就是「planning 完成」而不是
+            # 「dispatch 完成」—— prefetch 才能与 dispatch 真正重叠。
+            # 放在 dispatch 之后再挂事件就晚了：那时事件已经把 dispatch 也算进去。
+            after_planning = ctx.get('after_planning_hook')
+            if after_planning is not None:
+                after_planning(plan)
+                _t = _ts("disp_after_plan_hook", _t)
 
         if _dbg:
             print(f"[moonep-trace r{ctx['rank']}] dispatch: dispatch kernel enter", flush=True)
@@ -733,6 +800,8 @@ class Buffer:
         # cross_rank_barrier is a no-op and ignores the stream; only query it
         # when tracing (the call is far from free inside a running engine).
         stream = torch_npu.npu.current_stream().npu_stream if _TSTATS_ON or _TRACE_ON else None
+        _t = _time.perf_counter() if _TSTATS_ON else 0.0
+        _t = _ts("comb_hdr", _t)
         if not zero_copy:
             # master-style boundary copies into the shard (same stream).
             ctx['hidden_buf_local'].copy_(hidden_nvsh)
@@ -746,6 +815,7 @@ class Buffer:
         if inter_rank_sync:
             cross_rank_barrier(ctx, stream)
         # Prologue is folded into moonEP_combine (cf. dispatch_epilogue).
+        _t = _ts("comb_bufcopy", _t)
         ctx['kernels']['combine'].compute(
             ctx,
             hidden_sh,
@@ -753,6 +823,7 @@ class Buffer:
             output_sk=route_weights_sk,
             shmem_instance_id=0,
         )
+        _t = _ts("comb_kernel", _t)
 
     def _run_prefetch_weight_on_current_stream(
         self,
@@ -771,9 +842,16 @@ class Buffer:
         与 kernel ``owner = expert/epn``、``source = (expert%epn)*H*Hp`` 寻址吻合
         （analysis §4.2）。
         """
+        # MOONEP_TIME_STATS=1：prefetch 的 host 开销是 MoonEP host 路径里最大的一项
+        # （实测 0.66 ms/层，而整个 host 路径 1.27 ms/层），但静态排查只解释了
+        # ~0.1-0.2 ms。这些探针把剩下的落到具体那一步上；不开开关时每次只花一次
+        # 分支判断。读数看 dpshim 打的 api._TSTATS。
+        _t = _time.perf_counter()
         self._ensure_shmem_views()
+        _t = _ts("pf1_views", _t)
         E = int(ctx['E'])
         local_experts = experts_to_copy[int(ctx['rank'])]  # this rank's [B] row
+        _t = _ts("pf2_localexp", _t)
         # 算子层要求 shmem tensor 指向"对称内存的本地部分"：本 rank 的本地
         # home chunk / [B] slot chunk，且所有 rank 的 chunk 占据统一对称槽位。
         # kernel 用 owner=expert/epn、source=(expert%epn)*H*Hp 经 aclshmem_ptr
@@ -784,11 +862,13 @@ class Buffer:
         #   ``_moonep_slot_source_va``  —— 本 rank 本地 slot chunk 的 source VA
         # Buffer 用 get_buffer_ptr 翻译成本地对称基址，再构造 shmem 张量。
         B = int(ctx['B'])
+        _t = _ts("pf3_prep", _t)
         for full_weight in weight_prefetch_args:
             H = int(full_weight.shape[1])
             Hp = int(full_weight.shape[2])
             owner_src = getattr(full_weight, _OWNER_SOURCE_VA_ATTR, None)
             slot_src = getattr(full_weight, _SLOT_SOURCE_VA_ATTR, None)
+            _t = _ts("pf4_getsrcref", _t)
             if owner_src is None or slot_src is None:
                 raise RuntimeError(
                     "full_weight is missing _moonep_owner_source_va / "
@@ -800,9 +880,11 @@ class Buffer:
             weight_home = create_sym_tensor_from_source(
                 owner_src, [E, H, Hp], torch.bfloat16, full_weight.device,
                 'weight_home', allow_logical_extent=True)
+            _t = _ts("pf5_home", _t)
             weight_slots = create_sym_tensor_from_source(
                 slot_src, [B, H, Hp], torch.bfloat16, full_weight.device,
                 'weight_slots')
+            _t = _ts("pf6_slots", _t)
             ctx['kernels']['prefetch'].compute(
                 ctx,
                 weight_home,
@@ -810,6 +892,7 @@ class Buffer:
                 local_experts,
                 shmem_instance_id=0,
             )
+            _t = _ts("pf7_opcall", _t)
 
     def _run_reduce_grad_on_current_stream(
         self,

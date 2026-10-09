@@ -22,31 +22,26 @@ from .launchers import (
 
 
 def _collect_inputs(op_name, tensors=(), scalars=()):
-    """Validate and summarize a kernel-launch input set.
+    """Validate a kernel-launch input set.
 
     ``tensors``: iterable of ``(name, tensor, expected_shape_or_None, expected_dtype)``;
-    a ``None`` tensor is reported as ``name=None`` (optional input). ``scalars``:
-    iterable of ``(name, value)``. Raises ``ValueError`` on a shape/dtype mismatch
-    so the input plumbing is validated before the AscendC kernel exists; returns a
-    human-readable summary that the stub embeds in the ``NotImplementedError`` it
-    raises.
+    a ``None`` tensor is an optional input. ``scalars`` is accepted for signature
+    compatibility and not inspected. Raises ``ValueError`` on a shape/dtype mismatch.
+
+    Only the checks remain: one tuple compare and one dtype compare per tensor.
+    The summary string this used to return was consumed only by the
+    not-yet-implemented stubs, and every op is now wired to a real launcher, so
+    the formatting was pure per-layer overhead on the inference path.
     """
-    parts = []
     for name, t, shape, dtype in tensors:
         if t is None:
-            parts.append(f"{name}=None")
             continue
-        actual = tuple(t.shape)
-        if shape is not None and actual != tuple(shape):
+        if shape is not None and tuple(t.shape) != tuple(shape):
             raise ValueError(
-                f"{op_name}: {name} expected shape {list(shape)}, got {list(actual)}")
+                f"{op_name}: {name} expected shape {list(shape)}, got {list(t.shape)}")
         if t.dtype != dtype:
             raise ValueError(
                 f"{op_name}: {name} expected dtype {dtype}, got {t.dtype}")
-        parts.append(f"{name}={list(actual)}:{t.dtype}")
-    for name, value in scalars:
-        parts.append(f"{name}={value}")
-    return ", ".join(parts)
 
 
 def _num_valid_tokens(ctx) -> int:
