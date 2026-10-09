@@ -49,6 +49,11 @@ def _collect_inputs(op_name, tensors=(), scalars=()):
     return ", ".join(parts)
 
 
+def _num_valid_tokens(ctx) -> int:
+    """Real (pre-pad) token count for this call; 0 = legacy full-capacity."""
+    return int(ctx.get("num_valid_tokens", 0) or 0)
+
+
 class PlanningOp(KernelOp):
     """Build the same communication plan independently on every rank.
 
@@ -102,6 +107,7 @@ class PlanningOp(KernelOp):
             int(workspace.addr),
             int(workspace.length),
             S,
+            _num_valid_tokens(ctx),
             K,
             E,
             NvS,
@@ -144,6 +150,7 @@ class DispatchOp(KernelOp):
             weights_buf,
             ctx["dispatch_sync_buffer"],
             int(ctx["S"]),
+            _num_valid_tokens(ctx),
             int(ctx["H"]),
             int(ctx["K"]),
             int(ctx["R"]),
@@ -169,6 +176,7 @@ class DispatchOp(KernelOp):
             ctx["dispatch_sync_buffer"],
             profile_cycles,
             int(ctx["S"]),
+            _num_valid_tokens(ctx),
             int(ctx["H"]),
             int(ctx["K"]),
             int(ctx["R"]),
@@ -205,6 +213,7 @@ class CombineOp(KernelOp):
             output_sh,
             output_sk,
             int(ctx["S"]),
+            _num_valid_tokens(ctx),
             int(ctx["H"]),
             int(ctx["K"]),
             int(ctx["R"]),

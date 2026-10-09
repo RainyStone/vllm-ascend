@@ -917,6 +917,7 @@ class Buffer:
         inter_rank_sync: bool = True,
         zero_copy: bool = False,
         reuse_outputs: bool = False,
+        num_tokens: int | None = None,
     ):
         """dispatch fwd: run planning (unless reusing a plan) and scatter tokens
         to their expert-grouped positions on remote ranks.
@@ -936,6 +937,9 @@ class Buffer:
         """
         ctx = self._require_ctx()
         self._ensure_shmem_views()
+        # Real (pre-pad) token bound for this call. None/0 keeps the legacy
+        # full-capacity behavior (every padded row is planned and scattered).
+        ctx['num_valid_tokens'] = int(num_tokens) if num_tokens else 0
 
         if plan is None:
             assert topk_experts_sk is not None and tokens_per_expert is not None
@@ -1089,11 +1093,15 @@ class Buffer:
         inter_rank_sync: bool = True,
         *,
         zero_copy: bool = False,
+        num_tokens: int | None = None,
     ):
         """combine fwd: gather expert outputs from the symmetric shard and
         K-sum back to token-major [S, H]. Also serves as dispatch bwd."""
         ctx = self._require_ctx()
         self._ensure_shmem_views()
+        # Real (pre-pad) token bound; must match the dispatch that produced
+        # ``plan`` (the combine walks exactly the rows planning assigned).
+        ctx['num_valid_tokens'] = int(num_tokens) if num_tokens else 0
 
         assert isinstance(plan, MoonEPCommPlan), "Buffer.combine: plan is required"
 
