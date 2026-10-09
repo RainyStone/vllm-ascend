@@ -1,0 +1,27 @@
+# real-T 重跑矩阵：2 mbt × 4 路由 × 3 腿 = 24 条（mbt8192 在前，与 H16 轮 cfg 顺序一致）
+# 格式：<run_name> <mode: off|slot|slot0> <mbt> <sim_route 绝对路径>
+# 每档路由内 off → slot → slot0 相邻开跑（机器漂移对三腿一致）。
+rt_mbt8192_min16_uniform_off    off    8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_uniform.txt
+rt_mbt8192_min16_uniform_slot   slot   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_uniform.txt
+rt_mbt8192_min16_uniform_slot0  slot0  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_uniform.txt
+rt_mbt8192_min16_4hot_off       off    8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot.txt
+rt_mbt8192_min16_4hot_slot      slot   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot.txt
+rt_mbt8192_min16_4hot_slot0     slot0  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot.txt
+rt_mbt8192_min16_3hot1r_off     off    8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_3hot_1rank.txt
+rt_mbt8192_min16_3hot1r_slot    slot   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_3hot_1rank.txt
+rt_mbt8192_min16_3hot1r_slot0   slot0  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_3hot_1rank.txt
+rt_mbt8192_min16_4hot1r_off     off    8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot_1rank.txt
+rt_mbt8192_min16_4hot1r_slot    slot   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot_1rank.txt
+rt_mbt8192_min16_4hot1r_slot0   slot0  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot_1rank.txt
+rt_mbt16384_min16_uniform_off   off    16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_uniform.txt
+rt_mbt16384_min16_uniform_slot  slot   16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_uniform.txt
+rt_mbt16384_min16_uniform_slot0 slot0  16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_uniform.txt
+rt_mbt16384_min16_4hot_off      off    16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot.txt
+rt_mbt16384_min16_4hot_slot     slot   16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot.txt
+rt_mbt16384_min16_4hot_slot0    slot0  16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot.txt
+rt_mbt16384_min16_3hot1r_off    off    16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_3hot_1rank.txt
+rt_mbt16384_min16_3hot1r_slot   slot   16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_3hot_1rank.txt
+rt_mbt16384_min16_3hot1r_slot0  slot0  16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_3hot_1rank.txt
+rt_mbt16384_min16_4hot1r_off    off    16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot_1rank.txt
+rt_mbt16384_min16_4hot1r_slot   slot   16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot_1rank.txt
+rt_mbt16384_min16_4hot1r_slot0  slot0  16384 /home/x00893896/vllm_ascend_moonep_integration/vllm_ascend_moonep/scripts/dsv4flash_service/sim_route_4hot_1rank.txt
