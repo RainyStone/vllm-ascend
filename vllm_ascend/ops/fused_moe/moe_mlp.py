@@ -361,6 +361,90 @@ def quant_apply_mlp(
     return hidden_states, before_gmm2_evt
 
 
+# MOONEP_TIME_STATS=1: time the MoE expert compute itself (grouped GEMMs +
+# activation), separately from attention and from the comm layer. Both the MC2
+# baseline and MoonEP go through these entry points, so the numbers compare.
+# MOONEP_MLP_SYNC=1 adds a device sync inside the timer so the number covers the
+# device work rather than just the host-side launches (it serialises the step,
+# use it only for measurement runs).
+import atexit as _atexit
+import os as _os
+import time as _time
+
+_MOE_TSTATS_ENABLED = _os.environ.get("MOONEP_TIME_STATS", "0") == "1"
+_MOE_TSTATS_SYNC = _os.environ.get("MOONEP_MLP_SYNC", "0") == "1"
+_MOE_TSTATS: dict = {}
+
+
+def _moe_ts(name: str, t0: float) -> None:
+    if not _MOE_TSTATS_ENABLED:
+        return
+    if _MOE_TSTATS_SYNC:
+        import torch  # noqa: PLC0415
+
+        torch.npu.synchronize()
+    acc = _MOE_TSTATS.setdefault(name, [0.0, 0])
+    acc[0] += _time.perf_counter() - t0
+    acc[1] += 1
+
+
+def _moe_group_list(args, kwargs):
+    """(group_list, group_list_type) of either entry point, or (None, None)."""
+    mci = kwargs.get("mlp_compute_input")
+    if mci is not None:
+        return getattr(mci, "group_list", None), getattr(mci, "group_list_type", 1)
+    if "group_list" in kwargs:
+        return kwargs["group_list"], kwargs.get("group_list_type", 1)
+    for a in args:
+        gl = getattr(a, "group_list", None)
+        if gl is not None:
+            return gl, getattr(a, "group_list_type", 1)
+        if isinstance(a, torch.Tensor) and a.dim() == 1 and a.dtype in (torch.int32, torch.int64):
+            return a, 1
+    return None, None
+
+
+def _timed_moe(name: str):
+    def deco(fn):
+        def wrapper(*args, **kwargs):
+            if not _MOE_TSTATS_ENABLED:
+                return fn(*args, **kwargs)
+            if _MOE_TSTATS_SYNC:
+                # Drain first, otherwise the "after" sync would also wait for work
+                # queued before this call and the number would not be this MLP's.
+                import torch  # noqa: PLC0415
+
+                torch.npu.synchronize()
+            t0 = _time.perf_counter()
+            out = fn(*args, **kwargs)
+            _moe_ts(name, t0)
+            return out
+
+        wrapper.__name__ = getattr(fn, "__name__", name)
+        return wrapper
+
+    return deco
+
+
+def _dump_moe_tstats() -> None:
+    if not _MOE_TSTATS_ENABLED or not _MOE_TSTATS:
+        return
+    try:
+        import torch  # noqa: PLC0415
+
+        dev = f"npu:{torch.npu.current_device()}" if torch.npu.is_available() else "?"
+    except Exception:  # noqa: BLE001
+        dev = "?"
+    parts = [f"[moe-compute-stats dev={dev} sync={int(_MOE_TSTATS_SYNC)}]"]
+    for name, (total, calls) in _MOE_TSTATS.items():
+        parts.append(f"{name}: calls={calls} total={total:.3f}s avg={total / max(calls, 1) * 1e3:.3f}ms")
+    print(" ".join(parts), flush=True)
+
+
+_atexit.register(_dump_moe_tstats)
+
+
+@_timed_moe("unquant_apply_mlp")
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -458,6 +542,7 @@ def unquant_apply_mlp(
     return hidden_states, None
 
 
+@_timed_moe("unified_apply_mlp")
 def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.

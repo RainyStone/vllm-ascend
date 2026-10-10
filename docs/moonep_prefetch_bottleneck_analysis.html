@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>prefetch 会不会成为瓶颈?· DeepSeek V4-Flash</title>
+<style>
+:root{
+  --surface-0:#ffffff; --surface-1:#fcfcfb; --surface-2:#f3f3f1;
+  --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#82817c;
+  --border:#e2e1dd;
+  --series-1:#2a78d6;   /* DeepSeek V4-Flash */
+  --series-2:#eb6834;   /* Qwen3-30B-A3B(对照) */
+  --good:#1baf7a; --warn:#eda100; --bad:#e34948;
+}
+@media (prefers-color-scheme: dark){
+  :root:where(:not([data-theme="light"])){
+    --surface-0:#111110; --surface-1:#1a1a19; --surface-2:#242423;
+    --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8f8e86;
+    --border:#34332f;
+    --series-1:#3987e5; --series-2:#d95926;
+    --good:#199e70; --warn:#c98500; --bad:#e66767;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;padding:2rem 1.25rem 4rem;background:var(--surface-0);
+  color:var(--text-primary);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",
+       "PingFang SC","Microsoft YaHei",sans-serif;}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:1.55rem;line-height:1.3;margin:0 0 .3rem}
+h2{font-size:1.12rem;margin:2.6rem 0 .8rem;padding-bottom:.4rem;
+   border-bottom:1px solid var(--border)}
+h3{font-size:.98rem;margin:1.5rem 0 .5rem}
+p{margin:.6rem 0;color:var(--text-secondary)}
+.lede{font-size:1.01rem;color:var(--text-primary);margin:.9rem 0 0}
+.sub{color:var(--text-muted);font-size:.86rem;margin:.2rem 0 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.87em;
+  background:var(--surface-2);padding:.1em .35em;border-radius:3px;color:var(--text-primary)}
+table{border-collapse:collapse;width:100%;margin:.9rem 0;font-size:.88rem}
+th,td{text-align:left;padding:.42rem .55rem;border-bottom:1px solid var(--border)}
+th{font-weight:600;color:var(--text-secondary);font-size:.8rem}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr:hover{background:var(--surface-2)}
+tr.hl td{background:color-mix(in srgb,var(--series-1) 9%,transparent);font-weight:600}
+.ok{color:var(--good);font-weight:600}
+.no{color:var(--bad);font-weight:600}
+.mid{color:var(--warn);font-weight:600}
+.callout{background:var(--surface-1);border:1px solid var(--border);
+  border-left:3px solid var(--series-1);border-radius:6px;padding:.8rem 1rem;margin:1rem 0}
+.callout.warn{border-left-color:var(--warn)}
+.callout.bad{border-left-color:var(--bad)}
+.callout p{margin:.3rem 0}
+.chart{background:var(--surface-1);border:1px solid var(--border);
+  border-radius:8px;padding:1rem;margin:1.1rem 0}
+.chart .title{font-size:.9rem;font-weight:600;margin:0 0 .1rem}
+.chart .cap{font-size:.78rem;color:var(--text-muted);margin:.1rem 0 .8rem}
+.legend{display:flex;gap:1.2rem;font-size:.8rem;color:var(--text-secondary);
+  margin:.6rem 0 0;flex-wrap:wrap}
+.legend span{display:inline-flex;align-items:center;gap:.4rem}
+.swatch{width:14px;height:3px;border-radius:2px;display:inline-block}
+.swatch.sq{width:11px;height:11px;border-radius:2px}
+svg{display:block;max-width:100%;height:auto}
+.tick{font-size:10px;fill:var(--text-muted)}
+.axl{font-size:10.5px;fill:var(--text-secondary)}
+.dl{font-size:10px;font-weight:600}
+.pill{display:inline-block;font-size:.73rem;padding:.08em .45em;border-radius:99px;
+  border:1px solid var(--border);color:var(--text-secondary);white-space:nowrap}
+.foot{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);
+  font-size:.8rem;color:var(--text-muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>prefetch 会不会成为瓶颈?</h1>
+<p class="sub">以 <b>DeepSeek V4-Flash</b> 为分析对象 · 对照 Qwen3-30B-A3B ·
+Ascend 950 · 单 UB 簇(NPU 4-7)· 2026-09-28</p>
+
+<p class="lede">
+在 Qwen3 上,prefetch 离带宽瓶颈<b>三个数量级</b>,每层只搬全量的 0.8%。
+换成 V4-Flash,它同时被三件事推向瓶颈 —— 而且<b>第一道墙不是带宽,是 HBM</b>。
+真正致命的是第三件:<b>每专家行数从 1024 掉到 384(decode 时掉到个位数),top-B 槽位选择在层间翻转,
+而每翻转一个专家就是 50.33 MB。</b>
+</p>
+
+<div class="callout bad">
+<p><b>本文最大的局限,先说在前面:</b>没有任何 V4-Flash 的 MoonEP 实测。
+几何数字<b>全部实测自 <code>config.json</code></b>,链路带宽实测自 8 卡 put 探针,
+其余为推算(逐条标注)。§6 给出按代价排序的验证清单 —— <b>第一条(能不能装下)决定后面有没有意义。</b></p>
+</div>
+
+<h2>一、换模型后什么变了</h2>
+
+<table>
+<thead><tr><th></th><th class="num">Qwen3-30B-A3B</th>
+  <th class="num">DeepSeek V4-Flash</th><th class="num">倍数</th></tr></thead>
+<tbody>
+<tr><td>hidden / moe_intermediate</td><td class="num">2048 / 768</td>
+    <td class="num">4096 / 2048</td><td class="num">2× / 2.7×</td></tr>
+<tr><td>专家数 E / top_k</td><td class="num">128 / 8</td>
+    <td class="num">256 / 6</td><td class="num">2× / 0.75×</td></tr>
+<tr><td>层数</td><td class="num">48</td><td class="num">43</td><td class="num">—</td></tr>
+<tr class="hl"><td>单专家权重</td><td class="num">9.44 MB</td>
+    <td class="num">50.33 MB</td><td class="num">5.3×</td></tr>
+<tr class="hl"><td>全部 MoE 权重</td><td class="num">15.5 GB</td>
+    <td class="num">554 GB</td><td class="num">36×</td></tr>
+</tbody>
+</table>
+
+<p><b>三个量同时变大:</b>专家更多(槽位集合更大)、每个专家更大(每次搬运更贵)、
+每专家行数更少(选择更不稳定)。前两件是量变,第三件是质变。</p>
+
+<h2>二、第一道墙:HBM —— 不是带宽</h2>
+
+<div class="chart">
+  <p class="title">每卡需要容纳的 MoE 权重 + 预取槽位</p>
+  <p class="cap">单卡 HBM 86 GB(实测)· 可用线 64.5 GB = 86 × 75%(留 25% 给 KV 与激活)·
+  数字 = 每卡专家权重 + 槽位</p>
+  <svg id="chart-hbm" viewBox="0 0 860 300" role="img"
+       aria-label="各 R 下单卡 MoE 显存需求"></svg>
+  <div class="legend">
+    <span><i class="swatch sq" style="background:var(--series-1)"></i>装得下</span>
+    <span><i class="swatch sq" style="background:var(--text-muted);opacity:.45"></i>装不下</span>
+    <span style="color:var(--text-muted)">虚线 = 86 GB 物理上限</span>
+  </div>
+</div>
+
+<table>
+<thead><tr><th class="num">R</th><th class="num">每卡专家权重</th>
+  <th class="num">预取槽位</th><th class="num">合计</th><th>判定</th></tr></thead>
+<tbody>
+<tr><td class="num">2</td><td class="num">277.0 GB</td><td class="num">6.44 GB</td>
+    <td class="num">283.5 GB</td><td class="no">✗ 装不下</td></tr>
+<tr><td class="num">4</td><td class="num">138.5 GB</td><td class="num">3.22 GB</td>
+    <td class="num">141.7 GB</td><td class="no">✗ 装不下</td></tr>
+<tr class="hl"><td class="num">8</td><td class="num">69.3 GB</td><td class="num">1.61 GB</td>
+    <td class="num">70.9 GB</td><td class="mid">⚠ 勉强(只剩 ~15 GB)</td></tr>
+<tr><td class="num">16</td><td class="num">34.6 GB</td><td class="num">0.81 GB</td>
+    <td class="num">35.4 GB</td><td class="ok">✓ 可行</td></tr>
+<tr><td class="num">32</td><td class="num">17.3 GB</td><td class="num">0.40 GB</td>
+    <td class="num">17.7 GB</td><td class="ok">✓ 可行</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<p><b>这台机器只有 8 张卡,所以 V4-Flash 的配置被卡死在 R=8,而且非常勉强。</b></p>
+<p>这个约束比带宽紧得多,而且它顺带决定了后面所有数字:R=8 ⇒ B = E/R = 32 槽;
+R=8 必然跨 2 个 UB 簇 ⇒ 链路是 UB + PCIe 混合。</p>
+</div>
+
+<h2>三、第二道墙:带宽</h2>
+
+<p><b>全量重取</b> = 把 B 个槽位全部换一遍的字节量。</p>
+
+<table>
+<thead><tr><th></th><th class="num">B</th><th class="num">全量重取</th>
+  <th class="num">可用链路</th><th class="num">耗时</th></tr></thead>
+<tbody>
+<tr><td>Qwen3 R=4</td><td class="num">32</td><td class="num">302 MB</td>
+    <td class="num">135 GB/s</td><td class="num">2.2 ms</td></tr>
+<tr class="hl"><td>V4-Flash R=8</td><td class="num">32</td><td class="num">1.61 GB</td>
+    <td class="num">~142 GB/s</td><td class="num">~11 ms</td></tr>
+</tbody>
+</table>
+
+<p><b>对照:同样的 R=8 配置下,专家 GEMM 本身要多久?</b></p>
+<pre style="background:var(--surface-2);padding:.7rem .9rem;border-radius:6px;
+     font-size:.82rem;overflow-x:auto;color:var(--text-secondary);margin:.6rem 0">每 rank 行数 = T/rank × K = 2048 × 6 = 12288 行
+每行 FLOPs  = 2 × (4096×4096 + 2048×4096) = 50.3 MFLOPs
+GEMM 合计   = 12288 × 50.3 M = 618 GFLOPs
+按 300~800 TFLOPS/卡(bf16,假设值) → 0.8 ~ 2.1 ms</pre>
+
+<p><b>⇒ 一次全量重取 ≈ 5~14 倍的专家 GEMM 时间。</b></p>
+
+<p>但这是<b>最坏情况</b>。Qwen3 的实测显示实际只搬了全量的 0.8% —— 槽位持久,路由稳定时
+什么都不用搬。<b>所以关键问题变成:V4-Flash 上槽位会 churn 多少?</b></p>
+
+<h2>四、第三道墙(真正的瓶颈):每专家行数太少</h2>
+
+<div class="chart">
+  <p class="title">每专家分到的行数 vs T/rank</p>
+  <p class="cap">行/专家 = T × K / E · 双对数轴 · 灰带 = 行/专家 &lt; 30 的「选择不稳定区」——
+  计数变成小整数,top-B 集合在层间剧烈翻转</p>
+  <svg id="chart-rows" viewBox="0 0 860 380" role="img"
+       aria-label="每专家行数随 T/rank 的变化"></svg>
+  <div class="legend">
+    <span><i class="swatch" style="background:var(--series-2)"></i>Qwen3-30B-A3B(128 专家, top-8)</span>
+    <span><i class="swatch" style="background:var(--series-1)"></i>DeepSeek V4-Flash(256 专家, top-6)</span>
+  </div>
+</div>
+
+<p><b>预取的算术强度</b> = 每专家行数 × 每行 FLOPs ÷ 每专家字节:</p>
+
+<table>
+<thead><tr><th>模型</th><th class="num">行/专家</th><th class="num">FLOP/行</th>
+  <th class="num">MB/专家</th><th class="num">FLOP/byte</th></tr></thead>
+<tbody>
+<tr><td>Qwen3-30B-A3B</td><td class="num">1024</td><td class="num">9.4 M</td>
+    <td class="num">9.44</td><td class="num">1024</td></tr>
+<tr class="hl"><td>DeepSeek V4-Flash</td><td class="num">384</td><td class="num">50.3 M</td>
+    <td class="num">50.33</td><td class="num">384</td></tr>
+</tbody>
+</table>
+
+<p><b>⇒ 预取性价比只有 Qwen3 的 1/2.7。</b>但这还不是最要命的 —— 真正的问题在曲线拐弯的地方:</p>
+
+<div class="callout bad">
+<p><b>1.</b> 计数是小整数,层间抖动大 ⇒ <b>top-B 集合每层都在换</b><br>
+<b>2.</b> 每换一个专家就是 <b>50.33 MB</b> 搬运<br>
+<b>3.</b> 一旦进入这个区间,prefetch 从「几乎免费」变成「每层搬几百 MB 到 GB 级」</p>
+<p><b>而 V4-Flash 在 T=16384 时就已经只有 384 行/专家(是 Qwen3 的 38%),decode 时直接掉进个位数
+—— 那正是服务的主战场。</b></p>
+</div>
+
+<p><b>⇒ prefetch 的瓶颈不是带宽,是「选择不稳定 × 单专家过大」。加大带宽治不了,
+加大 B 也治不了(反而更贵)。</b></p>
+
+<h2>五、三个方案的重新评价</h2>
+
+<h3>方案 A:与 dispatch 并行</h3>
+<table><tbody>
+<tr><td style="width:26%"><b>优点</b></td><td>已实现、语义干净、改动小</td></tr>
+<tr><td><b>Qwen3 上的上限</b></td><td>104 μs/层 ≈ 5 ms/步 —— 太小,实测无墙钟收益</td></tr>
+<tr><td><b>V4-Flash 上</b></td><td>上限仍是「prefetch 的暴露时间」,但暴露时间从 104 μs 变成可能几 ms ⇒ <b>收益上限变大</b></td></tr>
+<tr><td><b>缺点</b></td><td><b>治不了选择不稳定</b> —— 只是把等待藏起来,不减少搬运量。churn 高时链路被持续占用,「并行」退化成「争抢」</td></tr>
+</tbody></table>
+<p><span class="pill">判定</span> 在 V4-Flash 上有一定价值(藏掉暴露时间),但不是解法。</p>
+
+<h3>方案 B:每层都缓存</h3>
+<table><tbody>
+<tr><td style="width:26%"><b>优点</b></td><td>直接减少重取 —— <b>正好针对 §4 的 churn 问题</b></td></tr>
+<tr><td><b>显存代价</b></td><td><code>层数 × 槽数 × 单专家</code> = 43 × 32 × 50.33 MB = <b>69.3 GB</b>(R=8)</td></tr>
+<tr><td><b>致命点</b></td><td>而 R=8 时每卡只剩 ~15 GB 给 KV+激活 —— <b>缓存要 69 GB,根本放不下</b></td></tr>
+</tbody></table>
+<p><span class="pill">判定</span> 显存代价在新几何下把这条路彻底堵死。(Qwen3 上也要 14.5 GB,远大于它能省下的 &lt;104 μs)</p>
+
+<h3>方案 C:提前预测 + 与 attention 重叠</h3>
+<table><tbody>
+<tr><td style="width:26%"><b>核心优势</b></td><td><b>attention 是本地计算,完全不占链路</b>;16k 时 8 ms、32k 时 28 ms 的窗口</td></tr>
+<tr><td><b>V4-Flash 上</b></td><td>全量重取 ~11 ms ⇒ <b>32k 的 28 ms 窗口塞得下</b>,16k 的 8 ms 塞不下</td></tr>
+<tr><td><b>真正的价值</b></td><td><b>把约束从「必须把槽位选对」换成「预测得差不多就行」</b> —— 提前一层知道要什么,就有时间慢慢搬,不必每层赌 top-B</td></tr>
+<tr><td><b>缺点</b></td><td>预测错了浪费带宽且要走修补路径;需要保存一层历史</td></tr>
+</tbody></table>
+<p><span class="pill">判定</span> <b>只有 C 针对根因。</b>A 藏时间、B 加缓存,都改变不了「top-B 在层间翻转」这件事。
+额外好处:窗口不占链路 ⇒ 可以顺手加大 B,直接缓解 §4 的选择压力。</p>
+
+<h2>六、验证清单(按代价排序)</h2>
+<table>
+<thead><tr><th class="num">#</th><th>实验</th><th>决定什么</th></tr></thead>
+<tbody>
+<tr><td class="num">①</td>
+    <td><b>确认 R=8 跑不跑得起来</b><br>
+        <span class="sub">每卡专家权重 69.3 GB + 槽位 1.61 GB,单卡 86 GB → 实际加载一次,看 KV 池能给多大</span></td>
+    <td><b>后面有没有意义</b>(最便宜,也最要命)</td></tr>
+<tr><td class="num">②</td>
+    <td><b>实测槽位变更率</b><br>
+        <span class="sub">跑真实流量,统计相邻两层 experts_to_copy 的集合差异</span></td>
+    <td>§4 是不是真的。churn &gt; 10% ⇒ 每层多搬 ≥161 MB ⇒ prefetch 必然成为瓶颈</td></tr>
+<tr><td class="num">③</td>
+    <td><b>量 dispatch 的真实跨卡占比</b><br>
+        <span class="sub">slot 模式下 token 行应留在本地,跨卡流量以 prefetch 为主</span></td>
+    <td>若 dispatch 也大量跨卡,方案 A 的「并行」会变成「争抢」</td></tr>
+<tr><td class="num">④</td>
+    <td>只有 ①②③ 都支持,才值得做方案 C</td><td>—</td></tr>
+</tbody>
+</table>
+
+<h2>七、一句话</h2>
+<p>
+在 Qwen3 上,prefetch 离带宽瓶颈三个数量级,不值一提;换成 V4-Flash,它同时被三件事推向瓶颈 ——
+<b>专家数翻倍</b>(槽位集合更大)、<b>单专家 5.3×</b>(每次搬运更贵)、<b>每专家行数降到 38%</b>(选择在层间翻转)。
+前两件是显存和带宽的量变,第三件是质变:<b>它让「缓存 top-B 专家」这个模型本身失效。</b>
+三个方案里只有 C 针对的是第三件。
+</p>
+
+<div class="foot">
+<p>数据来源:<code>/home/DeepSeek-V4-Flash/config.json</code>(几何)、8 卡 put 探针(链路带宽,见
+<code>docs/dev_results_2026-09-20.md</code> §3)、<code>ab_v4</code> profile(Qwen3 prefetch 实测)。</p>
+<p>推算项已在文中逐条标注;无 V4-Flash 实测。</p>
+</div>
+
+</div>
+
+<script>
+const CSS = getComputedStyle(document.documentElement);
+const C = n => CSS.getPropertyValue(n).trim();
+const NS = "http://www.w3.org/2000/svg";
+const el = (t, a, p) => { const e = document.createElementNS(NS, t);
+  for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; };
+
+/* ---------- 图 1:R → 每卡显存需求 ---------- */
+(function () {
+  const rows = [
+    ["R=2",  283.5, false],
+    ["R=4",  141.7, false],
+    ["R=8",   70.9, true ],
+    ["R=16",  35.4, true ],
+    ["R=32",  17.7, true ],
+  ];
+  const LIMIT = 86.0, SAFE = 64.5;
+  const svg = document.getElementById("chart-hbm");
+  const L = 62, R = 130, T = 14, B = 34;
+  const W = 860, H = 300, pw = W - L - R, ph = H - T - B;
+  const max = 300;
+  const X = v => L + v / max * pw;
+  const bh = ph / rows.length * 0.5, gap = ph / rows.length;
+
+  for (const g of [0, 50, 100, 150, 200, 250, 300]) {
+    el("line", { x1: X(g), x2: X(g), y1: T, y2: T + ph,
+      stroke: C("--border"), "stroke-width": g === 0 ? 1 : .5 }, svg);
+    el("text", { x: X(g), y: T + ph + 15, "text-anchor": "middle",
+      class: "tick" }, svg).textContent = g;
+  }
+  rows.forEach((r, i) => {
+    const [name, val, fits] = r;
+    const y = T + i * gap + (gap - bh) / 2;
+    el("text", { x: L - 10, y: y + bh * .78, "text-anchor": "end",
+      class: "axl" }, svg).textContent = name;
+    el("rect", { x: L, y, width: Math.max(2, X(val) - L), height: bh, rx: 3,
+      fill: fits ? C("--series-1") : C("--text-muted"),
+      opacity: fits ? .92 : .45 }, svg);
+    el("text", { x: X(val) + 8, y: y + bh * .78, class: "dl",
+      fill: C("--text-primary") }, svg)
+      .textContent = val.toFixed(1) + " GB  " + (fits ? "✓" : "✗");
+  });
+  /* 物理上限 + 可用线 */
+  [[LIMIT, C("--bad"), "86 GB 物理上限"], [SAFE, C("--text-muted"), "64.5 GB 可用"]]
+    .forEach(([v, col, lab]) => {
+      el("line", { x1: X(v), x2: X(v), y1: T - 4, y2: T + ph,
+        stroke: col, "stroke-width": 1.3, "stroke-dasharray": "5 4" }, svg);
+      el("text", { x: X(v) + 4, y: T - 6, class: "dl", fill: col }, svg)
+        .textContent = lab;
+    });
+  el("text", { x: L + pw / 2, y: H - 4, "text-anchor": "middle",
+    class: "axl" }, svg).textContent = "每卡 MoE 显存需求(GB)";
+})();
+
+/* ---------- 图 2:行/专家 vs T/rank(双对数) ---------- */
+(function () {
+  const T = [16, 64, 256, 1024, 4096, 16384];
+  const qwen = T.map(t => t * 8 / 128);
+  const v4   = T.map(t => t * 6 / 256);
+
+  const svg = document.getElementById("chart-rows");
+  const L = 62, R = 120, TP = 16, B = 46;
+  const W = 860, H = 380, pw = W - L - R, ph = H - TP - B;
+  const x0 = Math.log10(16), x1 = Math.log10(16384);
+  const y0 = Math.log10(0.2), y1 = Math.log10(2048);
+  const X = v => L + (Math.log10(v) - x0) / (x1 - x0) * pw;
+  const Y = v => TP + (1 - (Math.log10(v) - y0) / (y1 - y0)) * ph;
+
+  /* 不稳定带:行/专家 < 30 */
+  el("rect", { x: L, y: Y(30), width: pw, height: Y(0.2) - Y(30),
+    fill: C("--text-muted"), opacity: .1 }, svg);
+  el("text", { x: L + 8, y: Y(30) + 15, class: "dl",
+    fill: C("--text-secondary") }, svg)
+    .textContent = "选择不稳定区(行/专家 < 30)";
+
+  for (const g of [0.2, 1, 10, 100, 1000]) {
+    el("line", { x1: L, x2: L + pw, y1: Y(g), y2: Y(g),
+      stroke: C("--border"), "stroke-width": .5 }, svg);
+    el("text", { x: L - 8, y: Y(g) + 3.5, "text-anchor": "end",
+      class: "tick" }, svg).textContent = g;
+  }
+  T.forEach(v => {
+    el("line", { x1: X(v), x2: X(v), y1: TP, y2: TP + ph,
+      stroke: C("--border"), "stroke-width": .5 }, svg);
+    el("text", { x: X(v), y: TP + ph + 16, "text-anchor": "middle",
+      class: "tick" }, svg).textContent = v;
+  });
+  el("text", { x: L + pw / 2, y: H - 8, "text-anchor": "middle",
+    class: "axl" }, svg).textContent = "T / rank(对数)";
+  el("text", { x: 14, y: TP + ph / 2, class: "axl",
+    transform: `rotate(-90 14 ${TP + ph / 2})`, "text-anchor": "middle" }, svg)
+    .textContent = "行 / 专家(对数)";
+
+  const path = a => a.map((v, i) => (i ? "L" : "M") + X(T[i]) + " " + Y(v)).join(" ");
+  function series(vals, color) {
+    el("path", { d: path(vals), fill: "none", stroke: color, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    vals.forEach((v, i) => el("circle", { cx: X(T[i]), cy: Y(v), r: 3.6,
+      fill: color, stroke: C("--surface-1"), "stroke-width": 2 }, svg));
+  }
+  series(qwen, C("--series-2"));
+  series(v4, C("--series-1"));
+
+  /* 直接标注两个模型在 16k 处的值 */
+  el("text", { x: X(16384) + 8, y: Y(1024) + 4, class: "dl",
+    fill: C("--text-primary") }, svg).textContent = "1024(16k 预填充)";
+  el("text", { x: X(16384) + 8, y: Y(384) + 4, class: "dl",
+    fill: C("--text-primary") }, svg).textContent = "384  ← 只有 38%";
+  el("text", { x: X(64) + 8, y: Y(0.375) - 6, class: "dl",
+    fill: C("--text-primary") }, svg).textContent = "decode 量级:个位数";
+})();
+</script>
+</body>
+</html>

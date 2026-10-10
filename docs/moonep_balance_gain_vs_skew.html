@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoonEP 负载均衡：收益与缺口（skew 扫描）</title>
+<style>
+  :root { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  body { margin: 0; font: 15px/1.65 -apple-system, "Segoe UI", "PingFang SC",
+         "Microsoft YaHei", Roboto, sans-serif; }
+
+  .viz-root {
+    --surface-1: #fcfcfb;
+    --surface-2: #f4f4f2;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7c7b76;
+    --grid: #e4e4e0;
+    --axis: #c9c8c2;
+    --border: #e4e4e0;
+    /* series identity is fixed for the whole report: ag = slot 1, slot = slot 2 */
+    --series-ag: #2a78d6;
+    --series-slot: #eb6834;
+    /* component identity, fixed across both breakdown charts (validated set) */
+    --comp-1: #2a78d6; --comp-2: #eb6834; --comp-3: #1baf7a;
+    --comp-4: #eda100; --comp-5: #e87ba4; --comp-6: #008300;
+    background: var(--surface-1);
+    color: var(--text-primary);
+    min-height: 100vh;
+    padding: 32px 20px 64px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      --surface-1: #1a1a19;
+      --surface-2: #232322;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #96958c;
+      --grid: #33332f;
+      --axis: #4a4a45;
+      --border: #33332f;
+      --series-ag: #3987e5;
+      --series-slot: #d95926;
+      --comp-1: #3987e5; --comp-2: #d95926; --comp-3: #199e70;
+      --comp-4: #c98500; --comp-5: #d55181; --comp-6: #008300;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #96958c;
+    --grid: #33332f;
+    --axis: #4a4a45;
+    --border: #33332f;
+    --series-ag: #3987e5;
+    --series-slot: #d95926;
+    --comp-1: #3987e5; --comp-2: #d95926; --comp-3: #199e70;
+    --comp-4: #c98500; --comp-5: #d55181; --comp-6: #008300;
+  }
+
+  .wrap { max-width: 940px; margin: 0 auto; }
+
+  h1 { font-size: 25px; line-height: 1.3; margin: 0 0 8px; letter-spacing: -0.01em; }
+  h2 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: var(--text-secondary); margin: 0 0 4px; }
+  .meta { color: var(--text-muted); font-size: 13px; margin: 0; }
+
+  .bar-top { display: flex; align-items: flex-start; justify-content: space-between;
+             gap: 16px; margin-bottom: 26px; }
+  button.theme { background: var(--surface-2); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+    font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  button.theme:hover { color: var(--text-primary); }
+
+  /* stat tiles: the headline numbers, no plot */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+           gap: 12px; margin: 0 0 34px; }
+  .tile { background: var(--surface-2); border: 1px solid var(--border);
+          border-radius: 12px; padding: 14px 16px; }
+  .tile .k { font-size: 12px; color: var(--text-secondary); letter-spacing: .02em; }
+  .tile .v { font-size: 26px; font-weight: 650; letter-spacing: -0.02em;
+             margin: 2px 0 2px; font-variant-numeric: tabular-nums; }
+  .tile .n { font-size: 12.5px; color: var(--text-muted); }
+
+  figure { margin: 0 0 38px; }
+  figcaption { color: var(--text-secondary); font-size: 13.5px; margin-top: 10px; }
+  .legend { display: flex; gap: 18px; align-items: center; margin: 0 0 8px;
+            font-size: 13px; color: var(--text-secondary); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .tick { fill: var(--text-muted); font-size: 11.5px; }
+  .axis-title { fill: var(--text-secondary); font-size: 12px; }
+  .dlabel { fill: var(--text-primary); font-size: 12px; font-weight: 600;
+            font-variant-numeric: tabular-nums; }
+  .dlabel-2 { fill: var(--text-secondary); font-size: 11.5px;
+              font-variant-numeric: tabular-nums; }
+
+  .tip { position: fixed; pointer-events: none; z-index: 20; opacity: 0;
+         transition: opacity .08s; background: var(--surface-1);
+         border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+         font-size: 12.5px; color: var(--text-primary);
+         box-shadow: 0 6px 22px rgba(0,0,0,.14); max-width: 260px; }
+  .tip b { font-weight: 620; }
+  .tip .row { display: flex; justify-content: space-between; gap: 14px;
+              font-variant-numeric: tabular-nums; }
+  .tip .row i { color: var(--text-secondary); font-style: normal; }
+
+  .notes { background: var(--surface-2); border: 1px solid var(--border);
+           border-radius: 12px; padding: 18px 20px; margin-bottom: 26px; }
+  .notes h2 { margin-bottom: 10px; }
+  .notes ol { margin: 0; padding-left: 20px; }
+  .notes li { margin-bottom: 8px; color: var(--text-secondary); }
+  .notes li b { color: var(--text-primary); font-weight: 620; }
+
+  /* workload card: the configuration the numbers were taken under */
+  .load { border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2);
+          padding: 16px 18px; margin-bottom: 30px; }
+  .load h2 { font-size: 15px; margin-bottom: 10px; }
+  .load dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px;
+             margin: 0; font-size: 13.5px; }
+  .load dt { color: var(--text-secondary); white-space: nowrap; }
+  .load dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .load code { font-size: 12.5px; background: var(--surface-1); border: 1px solid var(--border);
+               border-radius: 4px; padding: 1px 5px; }
+
+  details.table { border: 1px solid var(--border); border-radius: 12px;
+                  padding: 12px 16px; background: var(--surface-2); }
+  details.table summary { cursor: pointer; color: var(--text-secondary); font-size: 13.5px; }
+  table { border-collapse: collapse; margin-top: 12px; width: 100%;
+          font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-secondary); font-weight: 600; }
+  td { color: var(--text-primary); }
+</style>
+</head>
+<body data-palette="#2a78d6,#eb6834">
+<div class="viz-root">
+<div class="wrap">
+
+  <div class="bar-top">
+    <div>
+      <h1>MoonEP 的负载均衡：收益是真的，但分母太小</h1>
+      <p class="sub">把路由偏斜从 1.5:1 一路拉到 99:1，量 MoonEP（slot）相对 all-gather（ag）在 MoE GEMM 关键路径上省下多少，以及端到端缺口还差多少。</p>
+      <p class="meta">T/rank = 16384 · DP=2 · 两条腿 MBT=16384 / MAXSEQS=2 / KV 与 MAXLEN 完全相同 · prefix cache 关闭 · 每点独立 profile 一批：起 profile → 打一发 → 停 profile</p>
+    </div>
+    <button class="theme" id="themeBtn">切换深色</button>
+  </div>
+
+  <div class="load">
+    <h2>负载与配置</h2>
+    <dl>
+      <dt>模型</dt><dd>Qwen3-30B-A3B（E=128, K=8, 48 层）· DP=2 · EP=2 · TP=1 · <code>--enforce-eager</code></dd>
+      <dt>每卡 token 数</dt><dd><b>T/rank = 16384</b>：2 条并发请求 × 16384-token prompt ÷ DP=2，每引擎恰好 1 次迭代（<code>steps=2</code>，纯 prefill，不含 decode）</dd>
+      <dt>prompt</dt><dd><code>prompts_16384.jsonl</code>：12 条由 GSM8K 拼接、精确 16384 token 的独立 prompt（两两共享前缀 ≤ 1 字符）</dd>
+      <dt>路由偏斜</dt><dd>frac 0.6 / 0.8 / 0.95 / 0.99 → rank0:rank1 = 1.5:1 / 4:1 / 19:1 / 99:1</dd>
+      <dt>两条腿的配置</dt><dd><b>逐字相同</b>：<code>MBT=16384</code> · <code>MAXSEQS=2</code> · <code>MAXLEN=24576</code> · KV 池 164,224 token（显式钉住）· <code>gpu-memory-utilization=0.92</code></dd>
+      <dt>前缀缓存</dt><dd><b>关闭</b>（<code>--no-enable-prefix-caching</code>）—— 重放同一 prompt 会有 98% 命中、单步便宜 3.6–4.4×，会污染一切计时</dd>
+      <dt>卡位</dt><dd>slot（MoonEP）= 卡 4-5，端口 8000；ag（all-gather）= 卡 6-7，端口 8001；同属一个 UB 簇</dd>
+      <dt>测量方式</dt><dd>每个数据点独立一批：<code>/start_profile</code> → 打一发 → <code>/stop_profile</code>，取 kernel 级设备时间（torch_npu profiler）。每组数值由两条腿各自的 rank 轨迹汇总</dd>
+    </dl>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="k">GEMM 关键路径最大节省</div>
+      <div class="v">126.8 ms</div>
+      <div class="n">99:1 偏斜下，445.1 → 318.3 ms（−28.5%）</div>
+    </div>
+    <div class="tile">
+      <div class="k">端到端缺口（同一批运行）</div>
+      <div class="v">+244 ms</div>
+      <div class="n">99:1 下 MoonEP 仍慢 244 ms</div>
+    </div>
+    <div class="tile">
+      <div class="k">均衡器把两卡钉在</div>
+      <div class="v">1.32 : 1</div>
+      <div class="n">同期 ag 是 12.1 : 1</div>
+    </div>
+    <div class="tile">
+      <div class="k">收益 vs 缺口</div>
+      <div class="v">127 &lt; 244</div>
+      <div class="n">缺口已随偏斜饱和，追不平</div>
+    </div>
+  </div>
+
+  <figure>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-ag)"></i>ag（all-gather）</span>
+      <span><i class="swatch" style="background:var(--series-slot)"></i>slot（MoonEP）</span>
+      <span style="color:var(--text-muted)">数值 = max(rank0, rank1)，关键路径口径</span>
+    </div>
+    <svg id="chartA" viewBox="0 0 900 330" role="img"
+         aria-label="各偏斜下两条路线的 MoE GEMM 关键路径耗时对比"></svg>
+    <figcaption><b>图一 · GEMM 关键路径。</b>ag 的热卡随偏斜线性变重（292 → 445 ms），MoonEP 被均衡器按住（288 → 318 ms）。每个偏斜上方的数字是省下的毫秒数与百分比。</figcaption>
+  </figure>
+
+  <figure>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-ag)"></i>ag（all-gather）</span>
+      <span><i class="swatch" style="background:var(--series-slot)"></i>slot（MoonEP）</span>
+      <span style="color:var(--text-muted)">TTFT，含 profiler 开销（两条腿同加）</span>
+    </div>
+    <svg id="chartB" viewBox="0 0 900 330" role="img"
+         aria-label="各偏斜下两条路线的 TTFT 与缺口"></svg>
+    <figcaption><b>图二 · 端到端缺口。</b>ag 随偏斜一起退化（1207 → 1384 ms），MoonEP 几乎不动（1620 → 1628 ms），所以缺口从 413 ms 收窄到 244 ms —— 收窄量 169 ms 与图一省的 127 ms 同量级，两把尺子对上了。</figcaption>
+  </figure>
+
+  <figure>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-ag)"></i>ag（all-gather）</span>
+      <span><i class="swatch" style="background:var(--series-slot)"></i>slot（MoonEP）</span>
+      <span style="color:var(--text-muted)">两卡 GEMM 的 max/min</span>
+    </div>
+    <svg id="chartC" viewBox="0 0 900 300" role="img"
+         aria-label="各偏斜下两条路线的两卡 GEMM 不均衡比"></svg>
+    <figcaption><b>图三 · 机制。</b>偏斜拉到 99:1，ag 的两卡差 12 倍，MoonEP 仍稳在 1.3 倍 —— 均衡器没有失效，它是真的在工作。（引擎侧行数记录：偏斜 0.8 与 0.95 下两卡每层都算 131,072 行，逐行相等。）</figcaption>
+  </figure>
+
+  <figure>
+    <div class="legend" id="legendStack"></div>
+    <svg id="chartD" viewBox="0 0 900 220" role="img"
+         aria-label="all-gather 每卡每步的设备时间组件分解"></svg>
+    <svg id="chartE" viewBox="0 0 900 220" role="img"
+         style="margin-top:14px"
+         aria-label="MoonEP 每卡每步的设备时间组件分解"></svg>
+    <figcaption><b>图四 / 图五 · 这一步的时间花在哪（偏斜 4:1，与图一同一批运行）。</b>横轴是各 kernel 设备时间之和，<b>虚线是这一步真正的墙钟（TTFT）</b> —— 两者不是一回事：<b>ag 的墙钟（1294 ms）落在设备条之内</b>，因为它的集合通信与其它 kernel 重叠；<b>slot 的墙钟（1687 ms）远在设备条之外</b>，多出的 <b>306 ms 是栅栏串行与空隙</b>。这就是"设备时间之和看起来差不多、端到端却差 393 ms"的原因。<br>科目也不同：ag 主要付给集合通信（all-gather + reduce-scatter，565 / 944 ms），MoonEP 主要付给自己的编排（planning / dispatch / combine / prefetch，508 / 587 ms）+ 跨卡栅栏（181 / 237 ms）。<b>要缩的是 slot 那段串行空隙，不是 GEMM。</b></figcaption>
+  </figure>
+
+  <div class="notes">
+    <h2>结论</h2>
+    <ol>
+      <li><b>收益是真的，而且随偏斜单调增长</b>：GEMM 关键路径上省 3.9 → 73.4 → 122.3 → 126.8 ms（0.6 / 0.8 / 0.95 / 0.99），最高 −28.5%。端到端缺口同步收窄 169 ms，两把尺子互证。</li>
+      <li><b>但收益在 0.95 之后饱和</b>：ag 的热卡被总行数封顶（437 → 445 ms 几乎不动），MoonEP 稳定在 ~318 ms。<b>能省的极限就是 ~127 ms。</b></li>
+      <li><b>即使 99:1，MoonEP 仍输 244 ms</b>，而且这就是渐近值。缺口 &gt; 收益上限，<b>靠加大偏斜永远追不平</b>。</li>
+      <li><b>MoonEP 的额外开销不随偏斜变化</b>：同一个 profile 窗口里 <code>planning_kernel</code> 1.644 s + <code>barrier_on_stream_kernel</code> 1.221 s，是编排侧的固定成本。要翻盘只能砍这里，与偏斜无关。</li>
+      <li><b>两条腿的钱花在不同科目上（图四/五）</b>：ag 主要付给集合通信（565 / 944 ms），MoonEP 主要付给自己的编排（508 / 587 ms）+ 跨卡栅栏（181 / 237 ms）。<b>两者的通信/编排量级其实相当</b>（都占该卡设备时间的 50–70%），差别在于 ag 的通信能与其它 kernel 重叠（设备时间和 1372 ms &gt; 实测墙钟 1294 ms），而 MoonEP 的栅栏把一切串起来（设备时间和 1381 ms &lt; 实测墙钟 1687 ms，有约 300 ms 的空隙）。</li>
+    </ol>
+  </div>
+
+  <details class="table">
+    <summary>原始数据表</summary>
+    <table>
+      <thead>
+        <tr><th>skew</th><th>rank 比</th><th>ag max (ms)</th><th>slot max (ms)</th><th>省 (ms)</th><th>省 %</th><th>ag 冷热比</th><th>slot 冷热比</th><th>slot TTFT</th><th>ag TTFT</th><th>缺口</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+
+    <p style="color:var(--text-secondary);font-size:13.5px;margin:18px 0 6px">
+      组件分解（偏斜 4:1，ms / 步 / 卡，kernel 设备时间）：
+    </p>
+    <table>
+      <thead>
+        <tr><th>腿 / 卡</th><th>合计</th><th>attention</th><th>MoE GEMM</th><th>集合通信</th><th>MoonEP 编排</th><th>跨卡栅栏</th><th>其它</th></tr>
+      </thead>
+      <tbody id="tbodyComp"></tbody>
+    </table>
+  </details>
+
+</div>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- data (all measured in one configuration; see the header) --------------
+  const SKEW = [0.6, 0.8, 0.95, 0.99];
+  const RANK_RATIO = ["1.5:1", "4:1", "19:1", "99:1"];
+  const GEMM_AG   = [292.1, 377.3, 437.1, 445.1];   // max(rank0, rank1), ms
+  const GEMM_SLOT = [288.2, 303.8, 314.8, 318.3];
+  const AG_RANKS   = [[292.1, 206.0], [377.3, 116.8], [437.1, 53.7], [445.1, 36.7]];
+  const SLOT_RANKS = [[288.2, 266.0], [303.8, 248.8], [314.8, 242.9], [318.3, 240.5]];
+  const TTFT_SLOT = [1620.0, 1687.1, 1640.4, 1628.3];
+  const TTFT_AG   = [1207.2, 1294.2, 1378.4, 1384.3];
+
+  const save = GEMM_AG.map((v, i) => v - GEMM_SLOT[i]);
+  const pct  = GEMM_AG.map((v, i) => (v - GEMM_SLOT[i]) / v * 100);
+  const imbalance = (ranks) => ranks.map(r => Math.max(...r) / Math.min(...r));
+
+  // ---- component breakdown, skew 0.8, per rank, ms of kernel device time per
+  // step. Both charts share this component order so a colour means one thing.
+  const COMP_ORDER = [
+    ["attn",    "attention",                              "--comp-1"],
+    ["gemm",    "MoE GEMM（GroupedMatmul）",               "--comp-2"],
+    ["comm",    "集合通信（all-gather / reduce-scatter）",   "--comp-3"],
+    ["moonep",  "MoonEP 编排（planning/dispatch/combine/prefetch）", "--comp-4"],
+    ["barrier", "跨卡栅栏（barrier_on_stream）",             "--comp-5"],
+    ["other",   "其它（dense 投影 / norm / rope / 路由搬运）",  "--comp-6"],
+  ];
+  const BREAKDOWN = {
+    ag: [
+      { rank: "rank0（卡 6）", total: 1157.8,
+        parts: { attn: 170.0, gemm: 188.6, comm: 565.4, other: 233.8 } },
+      { rank: "rank1（卡 7）", total: 1372.5,
+        parts: { attn: 170.2, gemm: 58.4, comm: 944.3, other: 199.6 } },
+    ],
+    slot: [
+      { rank: "rank0（卡 4）", total: 1381.0,
+        parts: { attn: 170.2, gemm: 151.9, moonep: 507.7, barrier: 237.0, other: 314.2 } },
+      { rank: "rank1（卡 5）", total: 1377.9,
+        parts: { attn: 169.5, gemm: 124.4, moonep: 587.0, barrier: 181.4, other: 315.6 } },
+    ],
+  };
+
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (n, a) => { const e = document.createElementNS(NS, n);
+    for (const k in a) e.setAttribute(k, a[k]); return e; };
+  const clear = (s) => { while (s.firstChild) s.removeChild(s.firstChild); };
+
+  const tip = document.getElementById("tip");
+  function showTip(ev, html) {
+    tip.innerHTML = html;
+    tip.style.opacity = "1";
+    const r = tip.getBoundingClientRect();
+    let x = ev.clientX + 14, y = ev.clientY - r.height - 10;
+    if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+    if (y < 8) y = ev.clientY + 16;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  const hideTip = () => { tip.style.opacity = "0"; };
+
+  // ---- chart A: grouped bars ------------------------------------------------
+  function chartA(svg) {
+    clear(svg);
+    const W = 900, H = 330, m = { t: 58, r: 20, b: 46, l: 62 };
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const DARK = () => getComputedStyle(document.querySelector(".viz-root"))
+      .getPropertyValue("--surface-1").trim();
+    const C_AG = () => getComputedStyle(document.querySelector(".viz-root"))
+      .getPropertyValue("--series-ag").trim();
+    const C_SLOT = () => getComputedStyle(document.querySelector(".viz-root"))
+      .getPropertyValue("--series-slot").trim();
+
+    const maxY = 500;
+    const y = (v) => m.t + ph - (v / maxY) * ph;
+    const band = pw / SKEW.length;
+    const BW = 24, GAP = 2;
+
+    [0, 100, 200, 300, 400, 500].forEach((v) => {
+      svg.appendChild(el("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v),
+        class: v === 0 ? "axis-line" : "grid-line" }));
+      svg.appendChild(Object.assign(el("text", { x: m.l - 10, y: y(v) + 4,
+        class: "tick", "text-anchor": "end" }), { textContent: v }));
+    });
+    svg.appendChild(Object.assign(el("text", { x: m.l - 10, y: m.t - 20,
+      class: "axis-title", "text-anchor": "end" }), { textContent: "ms" }));
+
+    SKEW.forEach((s, i) => {
+      const cx = m.l + band * (i + 0.5);
+      svg.appendChild(Object.assign(el("text", { x: cx, y: H - 22,
+        class: "tick", "text-anchor": "middle" }), { textContent: "skew " + s }));
+      svg.appendChild(Object.assign(el("text", { x: cx, y: H - 7,
+        class: "tick", "text-anchor": "middle", opacity: .8 }),
+        { textContent: "rank " + RANK_RATIO[i] }));
+
+      const pair = [[GEMM_AG[i], C_AG(), "ag"], [GEMM_SLOT[i], C_SLOT(), "slot"]];
+      pair.forEach(([v, col, name], j) => {
+        const x = cx - BW - GAP / 2 + j * (BW + GAP);
+        // 4px rounded data-end, square at the baseline
+        svg.appendChild(el("rect", { x: x, y: y(v), width: BW, height: y(0) - y(v),
+          rx: 4, fill: col }));
+        svg.appendChild(el("rect", { x: x, y: y(v) + 4, width: BW,
+          height: Math.max(0, y(0) - y(v) - 4), fill: col }));
+        const hit = el("rect", { x: x - 3, y: m.t, width: BW + 6, height: ph,
+          fill: "transparent", style: "cursor:pointer" });
+        hit.addEventListener("mousemove", (ev) => showTip(ev,
+          `<b>${name}</b> · skew ${s}<br>` +
+          `<div class="row"><i>max(rank0,rank1)</i><span>${v.toFixed(1)} ms</span></div>`));
+        hit.addEventListener("mouseleave", hideTip);
+        svg.appendChild(hit);
+      });
+
+      // direct label: the saving, above the pair (text token, not series colour)
+      svg.appendChild(Object.assign(el("text", { x: cx, y: y(Math.max(GEMM_AG[i], GEMM_SLOT[i])) - 12,
+        class: "dlabel", "text-anchor": "middle" }),
+        { textContent: "省 " + save[i].toFixed(1) + " ms" }));
+      svg.appendChild(Object.assign(el("text", { x: cx, y: y(Math.max(GEMM_AG[i], GEMM_SLOT[i])) - 27,
+        class: "dlabel-2", "text-anchor": "middle" }),
+        { textContent: "−" + pct[i].toFixed(1) + "%" }));
+    });
+  }
+
+  // ---- chart B: lines over ordered skew -------------------------------------
+  function chartB(svg) {
+    clear(svg);
+    const W = 900, H = 330, m = { t: 40, r: 152, b: 46, l: 62 };
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const lo = 1100, hi = 1750;
+    const px = (i) => m.l + (pw / (SKEW.length - 1)) * i;
+    const py = (v) => m.t + ph - ((v - lo) / (hi - lo)) * ph;
+    const css = (k) => getComputedStyle(document.querySelector(".viz-root"))
+      .getPropertyValue(k).trim();
+
+    for (let v = lo; v <= hi; v += 150) {
+      svg.appendChild(el("line", { x1: m.l, x2: W - m.r, y1: py(v), y2: py(v),
+        class: v === lo ? "axis-line" : "grid-line" }));
+      svg.appendChild(Object.assign(el("text", { x: m.l - 10, y: py(v) + 4,
+        class: "tick", "text-anchor": "end" }), { textContent: v }));
+    }
+    svg.appendChild(Object.assign(el("text", { x: m.l - 10, y: m.t - 16,
+      class: "axis-title", "text-anchor": "end" }), { textContent: "TTFT ms" }));
+    SKEW.forEach((s, i) => {
+      svg.appendChild(Object.assign(el("text", { x: px(i), y: H - 22,
+        class: "tick", "text-anchor": "middle" }), { textContent: "skew " + s }));
+      svg.appendChild(Object.assign(el("text", { x: px(i), y: H - 7,
+        class: "tick", "text-anchor": "middle", opacity: .8 }),
+        { textContent: "rank " + RANK_RATIO[i] }));
+    });
+
+    const series = [
+      { name: "slot（MoonEP）", v: TTFT_SLOT, c: css("--series-slot") },
+      { name: "ag（all-gather）", v: TTFT_AG, c: css("--series-ag") },
+    ];
+    series.forEach(({ v, c }) => {
+      svg.appendChild(el("path", {
+        d: v.map((y0, i) => (i ? "L" : "M") + px(i) + "," + py(y0)).join(" "),
+        fill: "none", stroke: c, "stroke-width": 2,
+        "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      v.forEach((y0, i) => {
+        svg.appendChild(el("circle", { cx: px(i), cy: py(y0), r: 5,
+          fill: c, stroke: css("--surface-1"), "stroke-width": 2 }));
+      });
+    });
+    // direct labels at the last point (<=4 series: identity is never colour-alone)
+    series.forEach(({ name, v, c }) => {
+      const i = v.length - 1;
+      svg.appendChild(Object.assign(el("text", { x: px(i) + 12, y: py(v[i]) + 4,
+        class: "dlabel" }), { textContent: name }));
+    });
+    // the gap, annotated at both ends
+    [0, SKEW.length - 1].forEach((i) => {
+      const g = TTFT_SLOT[i] - TTFT_AG[i];
+      const x = px(i), yTop = py(TTFT_AG[i]), yBot = py(TTFT_SLOT[i]);
+      svg.appendChild(el("line", { x1: x, x2: x, y1: yTop + 10, y2: yBot - 10,
+        stroke: css("--axis"), "stroke-width": 1, "stroke-dasharray": "3 3" }));
+      svg.appendChild(Object.assign(el("text", { x: x + (i ? -8 : 10), y: (yTop + yBot) / 2,
+        class: "dlabel-2", "text-anchor": i ? "end" : "start" }),
+        { textContent: "缺口 " + g.toFixed(0) + " ms" }));
+    });
+    // crosshair tooltip
+    const cross = el("line", { y1: m.t, y2: m.t + ph, stroke: css("--axis"),
+      "stroke-width": 1, opacity: 0 });
+    svg.appendChild(cross);
+    const hit = el("rect", { x: m.l, y: m.t, width: pw, height: ph, fill: "transparent" });
+    hit.addEventListener("mousemove", (ev) => {
+      const box = svg.getBoundingClientRect();
+      const rx = (ev.clientX - box.left) / box.width * W;
+      let best = 0, bd = 1e9;
+      SKEW.forEach((_, i) => { const d = Math.abs(px(i) - rx); if (d < bd) { bd = d; best = i; } });
+      cross.setAttribute("x1", px(best)); cross.setAttribute("x2", px(best));
+      cross.setAttribute("opacity", 1);
+      showTip(ev, `<b>skew ${SKEW[best]}</b> · rank ${RANK_RATIO[best]}<br>` +
+        `<div class="row"><i>slot</i><span>${TTFT_SLOT[best].toFixed(1)} ms</span></div>` +
+        `<div class="row"><i>ag</i><span>${TTFT_AG[best].toFixed(1)} ms</span></div>` +
+        `<div class="row"><i>缺口</i><span>${(TTFT_SLOT[best] - TTFT_AG[best]).toFixed(1)} ms</span></div>`);
+    });
+    hit.addEventListener("mouseleave", () => { cross.setAttribute("opacity", 0); hideTip(); });
+    svg.appendChild(hit);
+  }
+
+  // ---- chart C: imbalance ratio ---------------------------------------------
+  function chartC(svg) {
+    clear(svg);
+    const W = 900, H = 300, m = { t: 34, r: 152, b: 46, l: 62 };
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const hi = 13;
+    const px = (i) => m.l + (pw / (SKEW.length - 1)) * i;
+    const py = (v) => m.t + ph - (v / hi) * ph;
+    const css = (k) => getComputedStyle(document.querySelector(".viz-root"))
+      .getPropertyValue(k).trim();
+
+    for (let v = 0; v <= hi; v += 2) {
+      svg.appendChild(el("line", { x1: m.l, x2: W - m.r, y1: py(v), y2: py(v),
+        class: v === 0 ? "axis-line" : "grid-line" }));
+      svg.appendChild(Object.assign(el("text", { x: m.l - 10, y: py(v) + 4,
+        class: "tick", "text-anchor": "end" }), { textContent: v + ":1" }));
+    }
+    svg.appendChild(Object.assign(el("text", { x: m.l - 10, y: m.t - 14,
+      class: "axis-title", "text-anchor": "end" }), { textContent: "max/min" }));
+    SKEW.forEach((s, i) => {
+      svg.appendChild(Object.assign(el("text", { x: px(i), y: H - 22,
+        class: "tick", "text-anchor": "middle" }), { textContent: "skew " + s }));
+      svg.appendChild(Object.assign(el("text", { x: px(i), y: H - 7,
+        class: "tick", "text-anchor": "middle", opacity: .8 }),
+        { textContent: "rank " + RANK_RATIO[i] }));
+    });
+
+    const agIz = imbalance(AG_RANKS), slotIz = imbalance(SLOT_RANKS);
+    [["ag（all-gather）", agIz, css("--series-ag")],
+     ["slot（MoonEP）", slotIz, css("--series-slot")]].forEach(([name, v, c]) => {
+      svg.appendChild(el("path", { d: v.map((y0, i) => (i ? "L" : "M") + px(i) + "," + py(y0)).join(" "),
+        fill: "none", stroke: c, "stroke-width": 2, "stroke-linejoin": "round" }));
+      v.forEach((y0, i) => svg.appendChild(el("circle", { cx: px(i), cy: py(y0), r: 5,
+        fill: c, stroke: css("--surface-1"), "stroke-width": 2 })));
+      const i = v.length - 1;
+      svg.appendChild(Object.assign(el("text", { x: px(i) + 12, y: py(v[i]) + 4,
+        class: "dlabel" }), { textContent: name + " " + v[i].toFixed(1) + ":1" }));
+    });
+    const hit = el("rect", { x: m.l, y: m.t, width: pw, height: ph, fill: "transparent" });
+    hit.addEventListener("mousemove", (ev) => {
+      const box = svg.getBoundingClientRect();
+      const rx = (ev.clientX - box.left) / box.width * W;
+      let best = 0, bd = 1e9;
+      SKEW.forEach((_, i) => { const d = Math.abs(px(i) - rx); if (d < bd) { bd = d; best = i; } });
+      showTip(ev, `<b>skew ${SKEW[best]}</b><br>` +
+        `<div class="row"><i>ag 两卡</i><span>${AG_RANKS[best][0].toFixed(0)} / ${AG_RANKS[best][1].toFixed(0)} ms</span></div>` +
+        `<div class="row"><i>slot 两卡</i><span>${SLOT_RANKS[best][0].toFixed(0)} / ${SLOT_RANKS[best][1].toFixed(0)} ms</span></div>`);
+    });
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  }
+
+  // ---- charts D/E: per-leg device-time composition ---------------------------
+  // In-segment numbers pick their ink from the fill's luminance - the validated
+  // palette has light steps where white text would fail contrast, so this is
+  // computed, not assumed.
+  function inkOn(hex) {
+    const c = hex.replace("#", "");
+    const f = (i) => { const v = parseInt(c.substr(i, 2), 16) / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(0) + 0.7152 * f(2) + 0.0722 * f(4) > 0.42 ? "#0b0b0b" : "#ffffff";
+  }
+
+  // Wall clock per step for the same burst. The stacked bars are the SUM of
+  // kernel device times, which is NOT the step's wall time: kernels overlap
+  // (ag) or serialise behind barriers (slot). Without this reference the two
+  // legs look equal, which is exactly what the wall clock says they are not.
+  const WALL = { ag: 1294.2, slot: 1687.1 };
+
+  function stacked(svg, leg) {
+    clear(svg);
+    const W = 900, H = 220, m = { t: 30, r: 96, b: 30, l: 128 };
+    const pw = W - m.l - m.r;
+    const css = (k) => getComputedStyle(document.querySelector(".viz-root"))
+      .getPropertyValue(k).trim();
+    const maxMs = 1850;
+    const x = (v) => m.l + (v / maxMs) * pw;
+    const BH = 42, GAPX = 2;       // 2px surface gap between stacked segments
+    const rows = BREAKDOWN[leg];
+    const wall = WALL[leg];
+    const devMax = Math.max(...rows.map((r) => r.total));
+
+    for (let v = 0; v <= maxMs; v += 300) {
+      svg.appendChild(el("line", { x1: x(v), x2: x(v), y1: m.t - 6, y2: H - m.b,
+        class: v === 0 ? "axis-line" : "grid-line" }));
+      svg.appendChild(Object.assign(el("text", { x: x(v), y: H - m.b + 16,
+        class: "tick", "text-anchor": "middle" }), { textContent: v }));
+    }
+    svg.appendChild(Object.assign(el("text", { x: W - 4, y: H - m.b + 16,
+      class: "tick", "text-anchor": "end" }), { textContent: "ms / 步" }));
+
+    // the wall-clock reference: where this step actually ENDS
+    svg.appendChild(el("line", { x1: x(wall), x2: x(wall), y1: m.t - 14, y2: H - m.b,
+      stroke: css("--text-secondary"), "stroke-width": 2, "stroke-dasharray": "5 3" }));
+    // keep the label inside the viewBox when the rule sits in the right half
+    const right = x(wall) > W * 0.55;
+    const lx0 = right ? x(wall) - 8 : x(wall) + 8;
+    const anchor = right ? "end" : "start";
+    svg.appendChild(Object.assign(el("text", { x: lx0, y: m.t - 18,
+      class: "dlabel", fill: css("--text-secondary"), "text-anchor": anchor }),
+      { textContent: `端到端（墙钟）${wall.toFixed(0)} ms` }));
+    svg.appendChild(Object.assign(el("text", { x: lx0, y: m.t - 4,
+      class: "dlabel-2", "text-anchor": anchor }),
+      { textContent: leg === "ag"
+          ? "通信与其它 kernel 重叠，墙钟比设备时间之和更短"
+          : "栅栏串行 + 空隙，墙钟比设备时间之和更长" }));
+
+    rows.forEach((row, ri) => {
+      const y = m.t + 8 + ri * (BH + 44);
+      svg.appendChild(Object.assign(el("text", { x: m.l - 14, y: y + BH / 2 + 4,
+        class: "dlabel", "text-anchor": "end" }), { textContent: row.rank }));
+
+      const segs = COMP_ORDER
+        .map(([k, name, cssv]) => [k, name, row.parts[k] || 0, css(cssv)])
+        .filter(([, , v]) => v > 0.5);
+      let acc = 0;
+      segs.forEach(([k, name, v, col], si) => {
+        const x0 = x(acc);
+        const last = si === segs.length - 1;
+        const w = Math.max(x(acc + v) - x0 - (last ? 0 : GAPX), 1);
+        svg.appendChild(el("rect", { x: x0, y: y, width: w, height: BH,
+          fill: col, rx: last ? 4 : 0 }));
+        if (last && w > 4)   // square off the left edge of the rounded end
+          svg.appendChild(el("rect", { x: x0, y: y, width: 4, height: BH, fill: col }));
+        if (w > 62)          // selective direct label, ink from the fill
+          svg.appendChild(Object.assign(el("text", { x: x0 + w / 2, y: y + BH / 2 + 4,
+            class: "dlabel", "text-anchor": "middle", fill: inkOn(col) }),
+            { textContent: v.toFixed(0) }));
+        const hit = el("rect", { x: x0, y: y, width: Math.max(w, 3), height: BH,
+          fill: "transparent", style: "cursor:pointer" });
+        hit.addEventListener("mousemove", (ev) => showTip(ev,
+          `<b>${name}</b><br>` +
+          `<div class="row"><i>${leg === "ag" ? "ag" : "slot"} · ${row.rank}</i><span>${v.toFixed(1)} ms</span></div>` +
+          `<div class="row"><i>占该卡</i><span>${(v / row.total * 100).toFixed(1)}%</span></div>`));
+        hit.addEventListener("mouseleave", hideTip);
+        svg.appendChild(hit);
+        acc += v;
+      });
+      // Device-sum label, but only where it clears the wall rule. When the wall
+      // line falls inside the bar the two would collide, and the number is
+      // already carried by the tooltip, the annotation and the table.
+      const lx = x(acc) + 10;
+      if (lx + 52 < x(wall) || lx > x(wall) + 10)
+        svg.appendChild(Object.assign(el("text", { x: lx, y: y + BH / 2 + 4,
+          class: "dlabel" }), { textContent: row.total.toFixed(0) + " ms" }));
+    });
+    svg.appendChild(Object.assign(el("text", { x: m.l, y: 16, class: "axis-title" }),
+      { textContent: leg === "ag" ? "ag（all-gather）· 每步设备时间分解"
+                                  : "slot（MoonEP）· 每步设备时间分解" }));
+    svg.appendChild(Object.assign(el("text", { x: m.l, y: H - 4, class: "dlabel-2" }),
+      { textContent: `设备时间之和（最长卡 ${devMax.toFixed(0)} ms） vs 墙钟 ${wall.toFixed(0)} ms`
+          + ` ⇒ ${wall > devMax ? "+" + (wall - devMax).toFixed(0) + " ms 串行空隙" : "−" + (devMax - wall).toFixed(0) + " ms 重叠"}` }));
+  }
+
+  function buildLegend() {
+    const box = document.getElementById("legendStack");
+    if (!box || box.children.length) return;
+    COMP_ORDER.forEach(([, name, cssv]) => {
+      const s = document.createElement("span");
+      const i = document.createElement("i");
+      i.className = "swatch";
+      i.style.background = `var(${cssv})`;
+      s.appendChild(i);
+      s.appendChild(document.createTextNode(name));
+      box.appendChild(s);
+    });
+  }
+
+  // ---- table ----------------------------------------------------------------
+  function table() {
+    const tb = document.getElementById("tbody");
+    SKEW.forEach((s, i) => {
+      const tr = document.createElement("tr");
+      const ag = imbalance(AG_RANKS)[i], sl = imbalance(SLOT_RANKS)[i];
+      tr.innerHTML =
+        `<td>${s}</td><td>${RANK_RATIO[i]}</td>` +
+        `<td>${GEMM_AG[i].toFixed(1)}</td><td>${GEMM_SLOT[i].toFixed(1)}</td>` +
+        `<td>${save[i].toFixed(1)}</td><td>−${pct[i].toFixed(1)}%</td>` +
+        `<td>${ag.toFixed(2)}:1</td><td>${sl.toFixed(2)}:1</td>` +
+        `<td>${TTFT_SLOT[i].toFixed(1)}</td><td>${TTFT_AG[i].toFixed(1)}</td>` +
+        `<td>+${(TTFT_SLOT[i] - TTFT_AG[i]).toFixed(1)}</td>`;
+      tb.appendChild(tr);
+    });
+
+    const cb = document.getElementById("tbodyComp");
+    ["ag", "slot"].forEach((leg) => {
+      BREAKDOWN[leg].forEach((row) => {
+        const tr = document.createElement("tr");
+        const p = row.parts;
+        const pct = (v) => v ? `${v.toFixed(0)} <span style="color:var(--text-muted)">(${(v / row.total * 100).toFixed(0)}%)</span>` : "—";
+        tr.innerHTML = `<td>${leg} · ${row.rank}</td><td>${row.total.toFixed(0)}</td>` +
+          `<td>${pct(p.attn)}</td><td>${pct(p.gemm)}</td><td>${pct(p.comm)}</td>` +
+          `<td>${pct(p.moonep)}</td><td>${pct(p.barrier)}</td><td>${pct(p.other)}</td>`;
+        cb.appendChild(tr);
+      });
+    });
+  }
+
+  function render() {
+    chartA(document.getElementById("chartA"));
+    chartB(document.getElementById("chartB"));
+    chartC(document.getElementById("chartC"));
+    stacked(document.getElementById("chartD"), "ag");
+    stacked(document.getElementById("chartE"), "slot");
+    buildLegend();
+  }
+
+  const btn = document.getElementById("themeBtn");
+  btn.addEventListener("click", () => {
+    const dark = document.documentElement.getAttribute("data-theme") === "dark";
+    document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
+    btn.textContent = dark ? "切换深色" : "切换浅色";
+    render();   // series colours are CSS variables: re-read them on theme change
+  });
+  if (matchMedia("(prefers-color-scheme: dark)").matches) {
+    document.documentElement.setAttribute("data-theme", "dark");
+    btn.textContent = "切换浅色";
+  }
+
+  table();
+  render();
+})();
+</script>
+</body>
+</html>

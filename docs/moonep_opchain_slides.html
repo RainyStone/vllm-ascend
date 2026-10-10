@@ -249,6 +249,48 @@
         prefill 的 planning 核升到 0.26 ms —— 它是设备时间,随 N·K 行数线性。</div>
     </section>
 
+    <!-- 6b: measured summary on 4 cards -->
+    <section class="slide">
+      <h2>实测总表:EP=4(4 卡 4-7,DP4×TP1,2026-09-15)</h2>
+      <div class="two" style="grid-template-columns:1.15fr 1fr">
+        <div class="box">
+          <h3>吞吐(tok/s,括号=对 MC2 比值)</h3>
+          <table>
+            <thead><tr><th>形状 / 相位</th><th class="num">MC2</th><th class="num">owner+MTE</th><th class="num">slot+MTE</th></tr></thead>
+            <tbody>
+              <tr><td>1024×256 prefill</td><td class="num">66 097</td><td class="num">51 694 <span class="verdict">(0.78)</span></td><td class="num">45 661 <span class="verdict">(0.69)</span></td></tr>
+              <tr><td>1024×256 decode</td><td class="num">10 714</td><td class="num"><b>9 769</b> <span class="verdict">(0.91)</span></td><td class="num">8 700 <span class="verdict">(0.81)</span></td></tr>
+              <tr><td>128×1024 prefill</td><td class="num">82 023</td><td class="num">55 351 <span class="verdict">(0.67)</span></td><td class="num">61 450 <span class="verdict">(0.75)</span></td></tr>
+              <tr><td>128×1024 decode</td><td class="num">2 387</td><td class="num">2 014 <span class="verdict">(0.84)</span></td><td class="num">1 778 <span class="verdict">(0.74)</span></td></tr>
+              <tr><td>30k 单序列 prefill</td><td class="num">28 520</td><td class="num">13 423 <span class="verdict">(0.47)</span></td><td class="num">13 382 <span class="verdict">(0.47)</span></td></tr>
+            </tbody>
+          </table>
+          <p class="verdict">decode 差距小、prefill 差距大且随"每 rank 行数"变差(短批 0.67~0.78 → 30k 长序列 0.47)。
+            URMA 全程比 MTE 慢(0.83~0.55)⇒ 引擎内继续用 MTE。</p>
+        </div>
+        <div class="box">
+          <h3>延迟(B=64,唯一 prompt)</h3>
+          <table>
+            <thead><tr><th>路线</th><th class="num">TTFT p50</th><th class="num">TPOT p50</th></tr></thead>
+            <tbody>
+              <tr><td>MC2</td><td class="num">647 ms</td><td class="num"><b>54.0 ms</b></td></tr>
+              <tr><td>owner+MTE</td><td class="num">796 ms</td><td class="num">59.5 ms</td></tr>
+            </tbody>
+          </table>
+          <p class="verdict">B=128 时 MC2 TPOT = 53.6 ms ≈ B=64 的 54.0 ms ⇒ <b>每步 ~50 ms 固定开销,
+            与并发无关</b> ⇒ eager 下 <b>TPOT&lt;20 ms 不可达</b>;ACL graph 又报 <code>stream is captured</code> ✗。</p>
+          <h3>owner vs slot</h3>
+          <p class="verdict">owner 每卡条目 2674/2623/2626/2500(<b>7.0% 不均衡</b>)、decode <b>9 769</b>;
+            slot 把条目压成 <b>3008×4(0%)</b> 但 decode 只有 8 700(0.89)⇒
+            <b>当前配置下 owner 更好</b>(slot 的账单:预取 0.16 ms/层 + 槽内多算 + 镜像显存);
+            它该赢的场景是<b>大 R + 路由倾斜</b>。</p>
+        </div>
+      </div>
+      <div class="note">口径:同窗口背靠背;组件计时 <code>MOONEP_TIME_STATS=1</code>(host wall),
+        MC2 是入队时间只能同侧比;跨窗口漂移 ±8%,&lt;5% 的差异打折看。数据全部来自 4 卡 4-7
+        (0-3 这组 HCCL 坏、8 卡跨组 TLS 不一致,已用纯 torch.distributed 最小复现排除本项目)。</div>
+    </section>
+
     <!-- 7 -->
     <section class="slide">
       <h2>①④⑦ 在干什么?是 SHMEM 的 overhead 吗?</h2>

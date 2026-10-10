@@ -92,7 +92,7 @@
   <div class="meta">
     Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0 · Qwen3-30B-A3B (E=128, K=8, H=2048) ·
     dp2ep2 实测 + 4-NPU 逻辑示意 · 数据窗口 2026-09-10/11<br>
-    ▶ 翻页版(14 页幻灯片):<a href="moonep_opchain_slides.html">moonep_opchain_slides.html</a>
+    ▶ 翻页版(15 页幻灯片):<a href="moonep_opchain_slides.html">moonep_opchain_slides.html</a>
   </div>
 </header>
 
@@ -667,6 +667,102 @@
     唯一结构性冲突是 <b>planning 的全局耦合</b>,所以推荐<b>「核外 planning + 核内 dispatch/GEMM/combine」</b>的边界。
     建议先做低成本的第一步(planning 保持独立、把 dispatch 与 GEMM1 合核验证重叠收益),再评估是否值得自写 GEMM。
   </p>
+</div>
+
+<h2>9. 实测总表:EP=4(4 卡 4-7,DP4×TP1,2026-09-15)</h2>
+<div class="card">
+  <p>
+    同窗口背靠背测量;每条的"正确性"口径都是 <b>首 token 与 MC2 一致(=315)</b>。
+    MC2 = 原生融合算子,HCCL all2all;owner = MoonEP 默认(条目按专家属主);slot = <code>MOONEP_SLOT_MODE=1</code>(冗余专家预取);
+    MTE / URMA = 两种传输引擎。<b>slot 与 MTE/URMA 是正交的两个维度</b>(算法 × 传输),不是并列的三条路线。
+  </p>
+
+  <h3>吞吐(tok/s)</h3>
+  <table>
+    <thead><tr>
+      <th>形状</th><th>相位</th>
+      <th class="num">MC2</th><th class="num">owner+MTE</th><th class="num">owner+URMA</th><th class="num">slot+MTE</th><th class="num">slot+URMA</th>
+    </tr></thead>
+    <tbody>
+      <tr><td rowspan="2">1024 seq × 256 prompt<br><span class="verdict">MBT=1024</span></td>
+        <td>prefill</td><td class="num">66 097</td><td class="num">51 694 <span class="verdict">(0.78)</span></td>
+        <td class="num">—</td><td class="num">45 661 <span class="verdict">(0.69)</span></td><td class="num">39 015 <span class="verdict">(0.59)</span></td></tr>
+      <tr><td>decode</td><td class="num">10 714</td><td class="num"><b>9 769</b> <span class="verdict">(0.91)</span></td>
+        <td class="num">8 865 <span class="verdict">(0.83)</span></td><td class="num">8 700 <span class="verdict">(0.81)</span></td><td class="num">—</td></tr>
+
+      <tr><td rowspan="2">128 seq × 1024 prompt<br><span class="verdict">MBT=1024</span></td>
+        <td>prefill</td><td class="num">82 023</td><td class="num">55 351 <span class="verdict">(0.67)</span></td>
+        <td class="num">45 354 <span class="verdict">(0.55)</span></td><td class="num">61 450 <span class="verdict">(0.75)</span></td><td class="num">—</td></tr>
+      <tr><td>decode</td><td class="num">2 387</td><td class="num">2 014 <span class="verdict">(0.84)</span></td>
+        <td class="num">1 982 <span class="verdict">(0.83)</span></td><td class="num">1 778 <span class="verdict">(0.74)</span></td><td class="num">—</td></tr>
+
+      <tr><td>30k 单序列<br><span class="verdict">TP=4,MBT=32768</span></td>
+        <td>prefill</td><td class="num">28 520</td><td class="num">13 423 <span class="verdict">(0.47)</span></td>
+        <td class="num">9 736 <span class="verdict">(0.34)</span></td><td class="num">13 382 <span class="verdict">(0.47)</span></td><td class="num">—</td></tr>
+    </tbody>
+  </table>
+  <p class="verdict">
+    <b>读法</b>:decode 差距小(0.83~0.91)、<b>prefill 差距大且随"每 rank 行数"变差</b>(短批 0.67~0.78 → 30k 长序列 0.47)。
+    MC2 是单算子融合(通信藏在 cube 计算里),MoonEP 是三个独立核且无重叠,所以序列越长越吃亏。
+  </p>
+
+  <h3>延迟(128 seq × 1024 prompt,每请求唯一 prompt,B=64)</h3>
+  <table>
+    <thead><tr><th>路线</th><th class="num">TTFT(p50)</th><th class="num">TPOT(p50)</th><th class="num">step(p50)</th><th class="num">decode tok/s</th></tr></thead>
+    <tbody>
+      <tr><td>MC2</td><td class="num">647 ms</td><td class="num"><b>54.0 ms</b></td><td class="num">54.8 ms</td><td class="num">1 039</td></tr>
+      <tr><td>owner+MTE</td><td class="num">796 ms</td><td class="num">59.5 ms</td><td class="num">56.9 ms</td><td class="num">941</td></tr>
+      <tr><td colspan="5" class="verdict">
+        对照:B=128 时 MC2 的 TPOT 是 53.6 ms —— 与 B=64 的 54.0 ms 几乎相同 ⇒
+        <b>每步有 ~50 ms 的固定开销(与并发无关)</b> ⇒ <b>eager 下 TPOT &lt; 20 ms 不可达</b>(减批/加卡都无用)。
+        唯一可能打破它的 ACL graph 路径也堵死:捕获期报
+        <code>Not_Supported(EE1016): Synchronizing a stream failed ... during the capture stage</code>(MC2 基线同样失败,非 MoonEP 问题)。
+      </td></tr>
+    </tbody>
+  </table>
+
+  <h3>组件耗时(每层每卡,ms;两腿差分得 prefill / decode)</h3>
+  <table>
+    <thead><tr><th>路线</th><th>相位</th><th class="num">dispatch</th><th class="num">combine</th>
+      <th class="num">└ disp_pre</th><th class="num">└ disp_lib</th><th class="num">└ disp_post</th><th class="num">prefetch</th></tr></thead>
+    <tbody>
+      <tr><td>MC2</td><td>prefill</td><td class="num">0.188</td><td class="num">0.068</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+      <tr><td>MC2</td><td>decode</td><td class="num">0.165</td><td class="num">0.073</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+      <tr><td>MTE(owner)</td><td>prefill</td><td class="num">0.512</td><td class="num">0.087</td><td class="num">0.063</td><td class="num">0.145</td><td class="num">0.303</td><td class="num">—</td></tr>
+      <tr><td>MTE(owner)</td><td>decode</td><td class="num">0.384</td><td class="num">0.079</td><td class="num">0.052</td><td class="num">0.101</td><td class="num">0.230</td><td class="num">—</td></tr>
+      <tr><td>MTE(slot)</td><td>prefill</td><td class="num">0.470</td><td class="num">0.080</td><td class="num">0.060</td><td class="num">0.130</td><td class="num">0.280</td><td class="num"><b>0.160</b></td></tr>
+    </tbody>
+  </table>
+  <p class="verdict">
+    <code>disp_pre</code> = pad + histc;<code>disp_lib</code> = 库内 <code>buffer.dispatch</code>(planning 核 + dispatch 核 launch + 边界拷贝);
+    <code>disp_post</code> = cu→counts 推导 + 行权重 clone —— <b>零同步路径下它只剩几个小算子却要 0.23-0.30 ms,说明是在等设备(队列回压)</b>。
+    <code>prefetch</code> 只在 slot 模式出现(远程专家权重 GET),实测 <b>0.16 ms/层/卡</b>(每个专家 ≈9.4 MB)。
+  </p>
+
+  <h3>负载均衡 vs 吞吐:owner 还是 slot?</h3>
+  <table>
+    <thead><tr><th></th><th class="num">每卡 (token,expert) 条目/层</th><th class="num">不均衡</th><th class="num">decode 吞吐</th></tr></thead>
+    <tbody>
+      <tr><td>owner+MTE</td><td class="num">2674 / 2623 / 2626 / 2500</td><td class="num">7.0%</td><td class="num"><b>9 769</b>(1.00)</td></tr>
+      <tr><td>slot+MTE</td><td class="num" style="color:var(--series-3)"><b>3008 / 3008 / 3008 / 3008</b></td><td class="num" style="color:var(--series-3)"><b>0%</b></td><td class="num">8 700(0.89)</td></tr>
+    </tbody>
+  </table>
+  <p class="verdict">
+    <b>结论:当前配置(EP=4、E=128、路由较平滑)下 owner 更好</b> —— slot 把不均衡从 7.0% 压到 0,但为此每层付
+    "权重预取 0.16 ms + 槽内多算的行 + 镜像/槽显存",净亏 ~11%。5 个对照里 3 个 owner 明显更快、1 个打平、
+    1 个 slot 略快(落在 ±8% 漂移边缘,不足为凭)。
+    slot 该赢的场景是<b>大 R + 路由倾斜</b>(EP=2→EP=4 时 owner 不均衡已从 0.63% 涨到 7.0%,而 slot 的代价几乎与规模无关)。
+  </p>
+
+  <h3>测量口径与当时的盒子状态</h3>
+  <ul>
+    <li>同窗口背靠背;跨窗口绝对吞吐会漂 ~8%(已用 <code>git stash</code> 对照排除代码回归)⇒ 小于 5% 的差异要在噪声里打折看;</li>
+    <li>组件计时是 <b>host wall</b>(<code>MOONEP_TIME_STATS=1</code>),库内细分用 <code>ASCEND_MOONEP_TIME_STATS=1</code>;
+      MC2 的数字是<b>入队时间</b>(异步)⇒ 只能同侧比较;</li>
+    <li>当时盒子:0-3 这组 fabric 的 HCCL 坏(MC2 的 <code>HcclReduceScatter/AllGather</code> 报 <code>acl api failed EE1002</code>),
+      <b>跨 0-3/4-7 的 8 卡 HCCL 因两组 TLS 配置不一致直接建链失败</b> ⇒ 所有数据来自 4-7 四卡;
+      这些都已用纯 <code>torch.distributed</code> 最小复现证明与本项目无关。</li>
+  </ul>
 </div>
 
 <footer>

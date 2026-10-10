@@ -34,8 +34,8 @@ def main():
         enable_expert_parallel=True,
         tensor_parallel_size=int(os.environ.get("TP", "4")),
         max_model_len=40960,
-        max_num_batched_tokens=512,
-        gpu_memory_utilization=0.80,
+        max_num_batched_tokens=int(os.environ.get("MBT", "5120")),
+        gpu_memory_utilization=float(os.environ.get("GMU", "0.80")),
         additional_config={"enable_moonep": MOONEP},
     )
     tok = llm.get_tokenizer()

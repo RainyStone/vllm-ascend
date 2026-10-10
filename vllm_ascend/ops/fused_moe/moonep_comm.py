@@ -147,6 +147,240 @@ _BALANCE_STATS = {"calls": 0, "tokens": 0, "local_rows": 0, "all_rows": 0, "pad_
 # makes it one line per step.
 _BALANCE_EVERY = int(os.environ.get("MOONEP_BALANCE_STATS_EVERY", "0") or 0)
 
+# MOONEP_PLAN_STATS=1: record, per layer, this rank's slot assignment
+# (plan.experts_to_copy[rank], -1 = unused slot). This is the gate for any
+# speculative-prefetch / slot-cache scheme: if the planner keeps putting the
+# same expert in the same slot, a prefetch can be started a layer early (during
+# attention) or served from a local cache; if the assignment churns, neither
+# pays off. Measurement only: reads the plan back to the host every layer.
+_PLAN_STATS_ON = os.environ.get("MOONEP_PLAN_STATS", "0") == "1"
+_PLAN_STATS: list = []
+
+
+# MOONEP_EARLY_PLAN=1: the speculation probe for "prefetch overlapped with
+# attention".  The rationale (user's): the residual stream means this layer's
+# MoE input (post-attention) is close to the previous layer's output
+# (pre-attention), so running *this* layer's router on the pre-attention hidden
+# -- i.e. during this layer's attention -- should predict the experts that will
+# actually be hot, and therefore the experts the planner will mirror.
+#
+# The probe runs exactly that path in a decoder-layer forward *pre*-hook (where a
+# real implementation would), and records the predicted per-expert histogram.
+# token_dispatch records the real one.  Offline we compare: predicted vs real
+# histogram, and both against the plan's actual experts_to_copy
+# (MOONEP_PLAN_STATS), which is the hit rate that decides whether the scheme is
+# worth building.  Measurement only; each layer pays one extra gate matmul.
+_EARLY_PLAN_ON = os.environ.get("MOONEP_EARLY_PLAN", "0") == "1"
+_EARLY: dict = {"pre": {}, "early": [], "real": [], "plan_pred": [],
+                "pred_ids": None, "fail": 0, "done": False}
+
+
+def _early_layers(model):
+    for path in ("model.layers", "layers", "transformer.layers", "model.model.layers"):
+        obj = model
+        for part in path.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                break
+        if obj is not None and len(obj):
+            return list(obj)
+    return []
+
+
+def _early_route(blk, h_pre):
+    """Route h_pre through this layer's own norm+gate -> (histogram, topk ids)."""
+    import torch
+
+    mlp = getattr(blk, "mlp", None)
+    if mlp is None:
+        return None
+    gate = getattr(mlp, "gate", None) or getattr(mlp, "router", None)
+    norm = getattr(blk, "post_attention_layernorm", None)
+    if gate is None or norm is None:
+        return None
+    k = getattr(mlp, "top_k", None)
+    if k is None:
+        k = getattr(getattr(mlp, "experts", None), "top_k", None)
+    if k is None:
+        return None
+    with torch.no_grad():
+        logits = gate(norm(h_pre))
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]
+        ids = logits.topk(int(k), dim=-1).indices
+        return (torch.bincount(ids.reshape(-1).to(torch.int64)).cpu().tolist(), ids)
+
+
+def maybe_install_early_router_probe(model) -> None:
+    """Attach the MOONEP_EARLY_PLAN=1 pre-hooks (no-op when the env is off)."""
+    if not _EARLY_PLAN_ON or _EARLY["done"]:
+        return
+    try:
+        layers = _early_layers(model)
+        if not layers:
+            print("[early-plan] no decoder layers found; probe disabled", flush=True)
+            return
+
+        def _pre_hook(blk, args, kwargs):
+            try:
+                # Qwen3MoeDecoderLayer.forward(positions, hidden_states, residual):
+                # the residual stream before attention is hidden_states + residual
+                h = kwargs.get("hidden_states", args[1] if len(args) > 1 else None)
+                res = kwargs.get("residual", args[2] if len(args) > 2 else None)
+                if h is None:
+                    return None
+                if res is not None:
+                    h = h + res
+                got = _early_route(blk, h)
+                if got is not None:
+                    hist, ids = got
+                    _EARLY["early"].append(hist)
+                    # mailbox: the next MoE dispatch of this same layer consumes it
+                    _EARLY["pred_ids"] = ids
+            except Exception:            # noqa: BLE001 - probe must never break a step
+                _EARLY["fail"] += 1
+            return None
+
+        for blk in layers:
+            blk.register_forward_pre_hook(_pre_hook, with_kwargs=True)
+        _EARLY["done"] = True
+        print(f"[early-plan] probe on {len(layers)} decoder layers", flush=True)
+    except Exception as exc:             # noqa: BLE001
+        print(f"[early-plan] install failed: {exc}", flush=True)
+
+
+def _plan_on_predicted_routing(ctx, topk_pred, E, K):
+    """Run the planning kernel on the *predicted* routing -> predicted plan."""
+    from ascend_moonep.planning import allocate_planning_outputs
+
+    plan_pred, cu_pred = allocate_planning_outputs(ctx)
+    tpe_pred = torch.histc(topk_pred.to(torch.float32), bins=E, min=0, max=E - 1).to(torch.int32)
+    ctx["kernels"]["planning"].compute(
+        ctx, topk_pred.reshape(-1), tpe_pred, cu_pred, plan_pred, shmem_instance_id=0)
+    return plan_pred
+
+
+# One predicted-plan buffer per capacity rung, reused across layers: layers run
+# sequentially and a layer's predicted plan is consumed by its own dispatch, so
+# by the time the next layer predicts, the previous plan is dead. (Allocating a
+# fresh plan per layer instead churned VMM memory badly enough to kill a run.)
+_PRED_PLAN_BUF: dict = {}
+
+
+def early_predicted_plan_ctx(blk, h_pre, top_k, E, H, B):
+    """Predict this layer's routing from the pre-attention hidden and plan on it.
+
+    Returns ``(buffer, predicted_plan, pad_expert)`` or None. Mirrors exactly what
+    the real dispatch will do (same capacity rung, same pad expert) so the only
+    difference is the routing the plan is computed from.
+    """
+    got = _early_route(blk, h_pre)
+    if got is None:
+        return None
+    _, ids = got
+    T = int(ids.shape[0])
+    buffer, capacity = _select_buffer_for_step(E, int(top_k), H, T)
+    ctx = buffer._require_ctx()
+    epn = E // get_ep_group().world_size
+    pad_expert = get_ep_group().rank_in_group * epn + (epn - 1)
+    plan_pred, cu_pred = _PRED_PLAN_BUF.get(int(capacity), (None, None))
+    if plan_pred is None:
+        from ascend_moonep.planning import allocate_planning_outputs
+
+        plan_pred, cu_pred = allocate_planning_outputs(ctx)
+        _PRED_PLAN_BUF[int(capacity)] = (plan_pred, cu_pred)
+    topk_c = torch.zeros(capacity, int(top_k), dtype=torch.int32, device=ids.device)
+    topk_c[:T].copy_(ids.to(torch.int32))
+    if T < capacity:
+        topk_c[T:].fill_(pad_expert)
+    tpe = torch.histc(topk_c.to(torch.float32), bins=E, min=0, max=E - 1).to(torch.int32)
+    ctx["kernels"]["planning"].compute(
+        ctx, topk_c.reshape(-1), tpe, cu_pred, plan_pred, shmem_instance_id=0)
+    return buffer, plan_pred, pad_expert
+
+
+def early_plan_fallback(state, top_k, T, H):
+    """Run the planning kernel on a fixed, rank-symmetric dummy routing.
+
+    The planning kernel is a cross-rank collective, so every rank must call it
+    the same number of times: when the prediction is unavailable we still have to
+    enter it, just with routing nobody will use. Uniform over this rank's own
+    experts keeps the histogram well-formed (no division by zero).
+    """
+    E = state.E
+    buffer, capacity = _select_buffer_for_step(E, int(top_k), H, T)
+    ctx = buffer._require_ctx()
+    epn = E // get_ep_group().world_size
+    rank = get_ep_group().rank_in_group
+    plan_pred, cu_pred = _PRED_PLAN_BUF.get(int(capacity), (None, None))
+    if plan_pred is None:
+        from ascend_moonep.planning import allocate_planning_outputs
+
+        plan_pred, cu_pred = allocate_planning_outputs(ctx)
+        _PRED_PLAN_BUF[int(capacity)] = (plan_pred, cu_pred)
+    per = max(1, (capacity * int(top_k)) // epn)
+    tpe = torch.zeros(E, dtype=torch.int32, device=plan_pred.dst.device)
+    tpe[rank * epn:(rank + 1) * epn] = per
+    topk_dummy = torch.zeros(capacity, int(top_k), dtype=torch.int32, device=tpe.device)
+    ar = torch.arange(epn, dtype=torch.int32, device=tpe.device)
+    topk_dummy[:] = (rank * epn + (ar[:int(top_k)] % epn))
+    ctx["kernels"]["planning"].compute(
+        ctx, topk_dummy.reshape(-1), tpe, cu_pred, plan_pred, shmem_instance_id=0)
+    return buffer, plan_pred, (rank * epn + epn - 1)
+
+
+def _dump_early_plan():
+    if not _EARLY_PLAN_ON or not _EARLY["early"]:
+        return
+    import json as _json
+
+    try:
+        rank = int(torch.npu.current_device()) - int(os.environ.get("MOONEP_DEV_BASE", "0"))
+    except Exception:  # noqa: BLE001
+        rank = -1
+    path = f"/tmp/moonep_earlyplan_{os.environ.get('TAG', 'early')}_rank{rank}.json"
+    with open(path, "w") as fh:
+        _json.dump({"early": _EARLY["early"], "real": _EARLY["real"],
+                    "plan_pred": _EARLY["plan_pred"], "fail": _EARLY["fail"]}, fh)
+    print(f"[early-plan r{rank}] early={len(_EARLY['early'])} real={len(_EARLY['real'])} "
+          f"pred_plans={len(_EARLY['plan_pred'])} fail={_EARLY['fail']} -> {path}", flush=True)
+
+
+atexit.register(_dump_early_plan)
+
+
+def _dump_plan_stats():
+    if not _PLAN_STATS_ON or not _PLAN_STATS:
+        return
+    import json as _json
+
+    try:
+        rank = int(torch.npu.current_device()) - int(os.environ.get("MOONEP_DEV_BASE", "0"))
+    except Exception:  # noqa: BLE001
+        rank = -1
+    path = f"/tmp/moonep_planstats_{os.environ.get('TAG', 'plan')}_rank{rank}.json"
+    with open(path, "w") as fh:
+        _json.dump(_PLAN_STATS, fh)
+    print(f"[moonep-planstats r{rank}] layers={len(_PLAN_STATS)} -> {path}", flush=True)
+
+
+atexit.register(_dump_plan_stats)
+
+
+# MOONEP_PAD_CUT=1: try to leave the pad rows out of the grouped GEMM by
+# trimming the last local expert's group (pads are zero-hidden/zero-weight, and
+# the matmul walks exactly sum(group_list) shard rows). **Off by default: it is
+# WRONG.** The trim assumes the pad rows are the *trailing* rows of that group,
+# but the planning kernel orders rows within a group by its own assignment (k
+# slices), so the tail contains real rows too. Measured on the 4-rank smoke
+# harness (E=8, K=2, S=512, T=384): PAD_CUT=0 -> rel err 0.6-0.8% PASS;
+# PAD_CUT=1 -> rel err 74% FAIL. Keep the knob for experiments only; reducing
+# the pad *volume* with the dense capacity ladder (below) is the safe lever.
+_PAD_CUT = os.environ.get("MOONEP_PAD_CUT", "0") == "1"
+
+# MOONEP_PAD_ROTATE=1: rotate the pad expert per layer (see pad_expert)
+_PAD_ROT = {"i": 0}
+
 
 def _dump_balance_stats():
     if not _BALANCE_STATS_ON:
@@ -167,6 +401,43 @@ atexit.register(_dump_balance_stats)
 
 # MOONEP_TIME_STATS=1: per-phase wall totals [total_s, calls]
 _TSTATS_ENABLED = os.environ.get("MOONEP_TIME_STATS", "0") == "1"
+
+# MOONEP_DUMP_PLAN=<dir>: 逐位比对用。把 buffer.dispatch 返回的 plan + cu 落到
+# <dir>/plan_r<rank>_<i>.pt。默认关(这是推理路径上的 D2H,会污染性能数字)。
+# 只落前 MOONEP_DUMP_PLAN_N 次(默认 96 = 2 个 step),好让 profile 剩下的部分干净。
+_DUMP_PLAN_DIR = os.environ.get("MOONEP_DUMP_PLAN") or None
+_DUMP_PLAN_N = int(os.environ.get("MOONEP_DUMP_PLAN_N", "96"))
+_DUMP_PLAN_I = [0]
+_DUMP_PLAN_FAIL = [0]
+
+
+def _dump_plan(plan, cu):
+    """把一次 planning 的产物整体落盘。只在 MOONEP_DUMP_PLAN 打开时调用。"""
+    i = _DUMP_PLAN_I[0]
+    _DUMP_PLAN_I[0] = i + 1
+    try:
+        rank = int(torch.npu.current_device()) - int(os.environ.get("MOONEP_DEV_BASE", "0"))
+        torch.save(
+            {
+                "dst": plan.dst.cpu(),
+                "experts_to_copy": plan.experts_to_copy.cpu(),
+                "dup_groups": plan.dup_groups.cpu(),
+                "dup_loffs": plan.dup_loffs.cpu(),
+                "dup_counts": plan.dup_counts.cpu(),
+                "cu": cu.cpu(),
+            },
+            os.path.join(_DUMP_PLAN_DIR, f"plan_r{rank}_{i:04d}.pt"),
+        )
+    except Exception as exc:  # noqa: BLE001 - 诊断用，绝不打断推理
+        _DUMP_PLAN_FAIL[0] += 1
+        if _DUMP_PLAN_FAIL[0] in (1, 50):
+            print(f"[moonep-dump-plan] failed: {exc}", flush=True)
+
+
+# MOONEP_ALLOW_CAPTURE=1: 图捕获可行性研究的实验开关 —— 放开 token_dispatch /
+# run_slot_forward 里那两道显式 raise。**这不是"声明图模式可用"**，只是把保守
+# 禁止去掉，好让真实的捕获报错暴露出来。默认 0（保持原行为）。
+_ALLOW_CAPTURE = os.environ.get("MOONEP_ALLOW_CAPTURE", "0") == "1"
 _MOONEP_TSTATS = {"dispatch": [0.0, 0], "disp_pre": [0.0, 0], "disp_pad": [0.0, 0],
                  "disp_tpe": [0.0, 0], "disp_buf": [0.0, 0],
                  "disp_lib": [0.0, 0], "disp_post": [0.0, 0],
@@ -212,9 +483,15 @@ def _dump_slot_stats():
 # ``S*K`` row space. A pow2 pool lets decode-sized steps use a fraction of it.
 # This floor is both the ladder's first entry and the per-step clamp, so
 # ``MOONEP_MIN_DISPATCH_TOKENS=32`` (env) lowers both at once; 128 is the
-# historic default.
+# historic default. Every padded row inside the MLP's group_list is real
+# (wasted) GEMM work, so small (decode) steps want a low floor; the dev line
+# shipped this knob as ``MOONEP_MIN_CAP`` (default 16) and the old name is
+# still honored as a fallback so dev-line launch scripts keep working. Raise
+# it (or set MOONEP_POOL_CAPS) if a rank's receive share can exceed S*K.
 def _min_dispatch_tokens() -> int:
-    value = int(os.environ.get("MOONEP_MIN_DISPATCH_TOKENS", "128"))
+    value = int(os.environ.get(
+        "MOONEP_MIN_DISPATCH_TOKENS",
+        os.environ.get("MOONEP_MIN_CAP", "128")))
     if value < 1:
         # The ladder doubles from the floor, so 0 would never reach s_max.
         raise ValueError(f"MOONEP_MIN_DISPATCH_TOKENS must be >= 1, got {value}")
@@ -224,21 +501,73 @@ def _min_dispatch_tokens() -> int:
 MOONEP_MIN_DISPATCH_TOKENS = _min_dispatch_tokens()
 
 
-def _moonep_pool_capacities(s_max: int) -> list[int]:
-    """Capacity ladder for the buffer pool (MOONEP_POOL_CAPS overrides)."""
+def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[int]:
+    """Capacity ladder for the buffer pool (MOONEP_POOL_CAPS overrides).
+
+    A rung fixes the dispatched row space to S*K, so a step of T tokens pads
+    (S-T)*K zero rows -- pure waste: the grouped GEMM multiplies zeros and the
+    pile lands on the pad expert, which skews that rank's expert groups. The
+    pool is idle memory, so trading pool bytes for smaller pads is a good deal;
+    MOONEP_POOL_BUDGET_MB caps how much we spend on it (default 2 GiB, a small
+    part of what releasing the vllm weight copies frees).
+
+    Layout: dense where decode lives, geometric above it.
+
+        step 8  : MIN .. 128        (decode shapes, cheap)
+        step 32 : 160 .. 512        (big decode / small prefill)
+        ratio r : 512 .. s_max      with r from the budget; a geometric ladder
+                                    of ratio r costs ~s_max*cost*r/(r-1) bytes
+                                    and leaves at most (r-1) relative pad
+
+    ``cost_per_token`` is the hidden chunk's bytes per token of capacity
+    (K*H*2), passed by the caller because the pool is built per (E, K, H).
+    """
     override = os.environ.get("MOONEP_POOL_CAPS")
     if override:
         caps = sorted({int(c) for c in override.split(",") if c.strip()})
         if not caps or caps[-1] != int(s_max):
             caps = sorted(set(caps) | {int(s_max)})
         return [c for c in caps if c <= int(s_max)]
-    capacities = []
-    cap = MOONEP_MIN_DISPATCH_TOKENS
-    while cap < s_max:
-        capacities.append(cap)
-        cap *= 2
-    capacities.append(int(s_max))
-    return capacities
+    s_max = int(s_max)
+    caps: list[int] = []
+
+    def _add(c: int) -> None:
+        c = int(c)
+        if 0 < c <= s_max and c not in caps:
+            caps.append(c)
+
+    # Shape: powers of two up to 512 (decode shapes, where the tail lives),
+    # then a uniform step up to s_max. The waste per step is (S-T)*K rows, so a
+    # uniform step bounds it by step*K rows whatever T is -- a geometric ladder
+    # does not (its absolute waste grows with S, and where the rungs land is
+    # luck: measured at T=4676, ratio 1.22 gave 6416 pad rows vs 688 for 1.35).
+    #
+    # Two caps bind, and the count one dominates: every Buffer also allocates
+    # its op workspaces as separate VMM physical chunks (~10 per buffer, 16 MiB
+    # scale each), and the driver starts failing with
+    # "aclrtMallocPhysical(...) failed with 207001" past a few dozen buffers
+    # (measured: 51 rungs -> pool init dies; 31 rungs -> fine).
+    max_rungs = int(os.environ.get("MOONEP_POOL_MAX_RUNGS", "32"))
+    budget = int(os.environ.get("MOONEP_POOL_BUDGET_MB", "2048")) * 2**20
+    base = [c for c in (16, 32, 64, 128, 256, 512) if c <= s_max]
+    for c in base:
+        _add(c)
+    top = base[-1] if base else s_max
+    if s_max > top:
+        # smallest uniform step that fits both caps
+        step = 128
+        while step < s_max:
+            count = (s_max - top) // step
+            span = (top + s_max) / 2.0 * count * cost_per_token
+            if count + len(base) <= max_rungs and (budget <= 0 or span <= budget):
+                break
+            step *= 2
+        c = top + step
+        while c <= s_max:
+            _add(c)
+            c += step
+    _add(s_max)
+    return sorted(caps)
 
 
 def _step_token_count(tokens: int):
@@ -447,12 +776,24 @@ class _MoonEPRuntime:
             if K * H * capacity >= 2**31:
                 raise ValueError("MoonEP: S*K exceeds the planning int32 range.")
             # B (prefetch slots) must equal epn for the planning kernel.
-            capacities = _moonep_pool_capacities(int(capacity))
+            capacities = _moonep_pool_capacities(int(capacity), cost_per_token=K * H * 2)
             self._buffers[(E, K, H)] = {
                 cap: Buffer(
                     int(cap), H, K, E, R,
                     token_padding=1, B=_moonep_slot_count(E, E // R), group=group,
                     explicitly_destroy=True,
+                    # MOONEP_NUM_SMS: block count for the MoonEP kernels
+                    # (library default 32). Measured on the slot path:
+                    # 32 -> 56 cuts planning_kernel 278 -> 242 us/layer (-13%),
+                    # dispatch -20%, combine -13%, total device time -7%, but
+                    # the step time is unchanged (71.3 vs 71.9 ms, noise) --
+                    # planning is latency-bound on the cross-rank histogram
+                    # exchange, so the saving is absorbed by the barriers.
+                    # Kept as an env knob (unset = library default); the legal
+                    # range is [8, 56] -- 64+ fails at init with
+                    # "planning core_num must be in [8, 56]".
+                    **({"num_sms": int(os.environ["MOONEP_NUM_SMS"])}
+                       if os.environ.get("MOONEP_NUM_SMS") else {}),
                     **({"use_udma": True} if use_udma else {}),
                 )
                 for cap in capacities
@@ -474,7 +815,7 @@ class _MoonEPRuntime:
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
                 "tail": {"T": -1, "capacity": None, "pad_expert": None},
             }
-        if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
+        if _ENV_SLOT_MODE:
             from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
 
             dev = int(torch.npu.current_device())
@@ -493,8 +834,9 @@ class _MoonEPRuntime:
                 # 布局知识只留一处：量化后 w13 是 [epn, H/2, 2F]、w2 是 [epn, F/2, H]
                 # （process_weights_after_loading 的 npu_format_cast + transpose(1,2)），
                 # 两边的 scale 又各自不同，散落推导迟早会错。
-                states.append(
-                    _LayerWeightState(layer, int(e["E"]), int(e["H"]), rank, dev))
+                st = _LayerWeightState(layer, int(e["E"]), int(e["H"]), rank, dev)
+                st.layer_index = len(states)      # registration order == layer order
+                states.append(st)
             self._states = states
             self._state_by_w13 = {id(st._w13_src): st for st in states}
 
@@ -532,9 +874,24 @@ class _MoonEPRuntime:
             else:
                 ShmemRuntime.init_with_buffer(group=group)
             print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
-        if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
+        if _ENV_SLOT_MODE:
             for st in self._states:
                 st.publish()
+            if os.environ.get("MOONEP_RELEASE_WEIGHTS", "1") == "1":
+                # The freed vllm weight blocks sit in torch's cache otherwise, and
+                # the engine sizes its KV cache from driver-level free memory
+                # (torch.npu.mem_get_info), so hand them back before that runs.
+                try:
+                    dev = torch.npu.current_device()
+                    torch.npu.empty_cache()
+                    free_b, total_b = torch.npu.mem_get_info(dev)
+                    print(
+                        f"[moonep-release r{get_ep_group().rank_in_group}] home chunks now back "
+                        f"the layers; free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
+                        flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
@@ -567,31 +924,96 @@ def ensure_runtime_initialized() -> None:
     _MOONEP_RUNTIME._ensure_initialized()
 
 
+# Host-path constants and caches. Everything here used to be re-evaluated per
+# MoE layer: os.environ lookups, a sorted() of the capacity pool, and vLLM group
+# lookups. At 48 layers/step each microsecond-class cost shows up in the step
+# time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
+# out of the hot path.
+_ENV_REUSE_OUT = os.environ.get("MOONEP_REUSE_OUT", "1") == "1"
+_ENV_SLOT_MODE = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
+_ENV_NO_SYNC = os.environ.get("MOONEP_NO_SYNC", "1") != "0"
+_ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
+_ENV_CAP_TRACE = os.environ.get("MOONEP_CAP_TRACE", "0") == "1"
+_ENV_POOL = os.environ.get("MOONEP_POOL", "1") == "1"
+_ENV_PAD_EXPERT0 = os.environ.get("MOONEP_PAD_EXPERT0", "0") == "1"
+_GEO_CACHE: dict = {}
+
+
+def _geometry(E: int, K: int, H: int) -> dict:
+    """Rank/epn/sorted-capacity for an (E, K, H) pool, computed once."""
+    geo = _GEO_CACHE.get((E, K, H))
+    if geo is None:
+        ep_group = get_ep_group()
+        pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
+        geo = {"rank": ep_group.rank_in_group,
+               "world": ep_group.world_size,
+               "epn": E // ep_group.world_size,
+               "caps": sorted(pool),
+               "s_max": max(pool),
+               "B": int(pool[max(pool)]._require_ctx()["B"])}
+        _GEO_CACHE[(E, K, H)] = geo
+    return geo
+
+
 _CAP_TRACE = {"capacity": None}
+
+
+# Pre-allocated scratch for the per-layer hot path (space-for-time). The hot
+# path used to allocate ~8 fresh tensors per layer (cu cast, the cat/sub for the
+# counts, the contiguous copies, the weight snapshot's clone+cast+contiguous).
+# Those allocations are what `disp_post` was really spending 0.34 ms on: once
+# the device is saturated the caching allocator blocks while reclaiming blocks,
+# which serialises the host. Reusing out= buffers removes both the kernels and
+# the blocking. Sized for the largest capacity of the pool, so one scratch set
+# per (E, K, H) covers every step.
+_SCRATCH: dict = {}
+
+
+def _scratch_for(E: int, K: int, H: int, s_max: int, extra: int, device) -> dict:
+    """``extra`` = B, the per-rank prefetch-slot count: the library's cu_seqlens
+    has E + B entries, which can exceed E + K."""
+    key = (int(E), int(K), int(H))
+    sc = _SCRATCH.get(key)
+    if sc is not None:
+        return sc
+    nvs = int(s_max) * int(K)
+    nrows = int(E) + int(extra)
+    # cu_pad[0] is zero for the whole run (nothing ever writes index 0), so the
+    # per-group row counts come out of a single subtract -- counts[i] =
+    # cu_pad[i+1] - cu_pad[i] == cu[i] - cu[i-1] with the implicit cu[-1] = 0.
+    # That replaces the old `counts[0] = cu64[0]` scalar splice, which cost a
+    # kernel launch of its own every layer.
+    cu_pad = torch.zeros(nrows + 1, dtype=torch.int64, device=device)
+    sc = {
+        "cu_pad": cu_pad,
+        "counts": torch.empty(nrows, dtype=torch.int64, device=device),
+        "own": torch.empty(int(E), dtype=torch.int64, device=device),
+        "w": torch.empty(nvs, dtype=torch.float32, device=device),
+    }
+    _SCRATCH[key] = sc
+    return sc
 
 
 def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
     """Smallest pooled capacity that fits this step -> ``(buffer, capacity)``."""
     _MOONEP_RUNTIME._ensure_initialized()
     pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
-    s_max = max(pool)
-    step_tokens = None if os.environ.get("MOONEP_POOL", "1") != "1" else _step_token_count(tokens)
+    geo = _geometry(E, K, H)
+    s_max = geo["s_max"]
+    step_tokens = _step_token_count(tokens) if _ENV_POOL else None
     if step_tokens is None or step_tokens > s_max:
         capacity = s_max
     else:
-        capacity = min(
-            s_max,
-            max(MOONEP_MIN_DISPATCH_TOKENS,
-                1 << max(step_tokens - 1, 0).bit_length()),
-        )
-        while capacity not in pool:
-            capacity = min(s_max, capacity * 2)
+        # smallest rung that still fits the step: with the dense ladder this is
+        # the "S as close to T as the pool allows" choice
+        need = max(int(step_tokens), MOONEP_MIN_DISPATCH_TOKENS)
+        capacity = next((c for c in geo["caps"] if c >= need), s_max)
     if capacity < tokens:
         raise RuntimeError(
             f"MoonEP: step has {tokens} tokens but the selected capacity is "
             f"{capacity} (s_max={s_max})."
         )
-    if os.environ.get("MOONEP_CAP_TRACE", "0") == "1" and _CAP_TRACE["capacity"] != capacity:
+    if _ENV_CAP_TRACE and _CAP_TRACE["capacity"] != capacity:
         _CAP_TRACE["capacity"] = capacity
         print(
             f"[moonep-cap] tokens={tokens} step_tokens={step_tokens} "
@@ -662,11 +1084,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ) -> MoETokenDispatchOutput[TMoECombineMetadata]:
-        _maybe_arm_udma_dump()
-        if _EXTRA_CTX.capturing:
+        if _EXTRA_CTX.capturing and not _ALLOW_CAPTURE:
             raise RuntimeError(
                 "MoonEP dispatch cannot run inside captured CUDA graphs; "
-                "run with --enforce-eager (or disable cudagraph) when enable_moonep is on."
+                "run with --enforce-eager (or disable cudagraph) when enable_moonep is on. "
+                "(MOONEP_ALLOW_CAPTURE=1 lifts this guard for the capture feasibility study; "
+                "it is a deliberate override, not a claim that capture works.)"
             )
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -703,21 +1126,44 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             hidden_states = hidden_states.to(torch.bfloat16)
         real_t = T if _REAL_T else None
         # Legacy pad injection (MOONEP_REAL_T=0 only): pad rows route to this
-        # rank's *own* first expert (rank*epn); routing every rank's pads to
-        # expert 0 piles S-T rows onto one rank, which the MoonEP
-        # planning/combine kernels misplace for high ranks (R >= 3). Pads are
-        # zero-hidden / zero-weight, so their expert is irrelevant to the
-        # result. (MOONEP_PAD_EXPERT0=1 restores the expert-0 behavior.)
+        # rank's *own* last expert (rank*epn + epn - 1) by default, so they are
+        # the trailing rows of this rank's row block and the grouped GEMM can
+        # trim them wholesale (see the pad cut below). Routing every rank's
+        # pads to expert 0 instead piles S-T rows onto one rank, which the
+        # MoonEP planning/combine kernels misplace for high ranks (R >= 3).
+        # Pads are zero-hidden / zero-weight, so their expert is irrelevant to
+        # the result. (MOONEP_PAD_EXPERT0=1 restores the expert-0 behavior;
+        # MOONEP_PAD_ROTATE=1 spreads them over this rank's experts.)
         # The tail is written only when (T, capacity, pad expert) changes:
         # copy_ always overwrites [0:T] in full and nothing else touches the
         # tail, so unchanged steps skip three launches per layer.
         pad_expert = None
+        pad_is_tail = False
         if real_t is None and T < capacity:
-            if os.environ.get("MOONEP_PAD_EXPERT0", "0") == "1":
+            if os.environ.get("MOONEP_PAD_ROTATE", "0") == "1":
+                # Spread the pad pile over this rank's experts instead of always
+                # dumping it on one: pads are the biggest artificial imbalance the
+                # planner sees, and it pays for that imbalance with real
+                # cross-rank mirrors (prefetch traffic on the critical path).
+                ep_group = get_ep_group()
+                epn = E // ep_group.world_size
+                rot = _PAD_ROT["i"] % epn
+                _PAD_ROT["i"] += 1
+                pad_expert = ep_group.rank_in_group * epn + ((epn - 1 - rot) % epn)
+                pad_is_tail = True
+            elif _ENV_PAD_EXPERT0:
                 pad_expert = 0
             else:
+                # own LAST expert: pads are then the trailing rows of this
+                # rank's row block, which is what lets the grouped GEMM skip
+                # them wholesale (see the pad cut below). Any expert owned by
+                # this rank works for correctness -- routing every rank's pads
+                # to expert 0 piles them onto one rank, which the planning/
+                # combine kernels misplace for R >= 3.
                 ep_group = get_ep_group()
-                pad_expert = ep_group.rank_in_group * (E // ep_group.world_size)
+                epn = E // ep_group.world_size
+                pad_expert = ep_group.rank_in_group * epn + (epn - 1)
+                pad_is_tail = True
         tail = pads["tail"]
         if pad_expert is not None and (
                 tail["T"] != T or tail["capacity"] != capacity
@@ -737,9 +1183,19 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # trip) -> ~40us vs ~100us of latency per layer. Counts here are
         # integers <= S*K <= 8192, exact in float32. Real-T mode histograms
         # only the copied prefix; the tail is never read by any kernel.
+        #
+        # The library only *validates* tokens_per_expert (its planning kernel
+        # rebuilds the histogram from topk_c), but the real histogram is still
+        # built here because the load recorder consumes it host-side
+        # (_note_route_counts below).
         tpe = torch.histc(
             (topk_c[:T] if real_t is not None else topk_c).to(torch.float32),
             bins=E, min=0, max=E - 1).to(torch.int32)
+        # Post-dispatch scratch (row counts, own rows, fp32 weight snapshot)
+        # sized for the largest pool rung: one set per (E, K, H) covers every
+        # step, replacing the ~8 allocating ops per layer the old chains cost.
+        _pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
+        sc = _scratch_for(E, K, H, max(_pool), buffer._require_ctx()["B"], topk_c.device)
 
         self._tstats("disp_pad", _t0, _tp0)
         self._tstats("disp_tpe", _tp0)
@@ -749,9 +1205,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             hidden_c, route_c, topk_c, tpe,
             zero_copy=False, inter_rank_sync=True,
             num_tokens=real_t,
-            reuse_outputs=os.environ.get("MOONEP_REUSE_OUT", "1") == "1",
+            reuse_outputs=_ENV_REUSE_OUT,
         )
         _t2 = time.perf_counter()
+        if _DUMP_PLAN_DIR is not None and _DUMP_PLAN_I[0] < _DUMP_PLAN_N:
+            _dump_plan(plan, cu)
 
         # Per-local-expert row counts = cu diff over this rank's owned global
         # expert range [rank*epn, (rank+1)*epn). Shard rows are prefix-packed
@@ -761,12 +1219,18 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         ep_group = get_ep_group()
         epn = E // ep_group.world_size
         rank = ep_group.rank_in_group
-        cu64 = cu.to(torch.int64)
         # counts[i] = cu[i] - cu[i-1] with an implicit cu[-1] = 0 (the leading
-        # zero term is why this keeps the concat: slicing per rank would be off
-        # by one for rank 0).
-        counts = cu64 - torch.cat((cu64.new_zeros(1), cu64[:-1]))
-        local_counts = counts[rank * epn:(rank + 1) * epn].contiguous()
+        # zero term is why this is shifted: slicing per rank would be off by one
+        # for rank 0). All three buffers are pre-allocated scratch: the old
+        # cast+cat+sub+contiguous chain allocated four tensors per layer.
+        counts = sc["counts"]
+        cu_pad = sc["cu_pad"]
+        n_cu = int(cu.numel())
+        cu_pad[1:n_cu + 1].copy_(cu)                 # int32 -> int64 cast
+        torch.sub(cu_pad[1:n_cu + 1], cu_pad[:n_cu], out=counts[:n_cu])
+        own_counts = sc["own"]
+        own_counts[:epn].copy_(counts[rank * epn:(rank + 1) * epn])
+        own_counts = own_counts[:epn]
         # Hand the load recorder the *sending* side of this dispatch: ``tpe`` counts
         # the (token, expert) pairs by global (logical) expert id, pads included,
         # exactly as the router chose them. The plan rebuilds its own histogram from
@@ -791,10 +1255,33 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             pad_index=pad_expert if pad_expert is not None else -1,
         )
         slot_counts = None
-        if os.environ.get("MOONEP_SLOT_MODE", "0") == "1":
+        if _ENV_SLOT_MODE:
             # load-balance path: rows for prefetched (slot) experts stay local
             slot_counts = counts[E:].contiguous()
-            local_counts = torch.cat((local_counts, slot_counts))
+        if (
+            _PAD_CUT
+            and pad_is_tail
+            and real_t is None
+            and T < capacity
+        ):
+            # Drop the pad rows from the grouped GEMM. The grouped matmul walks
+            # exactly sum(group_list) rows of the shard, and the (capacity-T)*K
+            # zero rows are the *tail* of pad_expert's group (pad_expert is this
+            # rank's last expert and pads are the last input rows), so trimming
+            # that group removes them without shifting anything else.
+            # Skipped when slot rows are present: borrowed groups follow the
+            # owned ones in the shard, so shortening the tail would shift them.
+            # Device-side (clamp + where), so no host sync per layer.
+            cut = torch.clamp(own_counts[-1], max=(capacity - T) * K)
+            if slot_counts is not None:
+                cut = torch.where(slot_counts.sum() > 0, torch.zeros_like(cut), cut)
+            own_counts = own_counts.clone()
+            own_counts[-1] = own_counts[-1] - cut
+            if _BALANCE_STATS_ON:
+                _BALANCE_STATS["pad_cut_calls"] = _BALANCE_STATS.get("pad_cut_calls", 0) + 1
+        local_counts = (
+            torch.cat((own_counts, slot_counts)) if slot_counts is not None else own_counts
+        )
         # The other half of the load accounting: the rows this rank is about to
         # *compute*, i.e. the receive side -- ``local_counts`` is what the grouped
         # matmul below will walk -- folded back onto global expert ids by the
@@ -809,6 +1296,35 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             epn=epn,
             slot_experts=plan.experts_to_copy[rank] if slot_counts is not None else None,
         )
+        if os.environ.get("MOONEP_EARLY_PREFETCH", "0") == "1":
+            # remember this layer's real slot->expert row: the next step's
+            # speculative prefetch uses it as its (collective-free) prediction
+            from vllm_ascend.ops.fused_moe.moonep_balance import stash_plan_row
+
+            stash_plan_row(plan.experts_to_copy[rank])
+        if _PLAN_STATS_ON:
+            _PLAN_STATS.append([int(v) for v in plan.experts_to_copy[rank].tolist()])
+        if _EARLY_PLAN_ON:
+            # real routing histogram (pre-pad), for the early-plan comparison
+            _EARLY["real"].append(
+                torch.bincount(topk_ids.reshape(-1).to(torch.int64)).cpu().tolist())
+            # second planning pass on the *predicted* routing: this yields the
+            # plan the planner would have produced from the early router, which
+            # is what the spec-prefetch scheme can act on a layer in advance.
+            pid = _EARLY.get("pred_ids")
+            _EARLY["pred_ids"] = None
+            if pid is not None and int(pid.shape[0]) == T:
+                try:
+                    pred = torch.zeros(capacity, K, dtype=torch.int32, device=hidden_states.device)
+                    pred[:T].copy_(pid.to(torch.int32))
+                    if T < capacity and pad_expert is not None:
+                        pred[T:].fill_(pad_expert)
+                    _ctx = buffer._require_ctx()
+                    plan_pred = _plan_on_predicted_routing(_ctx, pred, E, K)
+                    _EARLY["plan_pred"].append(
+                        [int(v) for v in plan_pred.experts_to_copy[rank].tolist()])
+                except Exception:  # noqa: BLE001 - probe must never break a step
+                    _EARLY["fail"] += 1
         if _BALANCE_STATS_ON and not _EXTRA_CTX.in_profile_run:
             # per-rank (token, expert) entries: what this rank computes vs the
             # full step. Opt-in: reading the counts back costs a host sync.
@@ -835,13 +1351,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             if sr > 0:
                 s["with_slots"] += 1
             s["prefetch_experts"] += int((plan.experts_to_copy[ep_group.rank_in_group] >= 0).sum().item())
-        if os.environ.get("MOONEP_NO_SYNC", "1") != "0":
+        if _ENV_NO_SYNC:
             # Fast path: keep the row count on the device. The MLP takes the
             # full [NvS, H] shard plus the count-mode `group_list` and the
             # grouped matmul walks exactly sum(group_list) rows (rows past the
             # sum are not computed), so no `.item()` is needed -- the combine
             # masks the untouched tail on the device instead (see combine).
-            #
             # Fresh view object, not `h_nvs` itself: with reuse_outputs (the
             # default) the library caches the dispatch output *tensor object*
             # and hands that same object back on every later dispatch
@@ -853,7 +1368,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # actual is 1". The view shares the storage but is disposable
             # without touching the library's cached tensor.
             hidden_trim = h_nvs[:]
-            w_trim = w_nvs.clone().to(torch.float32).contiguous()
+            # pre-allocated fp32 snapshot (one cast-copy instead of
+            # clone + to + contiguous, i.e. three allocating ops)
+            w_buf = sc["w"]
+            n = min(int(w_buf.numel()), int(w_nvs.numel()))
+            w_buf[:n].copy_(w_nvs[:n])
+            w_trim = w_buf[:n]
             tail_masked = True
         else:
             # Validated default: read the dispatched row count back to the
@@ -866,7 +1386,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # clone: the symmetric weights_buf is shared by all layers
             w_trim = w_nvs[:rows_total].clone().to(torch.float32).contiguous()
             tail_masked = False
-        if os.environ.get("MOONEP_PACE_SYNC", "0") == "1":
+        if _ENV_PACE_SYNC:
             torch.npu.synchronize()
         _t3 = time.perf_counter()
 
@@ -876,7 +1396,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self._tstats("dispatch", _t0)
         state = (
             getattr(_SLOT_TLS, "state", None)
-            if os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
+            if _ENV_SLOT_MODE
             else None
         )
         return MoETokenDispatchOutput(
@@ -973,7 +1493,7 @@ class MoonEPCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
     def fused_experts(self, fused_experts_input):
-        if os.environ.get("MOONEP_SLOT_MODE", "0") != "1":
+        if not _ENV_SLOT_MODE:
             return super().fused_experts(fused_experts_input)
         from vllm_ascend.ops.fused_moe.moonep_balance import run_slot_forward
         from vllm_ascend.ops.fused_moe.moe_runtime_args import build_token_dispatch_input
@@ -1015,48 +1535,3 @@ class MoonEPCommImpl(MoECommMethod):
         )
 
 atexit.register(_dump_slot_stats)
-
-
-# ---------------------------------------------------------------------------
-# UDMA stall watchdog: MOONEP_UDMA_DUMP=1 arms a background torch_npu profiler
-# at the first dispatch and dumps the device trace after a stall window, to
-# capture which kernel never completes when UDMA deadlocks inside the engine.
-# ---------------------------------------------------------------------------
-_udma_dump_armed = False
-
-
-def _maybe_arm_udma_dump() -> None:
-    global _udma_dump_armed
-    if _udma_dump_armed:
-        return
-    if os.environ.get("MOONEP_UDMA_DUMP", "0") != "1":
-        return
-    if os.environ.get("MOONEP_DISABLE_UDMA", "0") == "1":
-        return
-    _udma_dump_armed = True
-    wait = int(os.environ.get("MOONEP_UDMA_DUMP_WAIT", "45"))
-    import time
-
-    def _dump():
-        try:
-            import torch_npu
-            from torch_npu import profiler
-
-            d = f"/tmp/udma_dump_r{os.environ.get('LOCAL_RANK', '?')}"
-            os.makedirs(d, exist_ok=True)
-            pr = profiler.profile(
-                activities=[
-                    profiler.ProfilerActivity.CPU,
-                    profiler.ProfilerActivity.NPU,
-                ],
-                on_trace_ready=profiler.tensorboard_trace_handler(d),
-            )
-            pr.start()
-            time.sleep(wait)
-            print("[udma-dump] stopping profiler (stall window elapsed)", flush=True)
-            pr.stop()
-            print("[udma-dump] DUMP DONE -> " + d, flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[udma-dump] failed: {exc}", flush=True)
-
-    threading.Thread(target=_dump, daemon=True).start()
