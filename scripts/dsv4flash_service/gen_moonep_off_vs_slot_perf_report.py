@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# 本文件在 <工作区根>/vllm_ascend_moonep/scripts/dsv4flash_service/ 下：仓根 = parents[2]，
+# 本文件在 <工作区根>/vllm-ascend/scripts/dsv4flash_service/ 下：仓根 = parents[2]，
 # 而运行目录、日志、payload 报告这些跑测产物仍在工作区的 $WS/scripts/ 里（不在本仓内）。
 REPO = Path(__file__).resolve().parents[2]
 WS = REPO.parent
@@ -1470,10 +1470,10 @@ slot 只有 {pct_share(W['slot']['sh_i']*100,100)}。</p>
     A(f"""<pre># ① 跑一次运行：MOE_PAR=1 才带负载 dump，PROFILE=1 才带 profiling（脚本内部会等上一次运行的设备释放）
 #    产物默认落在脚本旁边 serve_&lt;mode&gt;/，要落在工作区就像下面这样显式给 OUT_DIR
 MOE_PAR=1 PROFILE=1 OUT_DIR=$WS/scripts/运行目录名 \\
-    bash $WS/vllm_ascend_moonep/scripts/dsv4flash_service/start_service_mode.sh {{off|slot}}
+    bash $WS/vllm-ascend/scripts/dsv4flash_service/start_service_mode.sh {{off|slot}}
 
 # ② 记录器分析：把该运行的 dump 聚合成负载报告（运行名 = 输出目录名，报告名自带运行名）
-python $WS/vllm_ascend_moonep/scripts/moe_par/analyze_moe_par.py \\
+python <analyze_moe_par.py 路径（已移出本仓）> \\
     --run {L2o}=$WS/scripts/{L2o}/moe_par \\
     -o $WS/scripts/{L2o}/{L2o}_report.html          # slot 另一次运行同理，换目录名即可
 
@@ -1486,7 +1486,7 @@ msprof --export=on --output=/tmp/prof3/off/merged      # 约 5 分钟，产出 o
 umount /tmp/prof3/off/merged
 
 # ④ 本报告：所有数字现算，报告里没有写死常量（换运行只改脚本头的 LEGS / PROF_ROOTS / PAYLOAD_SRC）
-python $WS/vllm_ascend_moonep/scripts/dsv4flash_service/gen_moonep_off_vs_slot_perf_report.py</pre>""")
+python $WS/vllm-ascend/scripts/dsv4flash_service/gen_moonep_off_vs_slot_perf_report.py</pre>""")
     A("""<h3>8.2 已知的口径陷阱（换数据前先读这一节）</h3>
 <ul>
 <li><b>通信核任务不在 <code>task_time</code> 里</b>：CANN 9.2 导出的 <code>task_time*.csv</code> 只覆盖一部分实例

@@ -34,7 +34,7 @@ SHAPES=(
 run_bench() {  # np mc len seed outname
   local np=$1 mc=$2 len=$3 seed=$4 name=$5
   echo "[bench] $RUN $name (np=$np conc=$mc len=$len seed=$seed)"
-  PYTHONPATH=$WS/vllm_ascend_moonep/third_party/ascend_moonep:$WS/vllm_ascend_moonep:${PYTHONPATH:-} \
+  PYTHONPATH=$WS/vllm-ascend:${PYTHONPATH:-} \
   vllm bench serve \
     --backend openai \
     --endpoint /v1/completions \

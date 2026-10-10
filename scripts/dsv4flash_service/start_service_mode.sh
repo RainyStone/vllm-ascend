@@ -222,7 +222,7 @@ unset ftp_proxy https_proxy http_proxy
 source /usr/local/Ascend/cann/set_env.sh
 
 
-WS=/home/x00893896/vllm_ascend_moonep_integration # vllm、vllm_ascend、vllm_ascend_moonep仓在该目录下
+WS=/home/x00893896/vllm_ascend_moonep_integration # vllm、vllm-ascend、ascend-moonep 仓在该目录下
 export HCCL_IF_IP=90.90.93.34          # 本机 IP，ifconfig 查
 export GLOO_SOCKET_IFNAME=ens6f1np1           # 下面三个都是上面这个 IP 对应的网卡
 export TP_SOCKET_IFNAME=ens6f1np1
@@ -234,9 +234,9 @@ export OMP_NUM_THREADS=100
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:False"   # DP+EP 下必须关，否则会挂
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7            # 服务可见的卡；DP8 要 8 张
-export PYTHONPATH=$WS/vllm_ascend_moonep/third_party/ascend_moonep:$WS/vllm_ascend_moonep:$PYTHONPATH
-#                ^ vendored 副本必须放最前：外层 ascend-moonep/ 是未打补丁的旧副本，
-#                  解析到它在非整组卡时 slot 模式会报 507899
+export PYTHONPATH=$WS/vllm-ascend:$PYTHONPATH
+#                ^ ascend_moonep 不再 vendored：由 ascend-moonep 仓的 pip install -e 提供，
+#                  _C*.so/lib 就在其包目录内（重编后天然同版）
 export ASCEND_CUSTOM_OPP_PATH=$WS/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn   # worker 用 spawn；fork 子进程走 os._exit()，退出钩子不执行
@@ -253,7 +253,7 @@ export LD_LIBRARY_PATH=$ASCEND_MOONEP_BUILD_DIR/lib:$LD_LIBRARY_PATH   # libshme
 # 8 个 rank 的文件都落在同一个目录：$DUMP_DIR/
 # 停服后离线聚合成报告（analyzer 读这个目录，腿名取 OUT_DIR 的目录名，报告名再带上这
 # 个腿名，多份报告放一起也不打架）：
-#   python $WS/vllm_ascend_moonep/scripts/moe_par/analyze_moe_par.py \
+#   python <analyze_moe_par.py 路径（该聚合工具已随调测清理移出本仓；fork 仓在则用其副本）> \
 #       --run $LEG_NAME=$DUMP_DIR -o $OUT_DIR/${LEG_NAME}_report.html
 # 服务化的 dump 没有 bench.json，所以报告只出 PAR 面板：对账检查和 TTFT/TPOT/吞吐面板
 # （这两块来自离线 driver 的 bench.json）不会出现——TTFT/TPOT 走 /metrics 另取。
@@ -351,7 +351,8 @@ fi
 # 这条腿的 dump 交给 analyzer 出负载报告：腿名取 OUT_DIR 的目录名，报告写回
 # $OUT_DIR/<腿名>_report.html——报告名自带腿名，换目录收报告也不会重名。
 # 横幅与收尾都会按**本次实际路径**把这条命令打出来，直接拷走执行即可。
-ANALYZER=$WS/vllm_ascend_moonep/scripts/moe_par/analyze_moe_par.py
+ANALYZER=$WS/vllm_ascend_moonep/scripts/moe_par/analyze_moe_par.py   # 已移出本仓：fork 在则用之
+[ -f "$ANALYZER" ] || ANALYZER="analyze_moe_par.py（已移出本仓，自备路径）"
 REPORT_FILE=$OUT_DIR/${LEG_NAME}_report.html
 
 # ------------------------------------------------------------ 起服务 -- #

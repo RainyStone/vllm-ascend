@@ -98,8 +98,9 @@ export OMP_NUM_THREADS=100
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:False"   # DP+EP 下必须关，否则会挂
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3            # DP4 用 4 张（与 H16 轮一致）
-export PYTHONPATH=$WS/vllm_ascend_moonep/third_party/ascend_moonep:$WS/vllm_ascend_moonep:$PYTHONPATH
-#                ^ vendored 副本必须放最前（外层 ascend-moonep/ 是旧副本，解析到它非整组卡时 slot 报 507899）
+export PYTHONPATH=$WS/vllm-ascend:$PYTHONPATH
+#                ^ ascend_moonep 不再 vendored：由 ascend-moonep 仓的 pip install -e 提供，
+#                  _C*.so/lib 就在其包目录内（重编后天然同版）
 export ASCEND_CUSTOM_OPP_PATH=$WS/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
