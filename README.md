@@ -15,7 +15,7 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
 | 模式 | 说明 | 启用 |
 |---|---|---|
 | **owner**（默认） | token 行按“专家属主”经 SHMEM 对称内存分发/归约，替换 HCCL MC2/all2all | `MOONEP=1`（引擎侧 additional config `enable_moonep`） |
-| **slot / 平衡**（MindSpeed 风格） | 额外启用“冗余专家”预取槽：过热专家的行留在本地算，权重行 RDMA 预取进 B=epn 槽，负载均衡 | `MOONEP_SLOT_MODE=1`（bf16；W4A8MXFP 量化需 EP≥8，见 [moonep_slot_quant.md](docs/moonep_slot_quant.md)） |
+| **slot / 平衡**（MindSpeed 风格） | 额外启用“冗余专家”预取槽：过热专家的行留在本地算，权重行 RDMA 预取进 B=epn 槽，负载均衡 | `MOONEP_SLOT_MODE=1`（bf16；W4A8MXFP 量化需 EP≥8） |
 
 两种模式共用同一通信内核；slot 模式增加对称权重镜像（home）+ 槽 + `[epn+B]` 别名 GEMM。
 
@@ -71,67 +71,14 @@ export MOONEP_DISABLE_UDMA=1             # MTE 内核(无需 URMA 时;开 URMA �
 
 ## 使用
 
-### 引擎内 A/B（离线 generate）
-
-```bash
-cd scripts
-MODEL=/path/to/Qwen3-30B-A3B TP=2 python moe_ab_test.py        # MOONEP=1 → MoonEP
-#   对照：不设 MOONEP（或 MOONEP=0）→ 原生 MC2/EP
-#   slot 模式：export MOONEP_SLOT_MODE=1
-#   输出：/tmp/ab_{moonep,mbaseline}_<模型名>.json
-```
-
-### 长序列 prefill 基准
-
-```bash
-cd scripts
-MODEL=/path/to/Qwen3-30B-A3B TP=2 BENCH_LEN=30000 python bench_long.py
-# 度量单条 30k prompt 的 prefill 时间/吞吐；默认 max_model_len=40960
-```
-
-### 数值 harness（torchrun，不需要 vLLM 引擎）
-
-```bash
-export MOONEP_SLOT_MODE=1            # 测 slot 平衡路径；去掉则测 owner
-ASCEND_RT_VISIBLE_DEVICES=0,1 \
-  torchrun --nproc_per_node=2 scripts/smoke_qwen_geo.py   # 真实几何 E128/K8/H2048/S512
-ASCEND_RT_VISIBLE_DEVICES=0,1 \
-  torchrun --nproc_per_node=2 scripts/smoke_slots.py      # slot+重倾斜数值
-```
-
 ### 槽位使用统计
 
 `MOONEP_SLOT_STATS=1` 会在进程退出时打印：dispatch 总次数、发生槽平衡的次数、槽内行数、预取的远程专家槽数。
 
-### MoE 负载采集与峰均比报告（离线）
+### MoE 负载采集（打点）
 
-同一套负载参数跑多次、每次只换通信方式，再离线对比各 rank 的负载分布与峰均比（PAR）。
-**打点只数本 rank 的量、不做任何额外集合通信**，跨 rank 的聚合全在离线脚本里做；不需要开 EPLB。
-
-```bash
-cd scripts
-# ① 第 1 次运行：不开 moonep（EP 打开时走 MC2 / all-gather）
-python moe_par_bench.py --tp 2 --batch-size 16 --max-num-batched-tokens 512 \
-    --max-tokens 256 --num-prompts 100 --tag tp2-ep-b16-bt512-o256
-#   结束时会打印 dump 目录、每份 dump 的行数/步数，以及可直接复制的出报告命令
-#   dump 默认落在 scripts/moe_par_stats/<tag>/，每 rank 一个文件
-
-# ② 第 2 次运行：同样的负载参数，只换通信方式（MoonEP / SHMEM）
-ASCEND_RT_VISIBLE_DEVICES=6,7 python moe_par_bench.py --tp 2 --batch-size 16 \
-    --max-num-batched-tokens 512 --max-tokens 256 --num-prompts 100 \
-    --moonep --tag tp2-ep-b16-bt512-o256-moonep
-
-# ③ 出报告（可 --run 多份 dump 对比，名字随便起）
-python analyze_moe_par.py --run mc2=moe_par_stats/tp2-ep-b16-bt512-o256 \
-    --run moonep=moe_par_stats/tp2-ep-b16-bt512-o256-moonep \
-    -o /tmp/moe_par_report.html
-#   产出单个自包含中文 HTML（CSS/JS/数据全内联，无 CDN），可直接双击打开或整份发出去
-```
-
-报告回答四个问题：负载口径是什么、PAR 有多大、token 在专家上的分布、token/专家在 rank 上的分布；
-顶部有「口径与统计 · 先读这里」面板和逐层/整步/全程三种 PAR 口径的统计表。
-打点开关是 `VLLM_ASCEND_MOE_PAR_*` 四个环境变量，`moe_par_bench.py` 已按参数代管，一般不用手设。
-**完整用法、dump 格式、报告图表清单、已知边界见 [`docs/moe_par.md`](docs/moe_par.md)。**
+打点只数本 rank 的量、不做任何额外集合通信；跨 rank 聚合与峰均比（PAR）报告由离线脚本完成
+（`VLLM_ASCEND_MOE_PAR_*` 四个环境变量控制，采集模块 `moe_par_stats.py`）。
 
 ## 性能优化点与收益（dispatch/combine host 段，2026-09-10/11）
 
@@ -210,8 +157,8 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `ImportError ... '_build_info'` / 找不到 `vllm_ascend`、`ascend_moonep` | 仓库没装：三个 editable 包（vllm-ascend、本仓库）与 vendored 库路径没都挂上 |
 | OOM / `Failed to apply for memory`，但 `npu-smi` 看着空闲 | ① 别的容器占着卡（`npu-smi` 看不见，只有 ACL 级 `torch.npu.mem_get_info` 才反映）；② 上一次 `kill -9` 的残留进程仍持卡 |
 | `aclrtMallocPhysical(16777216, device_id=N) failed with 207001`（池初始化阶段） | **容量池档数过多**：每档除 hidden 块外还要为各算子分配 workspace（~10 个 16 MiB 级 VMM 物理块），几十档就把驱动的物理块吃光。降到 ≤32 档（`MOONEP_POOL_MAX_RUNGS`） |
-| `cannot register a symmetric descriptor after buffer-backed shmem initialization` | 想在 shmem init 之后新建 `Buffer`（"懒建档"）——**库不支持**，对称堆在 init 时一次性定死；复现见 `scripts/moonep_dev/probe_lazy_buffer.py` |
-| 参数改过之后跨路线 token 不再逐条一致 | **预期**：分组长度/tiling 变 ⇒ 数值末位差异 ⇒ 贪心解码分叉。跨实现不该要求 bit-exact，判据用任务准确率（见 `docs/dev_results_2026-09-16.md` §7） |
+| `cannot register a symmetric descriptor after buffer-backed shmem initialization` | 想在 shmem init 之后新建 `Buffer`（"懒建档"）——**库不支持**，对称堆在 init 时一次性定死 |
+| 参数改过之后跨路线 token 不再逐条一致 | **预期**：分组长度/tiling 变 ⇒ 数值末位差异 ⇒ 贪心解码分叉。跨实现不该要求 bit-exact，判据用任务准确率 |
 | `Free memory ... less than desired GPU memory utilization` | 同卡别的容器中途占回显存（`npu-smi` 之外也要看 ACL 级可用量）；自适应 GMU 会因此在运行中失效 |
 | 崩溃日志是空的（kill 后无 traceback） | 别用 `… \| grep … \| tail -N` 跑长任务：`tail` 会缓冲到 EOF，进程被杀就什么都不落盘 |
 | `HcclBroadcast ... port 16666` 等 HCCL 建链异常 | **未定根因**（个别机器只出现过一次、未复现）。遇到时先按 HCCL 错误码定位：`19 = HCCL_E_NETWORK`、`4 = 内部错误 / TLS 配置不一致`（曾见 0-3 卡 tls disabled、4-7 enabled 导致 8 卡建链失败） |
@@ -226,7 +173,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
-| `MOONEP_SLOT_MODE=1` | slot/冗余专家平衡模式（bf16；W4A8MXFP 见 [moonep_slot_quant.md](docs/moonep_slot_quant.md)） |
+| `MOONEP_SLOT_MODE=1` | slot/冗余专家平衡模式（bf16；W4A8MXFP 需 EP≥8） |
 | `MOONEP_SLOT_QUANT=1` | slot 模式接受量化 payload（默认 1）；置 0 则量化层在 slot 模式显式报错（回滚开关） |
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
@@ -294,10 +241,9 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
      segments 的 VA/页表兼容（或 HDK ≥ 26.0.RC1）。
 2. **NPU 对称内存可用性**：部分设备（长时间被占/驱动状态损坏的卡）会报
    `aclrtMemSetAccess ... 507899`（= ACL_ERROR_RT_DRV_INTERNAL_ERROR，驱动内部错误）。
-   **早期「需设备 reset / 升级驱动」的判断已被实测推翻**：根因见第 7 条与
-   [docs/cross_repo_fixes.md](docs/cross_repo_fixes.md) 第 3 节——`aclrtMemSetAccess` 的
-   `aclrtMemLocation.id` 要物理号，而 VMM 其余接口要逻辑号，`ASCEND_RT_VISIBLE_DEVICES`
-   是真子集时两者不等，故只在重映射场景出现。
+   **早期「需设备 reset / 升级驱动」的判断已被实测推翻**：根因见第 7 条——
+   `aclrtMemSetAccess` 的 `aclrtMemLocation.id` 要物理号，而 VMM 其余接口要逻辑号，
+   `ASCEND_RT_VISIBLE_DEVICES` 是真子集时两者不等，故只在重映射场景出现。
 3. **planning 要求 B == E/R**；GPU 原版“推理用小 B”在 Ascend 移植库上暂不支持。
 4. **超容量/倾斜**：owner 模式在极端路由倾斜下可能丢行（见模块注释的容量包络）；
    计划中增加 `plan.remote_stats` 保护（越界自动回退原生 comm）。
@@ -311,7 +257,7 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
    ≥1 即越过包线（该项为零时根本不打印，所以 grep 不到就是没丢）。
    仿真路由的 `home-rank rows` 是预测的**分发前**分布，超没超包线要靠这个 `dropped=` 判。
 5. 量化只支持 W4A8MXFP（DeepSeek-V4 布局）且 slot 模式要求 **EP≥8**（显存账见
-   [moonep_slot_quant.md](docs/moonep_slot_quant.md) §3）；无 dynamic EPLB/mix、tp=1..N 均可
+   W4A8MXFP 需 EP≥8）；无 dynamic EPLB/mix、tp=1..N 均可
    （EP 跨 TP 组）；需 `--enforce-eager`（MoonEP 集体内核不能进 CUDA 图）。
 6. **性能仍低于原生 MC2**（dp2ep2 下 MTE 约为 MC2 的 0.69，URMA 约 0.52；两者相对差距
    与 tp2 拓扑一致，说明瓶颈是每层 dispatch 的 host 段 + 无重叠，与拓扑无关）。已削掉的
@@ -334,8 +280,8 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
    实测 dp2ep2 需要保留全量可见 + 给 vllm-ascend 0.23.0 的 worker 补 DP 偏移（测试用
    shim：`/home/tmp/dpshim/sitecustomize.py`，`MOONEP_DP_FULL_VISIBLE=1`）。
    **本仓运行还依赖若干落在其它仓/子模块的修复**（catlass 编译、shmem init `-100`、本例、
-   DeepSeek-V4-Flash 的 moonep 适配），背景/根因/解法与重置后如何重打见
-   [docs/cross_repo_fixes.md](docs/cross_repo_fixes.md)。
+   DeepSeek-V4-Flash 的 moonep 适配），背景/根因/解法与重置后如何重打见工作区的
+   `skills/ascend-moonep-950-setup/`。
 
 ## 代码结构
 
@@ -350,20 +296,11 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
 - 其余小改动：`ascend_config.py`（开关）、`ascend_forward_context.py`（MoECommType.SHMEM）、
   `worker/model_runner_v1.py`（load_model 末尾 wiring-time init）等。
 
-## 测试脚本
+## 脚本
 
-`scripts/`：`moe_ab_test.py`（引擎 A/B）、`bench_long.py`（长 prefill）、
-`smoke_qwen_geo.py` / `smoke_slots.py`（数值 harness）、`probe_slots_multi.py`（R3 多热专家探针）。
-
-**MoE 负载采集与峰均比报告**：`moe_par_bench.py`（离线驱动：跑数据集，写每 rank 的负载 dump 与
-`bench.json`）、`analyze_moe_par.py`（离线聚合多份 dump，生成中文自包含 HTML 报告：负载口径说明、
-三种口径的 PAR、token 与专家在 rank 上的分布、逐层/逐 step 曲线、性能面板）。打点实现在
+调测/分析脚本（A/B、数值 harness、探针、MoE PAR 报告套件、dev 线工具集）与过程报告已按
+「只保留功能代码」的清理决定移出本仓；现存的 `scripts/dsv4flash_service/` 是起服/占卡/
+bench 调度与 sim-route 载荷档案的运行工具。MoE 负载打点仍在功能层：
 `vllm_ascend/ops/fused_moe/moe_par_stats.py`（只记录本 rank、零集合通信，开关
-`VLLM_ASCEND_MOE_PAR_STATS`）。负载口径：**专家负载按逻辑专家记（副本算同一个专家）、
-rank 负载按实际落到它所持专家上的对数记、pad 不计入**（MoonEP 的容量 pad 由发送侧直方图在产生它的
-rank 上扣掉）。有冗余专家时 PAR 是上界。用法、产出文件的格式与报告读法见
-[docs/moe_par.md](docs/moe_par.md)；自测：`pytest -sv tests/ut/ops/test_moe_par_stats.py`。
-
-`scripts/moonep_dev/`：dev 分支的负载均衡/容量测量工具集（harness、plan/懒建档探针、
-token 对拍、组不均-耗时相关性分析）——见该目录 `README.md`；
-结果记录见 `docs/dev_results_2026-09-16.md`。
+`VLLM_ASCEND_MOE_PAR_STATS`）。负载口径：专家负载按逻辑专家记（副本算同一个专家）、
+rank 负载按实际落到它所持专家上的对数记、pad 不计入；有冗余专家时 PAR 是上界。
