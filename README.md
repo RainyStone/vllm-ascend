@@ -52,15 +52,15 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
 
 ### 运行必需的环境变量
 
-> 路径说明：本文出现的 `/vllm-workspace/...`、`/home/tmp/...`、`/home/ascend-moonep` 等是**编写机器**上的取值，
-> 换机器请按实际路径替换（尤其 `ASCEND_CUSTOM_OPP_PATH`、vendored 目录、shim 路径）。
+> 路径说明：本文出现的 `/vllm-workspace/...`、`/home/tmp/...` 等是**编写机器**上的取值，
+> 换机器请按实际路径替换（尤其 `ASCEND_CUSTOM_OPP_PATH`）。
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh
 unset MOONEP_SHMEM_IPPORT
 export ASCEND_RT_VISIBLE_DEVICES=0,1             # 空闲的健康卡
-export PYTHONPATH=/path/to/this/repo/third_party/ascend_moonep:/path/to/this/repo:$PYTHONPATH
-                                                 # vendored ascend-moonep 放最前(见代码结构),再覆盖 stock vllm_ascend
+export PYTHONPATH=/path/to/this/repo:$PYTHONPATH   # ascend_moonep 由 ascend-moonep 仓的
+                                                 # pip editable 提供（build.sh 以 pip install -e . 收尾）
 export ASCEND_CUSTOM_OPP_PATH=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -152,9 +152,9 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 | 报错 / 现象 | 根因 |
 |---|---|
-| `aclrtMemSetAccess(va=..., size=...) failed with 507899` | 见过两种：① DP 收窄可见设备后**物理 vs 逻辑 device id 混用**（见限制 #7，库侧已修一半）；② `PYTHONPATH` 里 **vendored 目录不在最前**，实际跑到了外部那份**不带修复的旧库** |
+| `aclrtMemSetAccess(va=..., size=...) failed with 507899` | DP 收窄可见设备后**物理 vs 逻辑 device id 混用**（见限制 #7，库仓已修）；若仍复现，先确认 `import ascend_moonep` 解析到的是本机 editable 安装的 ascend-moonep 仓（`python3 -c "import ascend_moonep; print(ascend_moonep.__file__)"`） |
 | `aclshmemx_init_attr_with_buffers failed with -100`，日志带 `Unsupported physical allocation properties ... locationId=...` | 同一个 id 空间问题的 **shmem 侧**：VMM 属性里是物理号、`aclrtGetDevice()` 是逻辑号，比较必然失败（修法与 dlsym 陷阱见限制 #7） |
-| `ImportError ... '_build_info'` / 找不到 `vllm_ascend`、`ascend_moonep` | 仓库没装：三个 editable 包（vllm-ascend、本仓库）与 vendored 库路径没都挂上 |
+| `ImportError ... '_build_info'` / 找不到 `vllm_ascend`、`ascend_moonep` | 仓库没装：vllm-ascend 与 ascend-moonep 两个 editable 包没都挂上（ascend-moonep 由其 `build.sh` 的 `pip install -e .` 安装） |
 | OOM / `Failed to apply for memory`，但 `npu-smi` 看着空闲 | ① 别的容器占着卡（`npu-smi` 看不见，只有 ACL 级 `torch.npu.mem_get_info` 才反映）；② 上一次 `kill -9` 的残留进程仍持卡 |
 | `aclrtMallocPhysical(16777216, device_id=N) failed with 207001`（池初始化阶段） | **容量池档数过多**：每档除 hidden 块外还要为各算子分配 workspace（~10 个 16 MiB 级 VMM 物理块），几十档就把驱动的物理块吃光。降到 ≤32 档（`MOONEP_POOL_MAX_RUNGS`） |
 | `cannot register a symmetric descriptor after buffer-backed shmem initialization` | 想在 shmem init 之后新建 `Buffer`（"懒建档"）——**库不支持**，对称堆在 init 时一次性定死 |
@@ -268,11 +268,12 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
 7. **DP 拓扑下的 MoonEP 需要每个 rank 进程看到全部参与设备**（vLLM DP 默认会把
    `ASCEND_RT_VISIBLE_DEVICES` 收窄成单卡，MoonEP 的 VMM/shmem 初始化在收窄进程里会踩
    CANN 的 device id 语义问题：`aclrtMemSetAccess` 要物理号、`aclrtMallocPhysical` 要逻辑号）。
-   库侧已修 `memSetAccess` 一半（见 `ascend_moonep/buffer_c.py: acl_vmm_access_device_id`）；
-   **另一半（shmem 侧）未修**：vendored shmem 的 `validate_user_buffer_property` 拿 VMM 句柄的
+   库侧已修 `memSetAccess`（见 `ascend_moonep/buffer_c.py: acl_vmm_access_device_id`）；
+   **另一半在 shmem 子模块**：其 `validate_user_buffer_property` 拿 VMM 句柄的
    `location.id`（物理号）与 `aclrtGetDevice()`（逻辑号）比较，收窄进程里必然不等 ⇒
    `aclshmemx_init_attr_with_buffers` 直接返回 `-100 ACLSHMEM_NOT_SUPPORTED`，日志伴随
-   `Unsupported physical allocation properties ... locationId=...`。
+   `Unsupported physical allocation properties ... locationId=...`——已按
+   `shmem_init.cpp` 设备号补丁修复（改动随 3rdparty/shmem 子模块工作区携带）。
    若要修：把该比较改成物理号，**取物理号必须用
    `dlsym(RTLD_DEFAULT, "aclrtGetPhyDevIdByUserDevId")`，不要用
    `DlAclApi::AclrtGetPhyDevIdByUserDevId`** —— 后者的函数指针在 `DlAclApi::LoadLibrary()`
@@ -285,12 +286,9 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
 
 ## 代码结构
 
-- `third_party/ascend_moonep/` — **vendored 的 ascend-moonep Python 层**（外部库无法推送改动，
-  故随本仓库携带；编译产物 `_C*.so` 与 `lib/*.so` 仍取自外部构建目录，可用
-  `ASCEND_MOONEP_BUILD_DIR` 指定）。**运行前把它放在 `PYTHONPATH` 最前面**:
-  `export PYTHONPATH=<repo>/third_party/ascend_moonep:$PYTHONPATH`。
-  携带的本地修改见 `third_party/ascend_moonep/README.md`（VMM device id 修复 +
-  `dispatch(reuse_outputs=)`）。
+- ascend-moonep Python 层**不再随本仓 vendored**（单一代码源：由 ascend-moonep 仓提供，
+  `pip install -e` 后 `import ascend_moonep` 直接解析到该仓的包目录，编译产物 `_C*.so`/`lib/`
+  也在其中，无需 `ASCEND_MOONEP_BUILD_DIR`）。
 - `vllm_ascend/ops/fused_moe/moonep_comm.py` — MoonEP comm 方法（owner 模式、运行时池、选择逻辑）
 - `vllm_ascend/ops/fused_moe/moonep_balance.py` — slot/平衡模式（权重镜像、预取、[epn+B] 别名 GEMM）
 - 其余小改动：`ascend_config.py`（开关）、`ascend_forward_context.py`（MoECommType.SHMEM）、
