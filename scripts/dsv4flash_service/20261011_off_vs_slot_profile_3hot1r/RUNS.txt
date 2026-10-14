@@ -1,0 +1,4 @@
+# 两腿清单（run_profile_leg.sh <mode> 逐台执行）
+# 条件：max_num_batched_tokens=16384 · L16k（输入16384/输出1）· 3hot1r(s=2.48) · seed 21001
+# 1) off   腿：bash run_profile_leg.sh off
+# 2) slot  腿：bash run_profile_leg.sh slot   （+RELAXED/NO_RECONCILE/SKIP_DUP 三件套）

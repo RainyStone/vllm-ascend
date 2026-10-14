@@ -242,3 +242,11 @@ scripts/dsv4flash_service/*.log.prev-*
 # core dump(2026-09-23:三个共 ~11 GB 混在仓里,差点被提交)
 core
 **/core
+
+# dsv4flash_service 实验产物：数据与 profiling 不入仓（见该目录 README.md）
+scripts/dsv4flash_service/**/data/
+scripts/dsv4flash_service/**/profile/
+scripts/dsv4flash_service/**/profile_chunked/
+scripts/dsv4flash_service/**/extra-info/
+scripts/dsv4flash_service/**/*.ascend_pt/
+scripts/dsv4flash_service/**/*.trace.json.gz

@@ -921,6 +921,26 @@ def ensure_runtime_initialized() -> None:
         return
     if get_ep_group().world_size <= 1:
         return
+    # [env-audit] 一次性诊断：worker 进程运行时实际看到的 MoonEP 开关集合
+    # （/proc/environ 只反映 exec 时刻，运行时可能有重注入，故在初始化点直接打印）。
+    import os as _os_audit
+    print(
+        "[moonep-env-audit] "
+        + " ".join(
+            f"{k}={_os_audit.environ.get(k, '<unset>')}"
+            for k in (
+                "ASCEND_MOONEP_PREFETCH_RELAXED",
+                "ASCEND_MOONEP_NO_RECONCILE",
+                "ASCEND_MOONEP_SKIP_DUP",
+                "MOONEP_SLOT_MODE",
+                "MOONEP_REAL_T",
+                "MOONEP_REUSE_OUT",
+                "MOONEP_SLOT_QUANT",
+                "MOONEP_MIN_DISPATCH_TOKENS",
+            )
+        ),
+        flush=True,
+    )
     _MOONEP_RUNTIME._ensure_initialized()
 
 

@@ -1,0 +1,95 @@
+<!doctype html><html lang=zh><meta charset=utf-8><title>off vs slot profiling 分析</title>
+<style>body{font-family:-apple-system,'Noto Sans CJK SC','PingFang SC',sans-serif;background:#f6f6f4;
+color:#1a1a19;margin:0;padding:2rem 1rem 4rem}.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:1.4rem;margin:.2rem 0 .4rem}h2{font-size:1.1rem;margin:2.2rem 0 .7rem;
+border-bottom:2px solid #d8d7d2;padding-bottom:.35rem}h3{font-size:.98rem;margin:1.5rem 0 .5rem}
+table{border-collapse:collapse;width:100%;margin:.8rem 0;background:#fff;font-size:.84rem}
+th,td{padding:.42rem .55rem;border-bottom:1px solid #e4e3de;text-align:left;
+font-variant-numeric:tabular-nums}th{background:#efefeb;font-weight:600;color:#55544f}
+.num{text-align:right}.good{color:#0a8a5f;font-weight:600}.warn{color:#8a7a20;font-weight:600}
+.box{background:#fff;border:1px solid #e4e3de;border-left:4px solid #3a78c2;border-radius:6px;
+padding:.7rem 1rem;margin:.9rem 0}.box.warn{border-left-color:#d09a25}
+.small{font-size:.78rem;color:#6d6c66}.scroll{overflow-x:auto;border:1px solid #e4e3de;border-radius:6px}
+code{background:#eeeee9;padding:.08em .35em;border-radius:3px;font-size:.85em}
+.fig{background:#fff;border:1px solid #e4e3de;border-radius:8px;padding:.9rem 1rem;margin:1rem 0}</style><div class=wrap>
+<h1>profiling 对比分析：MoonEP slot 的瓶颈与优化空间</h1>
+<p class=small>生成：2026-10-12 00:11 · 生成器 gen_profile_analysis.py（数字全部现算）</p>
+<h2>0. 数据条件与口径</h2><div class=box><table>
+<tr><th style='width:11em'>实验条件</th><td>max_num_batched_tokens=16384 · 输入 16384/输出 1 · 仿真路由 3hot1r（峰均比 s=2.48）· DP4/卡 0-3 · 单轮同窗采集（seed 21001 两腿一致）</td></tr>
+<tr><th style='width:11em'>两腿</th><td>off（标准 MC2/EP） vs slot（MoonEP slot + RELAXED/NO_RECONCILE/SKIP_DUP 三件套 + 默认优化，env 审计行佐证）</td></tr>
+<tr><th style='width:11em'>数据源</th><td>profile/&lt;腿&gt;/dp*_ascend_pt/ASCEND_PROFILER_OUTPUT/（torch_npu analyse 产物：op_statistic / kernel_details / step_trace_time / api_statistic）</td></tr>
+<tr><th style='width:11em'>采集窗口（每 rank 平均）</th><td>off 64.8s · slot 41.2s（窗口含 DP 波次对齐与 dummy 步）</td></tr>
+<tr><th style='width:11em'>⚠ 口径警告</th><td>两腿窗口不同，<b>只比结构与占比，不比绝对秒数</b>；窗口内含 profiler 开销（off 被拖累更大：bench mean_ttft 19.2s vs 干净值 11.0s）与空转步；端到端统计结论以 op2 干净矩阵为准</td></tr>
+</table></div>
+<h2>1. 总览：slot 把 off 的『通信等待』换成了『计算+可重叠等待』</h2>
+<div class=scroll><table><tr><th>指标（4 rank 合计 / 每 rank 平均）</th><th class=num>off</th><th class=num>slot</th></tr>
+<tr><td>采集窗口（s/rank）</td><td class=num>64.8</td><td class=num>41.2</td></tr>
+<tr><td>设备忙时（s，4 rank 合计）</td><td class=num>231.4</td><td class=num>112.7</td></tr>
+<tr><td>计算占比（Computing/窗口）</td><td class=num>33%</td><td class=num><b class=good>68%</b></td></tr>
+<tr><td>未重叠通信占比</td><td class=num><b class=warn>43%</b></td><td class=num>0%</td></tr>
+<tr><td>空闲占比（Free）</td><td class=num>24%</td><td class=num>32%</td></tr>
+<tr><td>bench 参考值（含 profiler，不作统计）</td><td class=num>mean_ttft 19.2s</td><td class=num>mean_ttft 10.1s</td></tr>
+</table></div>
+<div class="fig"><svg viewBox="0 0 720 22" style="width:100%;height:auto;font-family:inherit"><rect x="0" y="6" width="14" height="14" rx="3" fill="#2a78d6"/><text x="20" y="18" style="font-size:12px;fill:#52514e">计算（含 MooneP 内核）</text><rect x="224" y="6" width="14" height="14" rx="3" fill="#eb6834"/><text x="244" y="18" style="font-size:12px;fill:#52514e">未重叠通信</text><rect x="328" y="6" width="14" height="14" rx="3" fill="#1baf7a"/><text x="348" y="18" style="font-size:12px;fill:#52514e">空闲/等待波次</text></svg><svg viewBox="0 0 720 162" style="width:100%;height:auto;font-family:inherit"><text x="0" y="16" style="font-size:13px;font-weight:700;fill:#0b0b0b">图 1 · 采集窗口的构成（每 rank 平均）</text><text x="0" y="55" style="font-size:12px;fill:#52514e">off</text><rect x="129" y="34" width="192.2" height="30" rx="4" fill="#2a78d6"/><text x="225" y="53.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">33%</text><rect x="323.1591183377743" y="34" width="246.2" height="30" rx="4" fill="#eb6834"/><text x="446" y="53.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">43%</text><rect x="571.3773802584637" y="34" width="135.6" height="30" rx="4" fill="#1baf7a"/><text x="639" y="53.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">24%</text><text x="718" y="53.5" text-anchor="end" style="font-size:11px;fill:#898781">100</text><text x="0" y="111" style="font-size:12px;fill:#52514e">slot</text><rect x="129" y="90" width="392.8" height="30" rx="4" fill="#2a78d6"/><text x="325" y="109.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">68%</text><rect x="523.8152499431899" y="90" width="0.0" height="30" rx="4" fill="#eb6834"/><rect x="523.8152499431899" y="90" width="183.2" height="30" rx="4" fill="#1baf7a"/><text x="615" y="109.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">32%</text><text x="718" y="109.5" text-anchor="end" style="font-size:11px;fill:#898781">100</text></svg></div>
+<h2>2. off 的画像：62% 设备时间在 HCCL 通信里等热点 rank</h2>
+<p>off 的设备时间大头是 <code>HcclLaunchAicpuKernel</code>（MC2/all-to-all 通信）——占 <b>62.3%</b>（144.1s / 4 rank）。它不是传输慢，是<b>等最慢的 rank</b>：时长分布 p50=3.9ms、p90=39.3ms、max=392.8ms——峰均比 2.48 下热点 rank（承担 62% 载荷）每步都让其余三个 rank 在集合通信里空等，40ms 级长尾遍布整个窗口。step 分解同样：未重叠通信 43%、计算仅 33%。</p>
+<div class=scroll><table><tr><th>off top 算子</th><th class=num>占比</th><th class=num>总时长(s)</th><th class=num>次数</th><th class=num>均值(us)</th><th class=num>max(ms)</th></tr>
+<tr><td>HcclLaunchAicpuKernel</td><td class=num>62.3%</td><td class=num>144.1</td><td class=num>8772</td><td class=num>16,427</td><td class=num>392.8</td></tr>
+<tr><td>GroupedMatmul</td><td class=num>10.8%</td><td class=num>25.1</td><td class=num>16512</td><td class=num>1,519</td><td class=num>14.3</td></tr>
+<tr><td>KvQuantSparseAttnSharedkv</td><td class=num>4.2%</td><td class=num>9.8</td><td class=num>1376</td><td class=num>7,091</td><td class=num>11.8</td></tr>
+<tr><td>SwigluGroupQuant</td><td class=num>3.6%</td><td class=num>8.4</td><td class=num>16512</td><td class=num>510</td><td class=num>2.8</td></tr>
+<tr><td>QuantBatchMatmulV3</td><td class=num>2.8%</td><td class=num>6.5</td><td class=num>22688</td><td class=num>287</td><td class=num>2.2</td></tr>
+<tr><td>MoeInitRoutingV3</td><td class=num>1.9%</td><td class=num>4.5</td><td class=num>2924</td><td class=num>1,542</td><td class=num>5.4</td></tr>
+<tr><td>TensorMove</td><td class=num>1.9%</td><td class=num>4.3</td><td class=num>5536</td><td class=num>776</td><td class=num>2.6</td></tr>
+<tr><td>HcPre</td><td class=num>1.6%</td><td class=num>3.8</td><td class=num>16512</td><td class=num>229</td><td class=num>1.4</td></tr>
+<tr><td>MoeFinalizeRoutingV2</td><td class=num>1.4%</td><td class=num>3.1</td><td class=num>2924</td><td class=num>1,073</td><td class=num>1.8</td></tr>
+<tr><td>MoeDistributeDispatchV3</td><td class=num>1.2%</td><td class=num>2.9</td><td class=num>5332</td><td class=num>535</td><td class=num>2.1</td></tr>
+</table></div>
+<h2>3. slot 的画像：通信等待消失，但 MooneP 集合点自身成为第一大块</h2>
+<div class=scroll><table><tr><th>slot top 算子</th><th class=num>占比</th><th class=num>总时长(s)</th><th class=num>次数</th><th class=num>均值(us)</th><th class=num>max(ms)</th></tr>
+<tr><td>planning_kernel</td><td class=num>14.2%</td><td class=num>16.0</td><td class=num>8600</td><td class=num>1,859</td><td class=num>43.1</td></tr>
+<tr><td>moonep_dispatch_kernel</td><td class=num>10.9%</td><td class=num>12.3</td><td class=num>8600</td><td class=num>1,435</td><td class=num>8.0</td></tr>
+<tr><td>GroupedMatmul</td><td class=num>10.7%</td><td class=num>12.0</td><td class=num>17200</td><td class=num>700</td><td class=num>5.5</td></tr>
+<tr><td>moonep_combine_kernel</td><td class=num>9.3%</td><td class=num>10.5</td><td class=num>8600</td><td class=num>1,217</td><td class=num>7.9</td></tr>
+<tr><td>KvQuantSparseAttnSharedkv</td><td class=num>8.6%</td><td class=num>9.7</td><td class=num>1376</td><td class=num>7,071</td><td class=num>11.6</td></tr>
+<tr><td>TensorMove</td><td class=num>7.5%</td><td class=num>8.4</td><td class=num>24112</td><td class=num>348</td><td class=num>1.5</td></tr>
+<tr><td>QuantBatchMatmulV3</td><td class=num>5.8%</td><td class=num>6.5</td><td class=num>23376</td><td class=num>279</td><td class=num>2.3</td></tr>
+<tr><td>prefetch_weight_kernel</td><td class=num>4.0%</td><td class=num>4.5</td><td class=num>34400</td><td class=num>130</td><td class=num>0.6</td></tr>
+<tr><td>DynamicMxQuant</td><td class=num>3.7%</td><td class=num>4.2</td><td class=num>24752</td><td class=num>169</td><td class=num>1.1</td></tr>
+<tr><td>HcPre</td><td class=num>3.4%</td><td class=num>3.8</td><td class=num>17200</td><td class=num>221</td><td class=num>2.3</td></tr>
+<tr><td>Cast</td><td class=num>3.0%</td><td class=num>3.4</td><td class=num>53080</td><td class=num>64</td><td class=num>2.2</td></tr>
+<tr><td>Mul</td><td class=num>2.8%</td><td class=num>3.2</td><td class=num>9200</td><td class=num>343</td><td class=num>1.8</td></tr>
+<tr><td>RmsNorm</td><td class=num>2.4%</td><td class=num>2.7</td><td class=num>21528</td><td class=num>126</td><td class=num>1.6</td></tr>
+<tr><td>MatMulV3</td><td class=num>2.3%</td><td class=num>2.6</td><td class=num>10848</td><td class=num>240</td><td class=num>1.5</td></tr>
+</table></div>
+<p>MooneP 通信三件套（planning + dispatch + combine）合计占 <b>34.4%</b> 的设备时间——这是 slot 相对 off 新增的主要成本块；专家 GEMM（GroupedMatmul）10.7% 与 off 的 10.8% 同量级，说明计算本体没变差；<b>未重叠通信为 0</b>（MooneP 走设备内核，不再出现 HCCL 式整段未重叠等待）。</p>
+<h2>4. 瓶颈定位：MooneP 内核的时长 85~99% 是『等对端』，不是传输</h2>
+<p>按单次时长 2ms 为界把每次调用分成「快速体」（纯计算/传输）与「等待尾」（跨 rank 汇合等待）：</p>
+<div class=scroll><table><tr><th>内核</th><th class=num>总时长(s)</th><th class=num>快速体占比</th><th class=num>快速体均值</th><th class=num>等待尾占比</th><th class=num>等待尾次数</th><th class=num>等待尾均值</th><th class=num>纯传输 p50</th></tr>
+<tr><td><code>planning_kernel</code></td><td class=num>16.0</td><td class=num>15%</td><td class=num>309us</td><td class=num><b class=warn>85%</b></td><td class=num>641</td><td class=num>21.1ms</td><td class=num>315us</td></tr>
+<tr><td><code>moonep_dispatch_kernel</code></td><td class=num>12.3</td><td class=num>1%</td><td class=num>9us</td><td class=num><b class=warn>99%</b></td><td class=num>1720</td><td class=num>7.1ms</td><td class=num>9us</td></tr>
+<tr><td><code>moonep_combine_kernel</code></td><td class=num>10.5</td><td class=num>14%</td><td class=num>197us</td><td class=num><b class=warn>86%</b></td><td class=num>1378</td><td class=num>6.6ms</td><td class=num>123us</td></tr>
+</table></div>
+<div class="fig"><svg viewBox="0 0 720 22" style="width:100%;height:auto;font-family:inherit"><rect x="0" y="6" width="14" height="14" rx="3" fill="#2a78d6"/><text x="20" y="18" style="font-size:12px;fill:#52514e">快速体（纯计算/传输）</text><rect x="176" y="6" width="14" height="14" rx="3" fill="#eb6834"/><text x="196" y="18" style="font-size:12px;fill:#52514e">等待尾（等对端汇合）</text><rect x="340" y="6" width="14" height="14" rx="3" fill="#1baf7a"/><text x="360" y="18" style="font-size:12px;fill:#52514e"></text></svg><svg viewBox="0 0 720 218" style="width:100%;height:auto;font-family:inherit"><text x="0" y="16" style="font-size:13px;font-weight:700;fill:#0b0b0b">图 2 · MooneP 三内核：快速体 vs 等待尾（占各自总时长）</text><text x="0" y="55" style="font-size:12px;fill:#52514e">planning</text><rect x="129" y="34" width="87.2" height="30" rx="4" fill="#2a78d6"/><text x="173" y="53.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">15%</text><rect x="218.24922355230126" y="34" width="488.8" height="30" rx="4" fill="#eb6834"/><text x="463" y="53.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">85%</text><rect x="709.0" y="34" width="0.0" height="30" rx="4" fill="#1baf7a"/><text x="718" y="53.5" text-anchor="end" style="font-size:11px;fill:#898781">100</text><text x="0" y="111" style="font-size:12px;fill:#52514e">moonep</text><rect x="129" y="90" width="1.0" height="30" rx="4" fill="#2a78d6"/><rect x="132.04650791355672" y="90" width="575.0" height="30" rx="4" fill="#eb6834"/><text x="420" y="109.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">99%</text><rect x="709.0" y="90" width="0.0" height="30" rx="4" fill="#1baf7a"/><text x="718" y="109.5" text-anchor="end" style="font-size:11px;fill:#898781">100</text><text x="0" y="167" style="font-size:12px;fill:#52514e">moonep</text><rect x="129" y="146" width="76.8" height="30" rx="4" fill="#2a78d6"/><text x="167" y="165.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">14%</text><rect x="207.7746147767961" y="146" width="499.2" height="30" rx="4" fill="#eb6834"/><text x="457" y="165.5" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">86%</text><rect x="709.0" y="146" width="0.0" height="30" rx="4" fill="#1baf7a"/><text x="718" y="165.5" text-anchor="end" style="font-size:11px;fill:#898781">100</text></svg></div>
+<div class=box><b>结论：</b>三件套合计 38.8s（4 rank），其中<b>≈34.8s（90%）是等对端</b>——折合每 rank 约 8.7s，占 41s 窗口的 <b>21%</b>。纯传输极快（dispatch 快速体均值仅 9μs/次）。等待的来源是各 rank 抵达集合点的时刻差：各 rank 的 attention/前序计算完成时间不同步，planning 的跨卡栅栏先到者空转。这正是与 off『等热点 rank』同源的现象，只是 slot 把它从 40ms 级长尾压到了 7~21ms 级、且发生在设备内核内（有机会用重叠藏掉）。</div>
+<h2>5. host 侧：slot 的小内核数量多 68%，InplaceCopy 胶水显眼</h2>
+<div class=scroll><table><tr><th>host API（4 rank 合计）</th><th class=num>off 时长(s)×次数</th><th class=num>slot 时长(s)×次数</th></tr>
+<tr><td><code>launch</code></td><td class=num>28.0s ×253,364</td><td class=num>32.0s ×396,028</td></tr>
+<tr><td><code>aclrtLaunchKernelWithHostArgs</code></td><td class=num>26.8s ×235,628</td><td class=num>30.9s ×395,836</td></tr>
+<tr><td><code>aclnnInplaceCopy</code></td><td class=num>2.1s ×40,588</td><td class=num>13.2s ×134,168</td></tr>
+<tr><td><code>aclrtSynchronizeEvent</code></td><td class=num>57.2s ×98</td><td class=num>47.9s ×98</td></tr>
+<tr><td><code>aclnnQuantMatmulV5</code></td><td class=num>5.6s ×22,688</td><td class=num>2.2s ×23,376</td></tr>
+<tr><td><code>aclnnSWhere</code></td><td class=num>0.0s ×0</td><td class=num>3.0s ×8,600</td></tr>
+<tr><td><code>aclnnRmsNorm</code></td><td class=num>5.1s ×20,832</td><td class=num>1.2s ×21,528</td></tr>
+</table></div>
+<p>slot 的内核 launch 次数（WithHostArgs 39.6 万次）比 off（23.6 万）<b>多 68%</b>——prefetch、量化胶水等小内核拉高了 host 发射密度；<code>aclnnInplaceCopy</code> 13.2s（13.4 万次）与设备侧 TensorMove 8.4s（2.4 万次）对应，是 slot 路径的搬运胶水。</p>
+<h2>6. 优化空间（按数据排序）</h2>
+<div class=scroll><table><tr><th>#</th><th>方向</th><th>数据依据</th><th>怎么做</th><th>状态</th></tr>
+<tr><td class=num>1</td><td><b>重叠掉集合点等待</b></td><td class=small>三件套等待尾 ≈35s/4rank，占窗口 21%；纯传输仅 μs 级</td><td class=small>让等待与计算并行：推广 after_planning_hook 的思路——planning 提前发射、dispatch/combine 与 attention/GEMM 交叉；已有实验开关 <code>MOONEP_PF_STREAM=2</code>（prefetch 发 side stream，须 RELAXED 已配）可先验证收益上限</td><td class=small>钩子/开关已有，需组合验证</td></tr>
+<tr><td class=num>2</td><td><b>planning 的 641 次 21ms 长尾</b></td><td class=small>planning 等待尾 85% 集中在 641 次、均值 21ms/次</td><td class=small>定位这些调用对应的步（疑似 DP 波次对齐/dummy 步先到者在栅栏空转）：让 dummy 步不进 MooneP 集合，或对纯等待场景评估 BARRIER_V4 push 模式</td><td class=small>需定位+开发</td></tr>
+<tr><td class=num>3</td><td><b>消 TensorMove/InplaceCopy</b></td><td class=small>设备 8.4s(2.4 万次)+host 13.2s；off 腿仅 4.3%/5536 次</td><td class=small>定位 slot 路径的冗余搬运（量化 payload 镜像、bf16 载体转换），可合并/去除——历史 TTFT 报告已把 TensorMove 列为『最可能白捡的一块』</td><td class=small>需定位+开发</td></tr>
+<tr><td class=num>4</td><td><b>压 Free 32%</b></td><td class=small>空闲 13.2s/rank；launch 密度比 off 高 68%</td><td class=small>减少小内核数（prefetch w13/w2 合并、Cast/Mul/MxQuant 融合）；MoonEP 硬约束 enforce-eager 下不能上图捕获，靠内核数下降</td><td class=small>需开发</td></tr>
+<tr><td class=num>5</td><td><b>胶水算子融合</b></td><td class=small>Cast 3.0% + Mul 2.8% + DynamicMxQuant 3.7%</td><td class=small>与量化/归一路径合并成复合算子</td><td class=small>需开发</td></tr>
+</table></div>
+<h2>7. 附录</h2><div class=box><ul class=small><li>数据：profile/{off,slot}/dp*_ascend_pt/ASCEND_PROFILER_OUTPUT/（torch_npu analyse 产物；本报告全部数字由 gen_profile_analysis.py 现算）</li><li>时间线下钻：各 rank 的 trace_view.json（MindStudio Insight / chrome://tracing）</li><li>干净端到端数据：../20261011_opt2_off_vs_slot/（同条件 3 轮无 profiler：TTFT 11.0s vs 9.6s）</li><li>口径：两腿窗口时长不同（64.8s vs 41.2s），全部对比基于占比/分布，不基于绝对值</li></ul></div>
+</div>

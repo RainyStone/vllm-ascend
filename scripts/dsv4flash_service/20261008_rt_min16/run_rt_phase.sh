@@ -16,11 +16,11 @@ export NO_PROXY="$no_proxy"
 PLAN="${1:?用法: run_rt_phase.sh <plan_file>}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE" || exit 1   # 中性 cwd（无裸 vllm/）：bench 等子进程继承，避免 namespace 解析坑
-SVC=$HERE/start_service_mode_dp4.sh
+SVC=$HERE/../service/start_service_mode_dp4.sh
 BENCH=$HERE/bench_rt_grid.sh
 GRID="${GRID:-/tmp/mc2_probe/grid}"
 PORT=8444
-HOLD_SH="${HOLD_SH:-$HERE/hold_cards_vllm.sh}"   # 占卡一律用 vllm 进程（用户要求）
+HOLD_SH="${HOLD_SH:-$HERE/../service/hold_cards_vllm.sh}"   # 占卡一律用 vllm 进程（用户要求）
 HOLD_CARDS="${HOLD_CARDS:-0 1 2 3}"              # 四张卡现在都归我们；被别人的进程占住时按需收窄
 READY_TIMEOUT="${READY_TIMEOUT:-1500}"   # 模型加载 + 池构建，25 分钟
 STOP_TIMEOUT=120

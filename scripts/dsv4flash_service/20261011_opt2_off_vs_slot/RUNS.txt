@@ -1,0 +1,35 @@
+# off vs slot(+优化组合) 每形状一台服务矩阵：2 mbt × 4 路由 × 2 形状 × 2 腿 = 32 台
+# 格式：<run_name> <mode: off|slot> <mbt> <sim_route 绝对路径> <shape>
+# off→slot 在每格内相邻开跑（机器漂移对两腿一致）；mbt8192 在前（与 rt 矩阵顺序一致）
+op2_mbt8192_uniform_off_L8k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L8k
+op2_mbt8192_uniform_slot_L8k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L8k
+op2_mbt8192_uniform_off_L16k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L16k
+op2_mbt8192_uniform_slot_L16k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L16k
+op2_mbt8192_4hot_off_L8k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L8k
+op2_mbt8192_4hot_slot_L8k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L8k
+op2_mbt8192_4hot_off_L16k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L16k
+op2_mbt8192_4hot_slot_L16k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L16k
+op2_mbt8192_3hot1r_off_L8k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L8k
+op2_mbt8192_3hot1r_slot_L8k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L8k
+op2_mbt8192_3hot1r_off_L16k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L16k
+op2_mbt8192_3hot1r_slot_L16k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L16k
+op2_mbt8192_4hot1r_off_L8k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L8k
+op2_mbt8192_4hot1r_slot_L8k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L8k
+op2_mbt8192_4hot1r_off_L16k  off   8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L16k
+op2_mbt8192_4hot1r_slot_L16k slot  8192  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L16k
+op2_mbt16384_uniform_off_L8k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L8k
+op2_mbt16384_uniform_slot_L8k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L8k
+op2_mbt16384_uniform_off_L16k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L16k
+op2_mbt16384_uniform_slot_L16k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_uniform.txt  L16k
+op2_mbt16384_4hot_off_L8k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L8k
+op2_mbt16384_4hot_slot_L8k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L8k
+op2_mbt16384_4hot_off_L16k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L16k
+op2_mbt16384_4hot_slot_L16k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot.txt  L16k
+op2_mbt16384_3hot1r_off_L8k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L8k
+op2_mbt16384_3hot1r_slot_L8k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L8k
+op2_mbt16384_3hot1r_off_L16k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L16k
+op2_mbt16384_3hot1r_slot_L16k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt  L16k
+op2_mbt16384_4hot1r_off_L8k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L8k
+op2_mbt16384_4hot1r_slot_L8k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L8k
+op2_mbt16384_4hot1r_off_L16k  off   16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L16k
+op2_mbt16384_4hot1r_slot_L16k slot  16384  /home/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_4hot_1rank.txt  L16k
