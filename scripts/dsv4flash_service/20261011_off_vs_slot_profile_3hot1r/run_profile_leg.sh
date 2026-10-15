@@ -20,6 +20,7 @@ HOLD_SH=$HERE/../service/hold_cards_vllm.sh
 GRID=/tmp/mc2_probe/profile_3hot1r
 PORT=8444
 SEED=21001          # 全新 seed（区别于 op2 的 12001-12003）；两腿相同 → 输入流量一致
+BENCH_LEN=${BENCH_LEN:-16384}   # bench 输入长度（默认 16384；8k 实验用 BENCH_LEN=8192）
 READY_TIMEOUT=1500
 MODEL=/mnt/data/models/DeepSeek-V4-Flash
 mkdir -p "$GRID"
@@ -48,7 +49,7 @@ rm -rf "$GRID/$MODE" "$GRID/$MODE.log"
 setsid env "${rt_prefix[@]}" \
   SVC_CARDS=$(echo $CARDS | tr ' ' ',') \
   PROFILE=1 OUT_DIR=$GRID/$MODE LOG_FILE=$GRID/$MODE.log \
-  BATCHED_TOKENS=16384 MOONEP_MIN_DISPATCH_TOKENS=16 \
+  BATCHED_TOKENS=${BATCHED_TOKENS:-16384} MOONEP_MIN_DISPATCH_TOKENS=16 \
   SIM_ROUTE="@$HERE/../sim/sim_route_3hot_1rank.txt" \
   bash "$SVC" "$svc_mode" > "$GRID/$MODE.boot.out" 2>&1 &
 SVC_PID=$!
@@ -80,11 +81,11 @@ PYTHONPATH=$HERE/../../..:$PYTHONPATH vllm bench serve \
   --backend openai --endpoint /v1/completions \
   --base-url http://127.0.0.1:$PORT --model $MODEL --served-model-name test_auto \
   --tokenizer $MODEL --dataset-name random --num-prompts 32 --max-concurrency 16 \
-  --random-input-len 16384 --random-output-len 1 --random-range-ratio 0.0 \
+  --random-input-len $BENCH_LEN --random-output-len 1 --random-range-ratio 0.0 \
   --request-rate inf --ignore-eos --seed $SEED \
   --percentile-metrics ttft,e2el --metric-percentiles 50,90,99 \
-  --save-result --result-dir "$HERE/data" --result-filename "${MODE}_L16k_profiled${RESULT_SUFFIX:-}.json" 2>&1 | tail -4
-python3 - "$HERE/data/${MODE}_L16k_profiled.json" <<'PY' || exit 7
+  --save-result --result-dir "$HERE/data" --result-filename "${MODE}_L${BENCH_LEN}_profiled${RESULT_SUFFIX:-}.json" 2>&1 | tail -4
+python3 - "$HERE/data/${MODE}_L${BENCH_LEN}_profiled${RESULT_SUFFIX:-}.json" <<'PY' || exit 7
 import json, sys
 d = json.load(open(sys.argv[1]))
 if d.get("completed") != 32 or d.get("failed", 0):
@@ -115,7 +116,7 @@ sleep 20
 echo "[svc] $MODE 已停"
 
 # ---- 归档 ----
-cp "$GRID/$MODE.log" "$HERE/data/" 2>/dev/null
+cp "$GRID/$MODE.log" "$HERE/data/${MODE}${RESULT_SUFFIX:-}.log" 2>/dev/null
 mkdir -p "$HERE/profile/${MODE}${RESULT_SUFFIX:-}"
 cp -r "$PROF_DIR"/. "$HERE/profile/${MODE}${RESULT_SUFFIX:-}"/ 2>/dev/null
-echo "[done] $MODE：bench=$HERE/data/${MODE}_L16k_profiled.json trace=$HERE/profile/$MODE/（$(du -sh $HERE/profile/$MODE 2>/dev/null | cut -f1)）"
+echo "[done] $MODE：bench=$HERE/data/${MODE}_L${BENCH_LEN}_profiled${RESULT_SUFFIX:-}.json trace=$HERE/profile/$MODE/（$(du -sh $HERE/profile/$MODE 2>/dev/null | cut -f1)）"

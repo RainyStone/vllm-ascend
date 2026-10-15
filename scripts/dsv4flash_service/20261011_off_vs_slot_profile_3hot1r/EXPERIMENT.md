@@ -142,3 +142,24 @@ rank0）：
 - 与"单独 8k"的判别：op2 中单独 8k 每步 593ms，×2=1186≈基准 1194（线性）——单独 8k 无此惩罚；
   惩罚专属"chunk1/chunk2 交替 + 相位错位"的切分场景
 - 修正：前表"planning 489/309ms/步"混入 dummy 步；窗口内真值 426/200ms/步
+
+## 追加实验：8k/8k（S=8192 · 输入 8192）off vs slot · 3hot1r（2026-10-16）
+
+**目的**：补齐 2×2 拼图——这是 slot 在 s≈2.5 下**获益**的场景（op2 干净数据 −4.5%），
+与已采集的 16k 两腿（基准/切分）构成完整对照。方法同前：run_profile_leg.sh 参数化后
+（BENCH_LEN/BATCHED_TOKENS/RESULT_SUFFIX 环境变量），卡组 4-7，单轮同窗 torch profiler，
+seed 21001，SIM_ROUTE=3hot1r(s=2.48)，SIM 下两腿输入流量一致。
+
+**bench（profiler 开启下，不作统计口径）**：off 32/32 mean_ttft 5,665ms；slot 32/32
+mean_ttft 5,156ms（**slot −9.0%**；op2 干净数据为 −4.5%，方向一致，profiler 对 off
+拖累更大的现象与 16k 实验一致）。
+
+**profiling 摘要（4 rank 合计）**：off：HcclLaunchAicpuKernel 30.1s（窗口 28.8s/rank，
+倾斜下 HCCL 等待 45% 设备时间）、Computing 41%/未重叠通信 12%/Free 47%。slot：
+planning 8.8s + dispatch 6.3s + combine 5.8s（MooneP 三件套合计 20.9s）、Computing 55%/
+未重叠通信 0%/Free 45%；attention 两腿相等（4.6s）。**即使 8k 步为同构步，off 的
+HCCL 等待（等热点 rank）仍大于 slot 的 MooneP 集合开销——这就是 8k/8k 高倾斜下
+slot 获益的 profiling 表达。**
+
+**数据**：profile/{off,slot}_L8k_mbt8192/（各 4 rank，ASCEND_PROFILER_OUTPUT 已生成，
+trace_view.json 已删）；bench json 与服务日志在 data/（带 _L8k_mbt8192 后缀）。
