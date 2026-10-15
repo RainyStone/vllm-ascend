@@ -126,3 +126,19 @@ Ascend 驱动层错误（dms_module check_and_release_event_procs "Get container
 **数据位置**：profile/baseline_mbt16384/ 与 profile/chunked_mbt8192/（各 4 rank；已删 550M×8 的
 trace_view.json 瘦身至 3.8G，CSV 统计齐全；bench 均值在两份 leg 日志，基准腿 json 被切分腿同名
 覆盖是 runner 归档 bug，已修复——RESULT_SUFFIX 参数化）
+
+**根因细化（2026-10-16 补，bench 窗口内精确统计，剔除 dummy 步污染）**
+
+以"大 attention 内核只出现在 prefill 步"为时间锚，只统计 bench 窗口（基准 22.0s / 切分 30.1s，
+rank0）：
+
+- planning 快速体（纯计算）切分腿仅 23ms/988 次——计算量可忽略，等待是全部
+- 基准：每步 planning 等待恒定 ~200ms（54,198,199,…）；attention 每步恒定 ~300ms——
+  各 rank 步形状一致，只剩小抖动
+- 切分：每步等待 0~882ms 乱跳（均值 425ms）；attention 每步 55↔258ms 交替（chunk1 读 8k KV、
+  chunk2 读 16k KV，差 2~4×）——步内容不均匀 + 各 rank 队列相位错位（先完成 prompt 的 rank 混入
+  decode/对齐步）→ 同一栅栏处 rank 间"便宜步 vs 贵步"错位 → 等待=整段成本差
+- 每 16k token 的 planning 等待：1456ms（基准）→ 6800ms（切分）＝步数×2 × 单次等待×2.3
+- 与"单独 8k"的判别：op2 中单独 8k 每步 593ms，×2=1186≈基准 1194（线性）——单独 8k 无此惩罚；
+  惩罚专属"chunk1/chunk2 交替 + 相位错位"的切分场景
+- 修正：前表"planning 489/309ms/步"混入 dummy 步；窗口内真值 426/200ms/步
