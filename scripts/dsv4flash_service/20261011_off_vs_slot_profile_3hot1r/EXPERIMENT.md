@@ -104,3 +104,25 @@ Ascend 驱动层错误（dms_module check_and_release_event_procs "Get container
 **待人工决定**：a) 等驱动错误自愈后重试；b) 对卡 0-3 做 npu-smi 复位（需确认，影响这些卡
 上所有任务）；c) 容器/主机重启；d) 错峰重试。实验脚本就绪（run_profile_leg_chunked.sh），
 跑通后按"动机"一节的方法做逐内核对比即可。
+
+**结论（2026-10-15 18:04，卡组 4-7，两腿同窗 profiling 对比定案）**
+
+| 内核（4rank 合计，切分腿×2步归一后与基准比） | 基准总 | 切分总 | 切分:基准 |
+|---|---:|---:|---:|
+| **planning_kernel** | 9.9s | **31.3s** | **3.17×** |
+| KvQuantSparseAttn（attention） | 9.7s | 9.7s | **1.00×** |
+| moonep_dispatch / combine | 11.9 / 10.9s | 15.8 / 11.6s | 1.33× / 1.07× |
+| GroupedMatmul / TensorMove / 胶水 | — | — | 1.1~1.4× |
+
+- TTFT：基准 10019ms（8 步×16384）vs 切分 13219ms（16 步×8192）→ 每 token +32%（与 op2 完全一致）
+- **超额全部落在 planning 内核的跨卡栅栏等待**：等待尾 469 次×16.3ms（基准）→ 1852 次×15.6ms（切分），
+  单次等待时长不变、次数×4；planning 均值 1277μs→3369μs
+- **排除"attention 变贵"假设**（1.00×：切分后 attention 总量不变——8k+8k 与 16k 的 KV 读总量相同）
+- 机制：切分使调度步×2 → planning 的"每步一次跨卡汇合"付×2；且 chunk 边界使各 rank 步进不齐，
+  先到者空转的层数翻倍（等待次数×4）→ 每步固定型等待成本翻倍，而收益侧（消除倾斜等待）不随步数增长
+- 优化指向：planning 栅栏等待与计算重叠（profiling 报告优化方向 #1 的具体落点）；同一 prompt 的两个
+  chunk 在路由分布相同时 plan 可复用（SIM_ROUTE 下两 chunk 的 plan 完全相同），省一半 planning 调用
+
+**数据位置**：profile/baseline_mbt16384/ 与 profile/chunked_mbt8192/（各 4 rank；已删 550M×8 的
+trace_view.json 瘦身至 3.8G，CSV 统计齐全；bench 均值在两份 leg 日志，基准腿 json 被切分腿同名
+覆盖是 runner 归档 bug，已修复——RESULT_SUFFIX 参数化）

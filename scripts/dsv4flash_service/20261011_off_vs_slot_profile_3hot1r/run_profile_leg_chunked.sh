@@ -30,14 +30,15 @@ rt_prefix=()
 [ "$MODE" = slot ] && rt_prefix=(ASCEND_MOONEP_PREFETCH_RELAXED=1 ASCEND_MOONEP_NO_RECONCILE=1 ASCEND_MOONEP_SKIP_DUP=1)
 
 # ---- 停占卡、等卡干净 ----
+CARDS="${CARDS:-0 1 2 3}"   # 空格分隔的卡号，可前缀覆盖（如 CARDS="4 5 6 7"）
 bash "$HOLD_SH" stop || true
 for i in $(seq 1 30); do
   ok=1
-  for c in 0 1 2 3; do
+  for c in $CARDS; do
     v=$(npu-smi info 2>/dev/null | grep -A1 "^| $c " | grep 0000 | grep -oE "[0-9]+ */ 131072" | head -1 | grep -oE "^[0-9]+")
     [ -z "$v" ] || [ "$v" -ge 20000 ] && { ok=0; break; }
   done
-  [ "$ok" = 1 ] && { echo "[hbm] 卡 0-3 已回落基线"; break; }
+  [ "$ok" = 1 ] && { echo "[hbm] 卡 $CARDS 已回落基线"; break; }
   sleep 10
 done
 curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && { echo "[abort] 端口被占"; exit 4; }
@@ -45,6 +46,7 @@ curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && { echo "[abort] �
 # ---- 起服（PROFILE=1 → 开 /start_profile /stop_profile，trace 落 $OUT_DIR/profiling）----
 rm -rf "$GRID/$MODE" "$GRID/$MODE.log"
 setsid env "${rt_prefix[@]}" \
+  SVC_CARDS=$(echo $CARDS | tr ' ' ',') \
   PROFILE=1 OUT_DIR=$GRID/${MODE}_chunked LOG_FILE=$GRID/${MODE}_chunked.log \
   BATCHED_TOKENS=8192 MOONEP_MIN_DISPATCH_TOKENS=16 \
   SIM_ROUTE="@$HERE/../sim/sim_route_3hot_1rank.txt" \
@@ -81,7 +83,7 @@ PYTHONPATH=$HERE/../../..:$PYTHONPATH vllm bench serve \
   --random-input-len 16384 --random-output-len 1 --random-range-ratio 0.0 \
   --request-rate inf --ignore-eos --seed $SEED \
   --percentile-metrics ttft,e2el --metric-percentiles 50,90,99 \
-  --save-result --result-dir "$HERE/data" --result-filename "${MODE}_L16k_profiled.json" 2>&1 | tail -4
+  --save-result --result-dir "$HERE/data" --result-filename "${MODE}_L16k_profiled${RESULT_SUFFIX:-}.json" 2>&1 | tail -4
 python3 - "$HERE/data/${MODE}_L16k_profiled.json" <<'PY' || exit 7
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -114,6 +116,6 @@ echo "[svc] $MODE 已停"
 
 # ---- 归档 ----
 cp "$GRID/$MODE.log" "$HERE/data/" 2>/dev/null
-mkdir -p "$HERE/profile/$MODE"
-cp -r "$PROF_DIR"/. "$HERE/profile/$MODE/" 2>/dev/null
+mkdir -p "$HERE/profile/${MODE}${RESULT_SUFFIX:-}"
+cp -r "$PROF_DIR"/. "$HERE/profile/${MODE}${RESULT_SUFFIX:-}"/ 2>/dev/null
 echo "[done] $MODE：bench=$HERE/data/${MODE}_L16k_profiled.json trace=$HERE/profile/$MODE/（$(du -sh $HERE/profile/$MODE 2>/dev/null | cut -f1)）"
