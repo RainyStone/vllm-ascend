@@ -1,0 +1,110 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MoonEP tokenizer patch 使用说明</title><style>
+:root{--ink:#172b43;--muted:#53657b;--line:#dbe4ed;--paper:#fff;--bg:#f2f5f9;--navy:#112b49;--blue:#1d5dad;--teal:#086959;--red:#a32d36;--amber:#815611}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.8 "Microsoft YaHei","Noto Sans CJK SC","Segoe UI",sans-serif}
+a{color:var(--blue);text-decoration-thickness:1px;text-underline-offset:3px}a:hover{color:#123966}p{margin:0 0 17px}strong{font-weight:700}
+.hero{background:var(--navy);color:white;padding:54px max(28px,calc((100vw - 1220px)/2)) 40px}.eyebrow{font-size:13px;letter-spacing:2px;color:#9dc9f2}.hero h1{font-size:38px;line-height:1.35;margin:15px 0 18px;max-width:1050px}.hero p{color:#d9e7f3;max-width:1050px;font-size:18px}.meta{font-size:13px;color:#b6cbdf}
+.layout{max-width:1280px;display:grid;grid-template-columns:206px minmax(0,1fr);gap:28px;margin:28px auto;padding:0 24px 70px}
+nav{position:sticky;top:24px;align-self:start;font-size:13px;line-height:1.5}nav strong{display:block;margin:8px 10px 12px}nav a{display:block;padding:7px 10px;text-decoration:none;border-left:2px solid transparent;color:var(--muted)}nav a:hover{border-color:var(--blue);background:#e7eef6}nav .download{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+main{min-width:0}section{background:var(--paper);padding:30px 32px;margin-bottom:22px;border:1px solid var(--line);border-radius:12px;box-shadow:0 3px 14px #16354c04}
+h2{font-size:24px;line-height:1.5;margin:0 0 20px;color:var(--navy)}h2 .num{font-size:13px;display:inline-block;vertical-align:3px;margin-right:12px;color:var(--blue)}h3{font-size:18px;margin:26px 0 12px}h4{font-size:16px;margin:20px 0 10px}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.kpi{padding:19px;background:#edf6f5;border:1px solid #c8e4df;border-radius:9px}.kpi b{font-size:29px;color:var(--teal);display:block;line-height:1.4}.kpi span{font-size:13px;color:var(--muted)}
+.callout{border-left:4px solid var(--blue);background:#eef4fc;padding:16px 19px;border-radius:0 7px 7px 0;margin:20px 0}.callout.warn{border-color:#c18920;background:#fff8e8}.callout.good{border-color:var(--teal);background:#eff8f5}.callout p:last-child{margin-bottom:0}
+.small,.caption{font-size:13px;color:var(--muted)}.caption{margin:8px 0 18px}.tag{display:inline-block;border-radius:4px;background:#e7f2ec;color:var(--teal);font-size:12px;padding:1px 7px;margin-right:8px}.tag.pending{background:#fff0d2;color:var(--amber)}
+.table-wrap{max-width:100%;overflow-x:auto;margin:16px 0}table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.65;font-variant-numeric:tabular-nums}th{background:#eef2f7;text-align:left;font-weight:700;color:#2c4562}td,th{padding:10px 11px;border-bottom:1px solid var(--line);vertical-align:top}tbody tr:hover{background:#fafcff}table th:first-child{border-radius:5px 0 0 0}td code{font-size:12px}.gain{color:var(--teal);font-weight:700}.loss{color:var(--red);font-weight:700}.nowrap{white-space:nowrap}
+code,pre{font-family:Consolas,"Cascadia Code",monospace;font-size:.88em}code{background:#edf1f6;padding:2px 4px;border-radius:4px;overflow-wrap:anywhere}pre{background:#132a43;color:#e2edf6;padding:20px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}pre code{background:none;padding:0;color:inherit}
+ul,ol{padding-left:23px;margin:10px 0 20px}li{padding-left:2px;margin:7px 0}.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.flow>div{background:#f4f7fb;border:1px solid var(--line);padding:14px;border-radius:7px;font-size:14px}.flow b{display:block;color:var(--blue);margin-bottom:6px}.flow small{color:var(--muted);font-size:12px}
+.phases{table-layout:fixed;min-width:600px;text-align:center}.phases th,.phases td{text-align:center;padding:8px 4px}.phases th:first-child{width:104px}.phase{display:block;padding:6px;border-radius:4px;font-weight:700}.real{background:#dff1ea;color:#0c6556}.dummy{background:#edf0f5;color:#667384}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px}.equation{padding:17px;text-align:center;border:1px solid var(--line);border-radius:7px;font-weight:700;background:#f8fafc}
+details{margin:20px 0;border:1px solid var(--line);border-radius:7px;padding:12px 15px}summary{cursor:pointer;font-weight:700;color:var(--blue)}footer{font-size:12px;color:var(--muted);padding:10px 8px;overflow-wrap:anywhere}
+@media(max-width:1050px){.layout{grid-template-columns:1fr;max-width:980px}nav{position:static;display:flex;flex-wrap:wrap;gap:4px}nav strong{width:100%}nav a{border:1px solid var(--line);border-radius:5px;padding:6px 9px}.download{display:none}.hero{padding:36px 24px}.hero h1{font-size:30px}}
+@media(max-width:640px){body{font-size:15px}.layout{padding:0 12px;gap:15px;margin:16px auto}section{padding:22px 17px}.hero h1{font-size:25px}.hero p{font-size:16px}.kpis,.flow,.two-col{grid-template-columns:1fr}.kpi b{font-size:25px}h2{font-size:21px}h3{font-size:17px}td,th{padding:8px}table{min-width:600px}nav{font-size:12px}}
+@media print{body{background:white;font-size:10.5pt;line-height:1.65}.hero{padding:18px 0;background:white;color:#111}.hero h1{font-size:24pt}.hero p,.meta,.eyebrow{color:#333}.layout{display:block;max-width:none;margin:0;padding:0}nav{display:none}section{box-shadow:none;border:0;border-radius:0;padding:16px 0;margin:0;break-inside:auto}h2,h3{break-after:avoid}h2{font-size:16pt}table{font-size:9pt;min-width:0!important}thead{display:table-header-group}tr,.callout,.kpi,.flow>div{break-inside:avoid}.table-wrap{overflow:visible}.kpis{grid-template-columns:repeat(3,1fr)}pre{background:#f2f4f6;color:#111}details{display:block}a{color:#183d64}.hero,.kpi,.callout,th,.real,.dummy{-webkit-print-color-adjust:exact;print-color-adjust:exact}@page{size:A4;margin:15mm}}
+
+.diagram{margin:24px 0 28px;padding:16px;border:1px solid #dce5ef;border-radius:9px;background:white}
+.diagram figcaption{display:flex;justify-content:space-between;gap:14px;align-items:baseline;margin-bottom:14px}
+.diagram figcaption strong{font-size:17px;color:#17334f}.diagram figcaption a{font-size:12px;white-space:nowrap}
+.diagram-scroll{overflow-x:auto;max-width:100%;border-radius:5px}.diagram svg{display:block;width:100%;height:auto;min-width:780px}
+.diagram .caption{margin:12px 0 0}.patch-guide h4{font-size:17px;margin-top:28px}.patch-guide{border-top:1px solid var(--line);margin-top:25px}
+@media(max-width:640px){.diagram{padding:10px}.diagram figcaption{display:block}.diagram figcaption a{display:inline-block;margin-top:5px}.diagram svg{min-width:780px}}
+@media print{.diagram{break-inside:avoid;padding:5px;border:0}.diagram-scroll{overflow:visible}.diagram svg{min-width:0;width:100%}.diagram figcaption a{display:none}.patch-guide pre{break-inside:auto}}
+</style></head><body><main style="max-width:1000px;margin:24px auto;padding:24px;background:white"><h1>MoonEP tokenizer patch 使用说明</h1><p><a href="../report/moonep_slot_vs_off_root_cause.html#solution">返回根因分析报告</a></p>
+<div class="patch-guide" id="patch-usage">
+<h3>补丁怎么用：检查 → 应用 → 启用 → 验证 → 回退</h3>
+<p>补丁和使用说明集中在报告根目录的直接子目录 <code>patch/</code>：<a href="../patch/tokenizer_window.patch">tokenizer_window.patch</a> · <a href="../patch/README.html">独立使用说明（HTML）</a> · <a href="../patch/README.txt">使用说明（纯文本）</a>。</p>
+<div class="callout good"><p><strong>当前容器已经有补丁。</strong>2026-10-19 只读复查确认：vLLM HEAD 为 <code>0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665</code>，两处源码修改和新增测试均存在，<code>git apply --reverse --check</code> 通过。此环境直接从第 3 步配置和重启；下面完整流程供其它同版本环境复用。</p></div>
+<p>这是 <strong>vLLM 仓库</strong>补丁，应用目标为集成工程的 <code>vllm/</code>，不是保存报告的 <code>vllm-ascend/</code>。补丁以本报告记录的 commit 为基准；其它版本必须先检查，不能仅凭参数同名假定兼容。执行前保存自己在这三个目标文件上的其它改动。</p>
+<h4>1. 定位仓库和补丁，检查当前状态</h4>
+<pre><code># 在目标容器内执行；以下路径对应本报告的实际保存位置。
+WORKSPACE=/home/x00893896/vllm_ascend_moonep_integration
+VLLM_REPO=&quot;$WORKSPACE/vllm&quot;
+PATCH_FILE=&quot;$WORKSPACE/vllm-ascend/scripts/dsv4flash_service/20261019_moonep_slot_root_cause/patch/tokenizer_window.patch&quot;
+
+git -C &quot;$VLLM_REPO&quot; rev-parse HEAD
+git -C &quot;$VLLM_REPO&quot; status --short
+git -C &quot;$VLLM_REPO&quot; apply --stat &quot;$PATCH_FILE&quot;
+
+# 只检查，不改文件：
+if git -C &quot;$VLLM_REPO&quot; apply --reverse --check &quot;$PATCH_FILE&quot; &gt;/dev/null 2&gt;&amp;1; then
+    echo &quot;补丁已存在：跳过应用，直接进行环境配置。&quot;
+elif git -C &quot;$VLLM_REPO&quot; apply --check &quot;$PATCH_FILE&quot;; then
+    echo &quot;补丁尚未应用且检查通过：可以执行下一步应用命令。&quot;
+else
+    echo &quot;版本或工作区内容不匹配：先人工处理差异，不要强制应用。&quot;
+fi</code></pre>
+<h4>2. 只对尚未应用的工作区打补丁</h4>
+<pre><code># 仅在上一段显示“尚未应用且检查通过”时执行：
+git -C &quot;$VLLM_REPO&quot; apply --check &quot;$PATCH_FILE&quot; &amp;&amp;
+git -C &quot;$VLLM_REPO&quot; apply &quot;$PATCH_FILE&quot;
+
+# 应用后核对；反向检查成功说明整份补丁的修改已在工作区。
+git -C &quot;$VLLM_REPO&quot; apply --reverse --check &quot;$PATCH_FILE&quot;
+git -C &quot;$VLLM_REPO&quot; diff --check
+git -C &quot;$VLLM_REPO&quot; diff --stat
+git -C &quot;$VLLM_REPO&quot; status --short -- \
+  vllm/envs.py vllm/utils/async_utils.py tests/utils_/test_async_tokenizer_window.py</code></pre>
+<p class="small">新增测试是未跟踪文件，可能不会出现在普通 <code>git diff --stat</code> 中，因此同时检查 <code>git status</code>。不使用 <code>git reset --hard</code> 或覆盖整个源码文件来处理冲突。</p>
+<h4>3. 设置 20ms，并确认服务会导入这份源码</h4>
+<pre><code># 本次实验实际使用的 Python；其它部署改成启动 API 服务的那个解释器。
+SERVICE_PYTHON=&quot;$WORKSPACE/scripts/20261017_scheduler_alignment/.venv/bin/python&quot;
+source /usr/local/Ascend/cann/set_env.sh
+export PYTHONPATH=&quot;$VLLM_REPO:$WORKSPACE/vllm-ascend:${PYTHONPATH:-}&quot;
+export VLLM_TOKENIZER_BATCH_WAIT_MS=20
+
+# 从中性目录检查实际导入位置，避免同名目录影响解析。
+cd /tmp
+&quot;$SERVICE_PYTHON&quot; - &lt;&lt;&#x27;PY&#x27;
+import inspect
+from vllm import envs
+from vllm.utils import async_utils
+
+print(&quot;loaded:&quot;, async_utils.__file__)
+print(&quot;window_ms:&quot;, envs.VLLM_TOKENIZER_BATCH_WAIT_MS)
+assert envs.VLLM_TOKENIZER_BATCH_WAIT_MS == 20.0
+source = inspect.getsource(async_utils.AsyncMicrobatchTokenizer.__init__)
+assert &quot;VLLM_TOKENIZER_BATCH_WAIT_MS&quot; in source
+print(&quot;patched tokenizer configuration: OK&quot;)
+PY
+
+# 然后使用原服务启动命令重启 API，让新进程继承以上环境。</code></pre>
+<p>预期 <code>loaded</code> 指向 <code>.../vllm/vllm/utils/async_utils.py</code>，<code>window_ms</code> 为 <code>20.0</code>。本次通过 PYTHONPATH 使用源码，Python 补丁无需重新编译 NPU 算子或重装 Python。若服务采用其它虚拟环境或安装包，应以其实际导入路径为准。</p>
+<div class="callout"><p><strong>设置环境变量之后必须重启 API 服务。</strong>上面检查的是新 Python 进程，不能据此认定已经运行的 API 已更新；在另一个 shell 中 export 不会改变旧进程。把变量设置在真正启动 API 的脚本 / 进程环境里，保持其余 DP、KV、chunk 和 slot 参数一致。若调用方显式传入 <code>batch_wait_timeout_s</code>，该显式值仍优先。</p></div>
+<h4>4. 验证补丁行为，再验证调度相位</h4>
+<pre><code># 使用上一步已设置的 SERVICE_PYTHON、PYTHONPATH、CANN 环境：
+cd &quot;$WORKSPACE/scripts/20261017_scheduler_alignment&quot;
+ALIGNMENT_DISABLE_EXTRA=1 &quot;$SERVICE_PYTHON&quot; -m pytest \
+  --confcutdir=&quot;$VLLM_REPO/tests/utils_&quot; \
+  &quot;$VLLM_REPO/tests/utils_/test_async_tokenizer_window.py&quot; \
+  &quot;$VLLM_REPO/tests/utils_/test_async_utils.py&quot; -q</code></pre>
+<p>归档环境已有相关测试依赖，原验证结果为 <strong>8 passed</strong>。性能回归还需使用正文的 n32/c16、L16K/B8K 配置，检查请求 ID、每轮 token 与 dummy：总真实 token=524288，首轮偏移 [0,0,0,0]，每 rank 8 请求，16 全真实 + 7 全 dummy。单测通过本身不等于任意业务流量一定对齐。</p>
+<h4>5. 回退窗口，或移除补丁</h4>
+<pre><code># 优先做配置回退：恢复默认行为，保留补丁的配置能力。
+export VLLM_TOKENIZER_BATCH_WAIT_MS=2
+# 或：unset VLLM_TOKENIZER_BATCH_WAIT_MS
+# 再使用相同服务启动流程重启 API。
+
+# 如确实要移除源代码补丁，先确认没有后续重叠修改，再执行：
+git -C &quot;$VLLM_REPO&quot; apply --reverse --check &quot;$PATCH_FILE&quot; &amp;&amp;
+git -C &quot;$VLLM_REPO&quot; apply --reverse &quot;$PATCH_FILE&quot;</code></pre>
+<p>反向检查失败时，应人工处理重叠修改；不要强制覆盖其它改动。移除代码后同样需要重启 API。仅把窗口回退为 2ms 就能恢复原默认聚合行为，通常足够进行 A/B 对照。</p>
+<p class="small">应用、反向检查和回退已在原始基准源码的隔离临时目录中验证通过，并确认恢复原文件；没有对当前服务源码再次打补丁。验证记录：<a href="../data/patch_usage_validation.json">patch_usage_validation.json</a>。</p>
+</div></main></body></html>

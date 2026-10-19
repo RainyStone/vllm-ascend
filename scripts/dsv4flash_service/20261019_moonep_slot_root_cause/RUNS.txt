@@ -1,0 +1,7 @@
+REPORT_ONLY 2026-10-19 no_new_service no_gpu_reservation
+SOURCE historical 20261011_opt2_off_vs_slot c2_c3
+SOURCE scheduler scripts/20261017_scheduler_alignment/results
+SOURCE profile guarded_validation_20261017
+SOURCE final alignment_fix_validation_20261017 39_groups 1104_requests
+PRIMARY off_arrival_20261017_a wait20_2 wait20_3 wait20_4
+PRIMARY slot_arrival_20261017_b env20_2 env20_3 env20_4
