@@ -107,6 +107,7 @@ class MoonEPCombineMetadata:
     state: object | None = None  # _LayerWeightState when slot mode active
     group_list: torch.Tensor | None = None  # [epn+B] int64 counts (slot mode)
     tail_masked: bool = False  # dispatch used the no-sync full-shard path
+    source_topk_weights_sk: torch.Tensor | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +814,8 @@ class _MoonEPRuntime:
                 "hidden": torch.zeros(capacity, H, dtype=torch.bfloat16, device=dev),
                 "route": torch.zeros(capacity, K, dtype=torch.float32, device=dev),
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
+                "combine_route": torch.zeros(
+                    capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
                 "tail": {"T": -1, "capacity": None, "pad_expert": None},
             }
         if _ENV_SLOT_MODE:
@@ -1198,6 +1201,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         hidden_c[:T].copy_(hidden_states)
         route_c[:T].copy_(topk_weights)
         topk_c[:T].copy_(topk_ids)
+        source_topk_weights_sk = None
+        if _ENV_SLOT_MODE:
+            source_topk_weights_sk = pads["combine_route"][:capacity]
+            source_topk_weights_sk[:T, :K].copy_(topk_weights)
         _tp0 = time.perf_counter()
         # histc instead of bincount: fixed-size output (no dynamic sizing round
         # trip) -> ~40us vs ~100us of latency per layer. Counts here are
@@ -1432,6 +1439,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 state=state,
                 group_list=local_counts,
                 tail_masked=tail_masked,
+                source_topk_weights_sk=source_topk_weights_sk,
             ),
         )
 
@@ -1440,10 +1448,31 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         _t0c = time.perf_counter()
         assert isinstance(combine_metadata, MoonEPCombineMetadata)
         T = combine_metadata.num_tokens
-        # Apply the per-row route weights before the unweighted K-sum combine
-        # (mirrors MindSpeed shmem_ep_forward; the Ascend combine kernel does
-        # not apply weights itself). The MLP output rows map 1:1 onto the
-        # dispatched shard rows (grouped matmul preserves row order).
+        # Slot applies source-rank FP32 route weights inside combine, retaining
+        # FP32 products until the final BF16 output cast. Grouped matmul keeps
+        # the MLP output rows in the dispatched shard order.
+        if combine_metadata.source_topk_weights_sk is not None:
+            buffer = combine_metadata.buffer
+            nvs = int(buffer._require_ctx()["NvS"])
+            if combine_metadata.tail_masked:
+                rows_total = combine_metadata.group_list.sum().to(torch.int64)
+                mask = (_combine_row_ids(nvs, hidden_states.device) < rows_total).unsqueeze(-1)
+                # Keep the existing tail safety without materializing an FP32 shard.
+                combine_input = torch.where(mask, hidden_states,
+                    _zero_bf16_scalar(hidden_states.device))
+            else:
+                combine_input = torch.zeros(nvs, hidden_states.shape[-1],
+                    dtype=torch.bfloat16, device=hidden_states.device)
+                combine_input[:hidden_states.shape[0]].copy_(hidden_states)
+            self._tstats("comb_pre", _t0c)
+            _t1c = time.perf_counter()
+            out, _, _ = buffer.combine_weighted(
+                plan=combine_metadata.plan, hidden_nvsh=combine_input,
+                source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
+                num_tokens=T, inter_rank_sync=True)
+            self._tstats("comb_buf", _t1c)
+            self._tstats("combine", _t0c)
+            return out[:T].view(combine_metadata.hidden_shape)
         w = combine_metadata.w_trim
         assert hidden_states.shape[0] == w.shape[0], (
             f"MoonEP combine: MLP produced {hidden_states.shape[0]} rows but dispatch "
