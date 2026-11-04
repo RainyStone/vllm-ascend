@@ -1,0 +1,59 @@
+{
+  "definition": "Aggregate token-expert work per rank over the aligned active prefill scope, then compute max of rank totals divided by mean of rank totals; no per-step/layer ratio averaging.",
+  "summary": {
+    "off_actual": {
+      "rank_totals": [
+        612763231,
+        600840071,
+        606665823,
+        603171042,
+        569517392,
+        605182245,
+        584945842,
+        594832866
+      ],
+      "total": 4777918512,
+      "average_per_rank": 597239814.0,
+      "maximum": 612763231,
+      "busiest_rank": 0,
+      "whole_run_mtm": 1.025991932614191,
+      "step_layer_records": 12857
+    },
+    "slot_before": {
+      "rank_totals": [
+        612618278,
+        600761724,
+        606551030,
+        603153674,
+        569636670,
+        605189729,
+        584928250,
+        595095411
+      ],
+      "total": 4777934766,
+      "average_per_rank": 597241845.75,
+      "maximum": 612618278,
+      "busiest_rank": 0,
+      "whole_run_mtm": 1.0257457382790898,
+      "step_layer_records": 13201
+    },
+    "slot_after": {
+      "rank_totals": [
+        597242423,
+        597241761,
+        597242013,
+        597242096,
+        597241175,
+        597241976,
+        597241548,
+        597241774
+      ],
+      "total": 4777934766,
+      "average_per_rank": 597241845.75,
+      "maximum": 597242423,
+      "busiest_rank": 0,
+      "whole_run_mtm": 1.0000009665263814,
+      "step_layer_records": 13201
+    }
+  }
+}

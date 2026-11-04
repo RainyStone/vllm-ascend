@@ -1,0 +1,185 @@
+{
+  "mode": "off",
+  "diagnostic_only": true,
+  "formal_performance_rounds_instrumented": false,
+  "definition": "s_rank=max(rank token-expert pairs)/(sum(rank pairs)/8); s_expert=max(expert pairs)/mean(expert pairs)",
+  "complete_step_layers": 1,
+  "nonempty_step_layers": 1,
+  "incomplete_step_layer_keys_excluded": 0,
+  "excluded_keys": [],
+  "recorded_steps": 1,
+  "rank_imbalance_before": {
+    "samples": 1,
+    "mean": 1.7777777777777777,
+    "weighted_mean": 1.7777777777777777,
+    "p50": 1.7777777777777777,
+    "p90": 1.7777777777777777,
+    "p99": 1.7777777777777777,
+    "maximum": 1.7777777777777777
+  },
+  "rank_imbalance_after": {
+    "samples": 1,
+    "mean": 1.7777777777777777,
+    "weighted_mean": 1.7777777777777777,
+    "p50": 1.7777777777777777,
+    "p90": 1.7777777777777777,
+    "p99": 1.7777777777777777,
+    "maximum": 1.7777777777777777
+  },
+  "expert_imbalance": {
+    "samples": 1,
+    "mean": 1.7777777777777777,
+    "weighted_mean": 1.7777777777777777,
+    "p50": 1.7777777777777777,
+    "p90": 1.7777777777777777,
+    "p99": 1.7777777777777777,
+    "maximum": 1.7777777777777777
+  },
+  "owner_rank_totals": [
+    32,
+    64,
+    96,
+    128,
+    160,
+    192,
+    224,
+    256
+  ],
+  "compute_rank_totals": [
+    32,
+    64,
+    96,
+    128,
+    160,
+    192,
+    224,
+    256
+  ],
+  "aggregate_owner_rank_imbalance": 1.7777777777777777,
+  "aggregate_compute_rank_imbalance": 1.7777777777777777,
+  "count_conservation_ok": true,
+  "conservation_failures": [],
+  "per_layer": {
+    "0": {
+      "rank_imbalance_before": {
+        "samples": 1,
+        "mean": 1.7777777777777777,
+        "weighted_mean": 1.7777777777777777,
+        "p50": 1.7777777777777777,
+        "p90": 1.7777777777777777,
+        "p99": 1.7777777777777777,
+        "maximum": 1.7777777777777777
+      },
+      "rank_imbalance_after": {
+        "samples": 1,
+        "mean": 1.7777777777777777,
+        "weighted_mean": 1.7777777777777777,
+        "p50": 1.7777777777777777,
+        "p90": 1.7777777777777777,
+        "p99": 1.7777777777777777,
+        "maximum": 1.7777777777777777
+      },
+      "expert_imbalance": {
+        "samples": 1,
+        "mean": 1.7777777777777777,
+        "weighted_mean": 1.7777777777777777,
+        "p50": 1.7777777777777777,
+        "p90": 1.7777777777777777,
+        "p99": 1.7777777777777777,
+        "maximum": 1.7777777777777777
+      }
+    }
+  },
+  "method_rank_records": {
+    "AlltoAllCommImpl": 8
+  },
+  "metadata": {
+    "0": {
+      "rank": "0",
+      "ep_rank": "0",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "1": {
+      "rank": "1",
+      "ep_rank": "1",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "2": {
+      "rank": "2",
+      "ep_rank": "2",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "3": {
+      "rank": "3",
+      "ep_rank": "3",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "4": {
+      "rank": "4",
+      "ep_rank": "4",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "5": {
+      "rank": "5",
+      "ep_rank": "5",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "6": {
+      "rank": "6",
+      "ep_rank": "6",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    },
+    "7": {
+      "rank": "7",
+      "ep_rank": "7",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "local"
+    }
+  },
+  "raw_files": [
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank0.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank1.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank2.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank3.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank4.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank5.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank6.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/off/moe_par_fixture_rank7.log"
+  ],
+  "limitations": [
+    "Same request corpus and concurrency; scheduler batches may differ from the uninstrumented performance runs.",
+    "Off records received local expert counts; its routing and compute views coincide and are not independent conservation checks.",
+    "Slot conservation compares per-expert routing and computed counts; this does not verify copied weight bytes or tensor values."
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "scope": "Fix, build and operator tests only; no model services or model retests.",
+  "answer": "先修复并做算子测试，模型复测稍后"
+}

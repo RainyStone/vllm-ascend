@@ -1,0 +1,35 @@
+{
+  "time_asia_shanghai": "20261104_191317",
+  "applied_files": [
+    "ascend-moonep/ascend_moonep/api.py",
+    "ascend-moonep/ascend_moonep/ops.py",
+    "ascend-moonep/ascend_moonep/launchers.py",
+    "ascend-moonep/csrc/launcher.cpp",
+    "ascend-moonep/csrc/torch_classes.cpp",
+    "ascend-moonep/csrc/launcher.h",
+    "ascend-moonep/csrc/ops/planning.h",
+    "ascend-moonep/csrc/ops/moonep_combine.cpp",
+    "ascend-moonep/csrc/ops/moonep_combine.h",
+    "ascend-moonep/csrc/ops/planning.cpp",
+    "ascend-moonep/kernels/moonep_combine.cpp",
+    "ascend-moonep/include/ascend_moonep/kernels/launch.h",
+    "vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py"
+  ],
+  "matches_tested_source": true,
+  "python_syntax": "passed",
+  "git_diff_check": "passed",
+  "unexpected_baseline_changes": [],
+  "binaries_rebuilt_or_replaced": false,
+  "committed": false,
+  "staged": false,
+  "repositories": {
+    "ascend-moonep": {
+      "status": " m 3rdparty/shmem\n M ascend_moonep/api.py\n M ascend_moonep/launchers.py\n M ascend_moonep/ops.py\n M csrc/launcher.cpp\n M csrc/launcher.h\n M csrc/ops/moonep_combine.cpp\n M csrc/ops/moonep_combine.h\n M csrc/ops/planning.cpp\n M csrc/ops/planning.h\n M csrc/torch_classes.cpp\n M include/ascend_moonep/kernels/launch.h\n M kernels/moonep_combine.cpp\n",
+      "stat": " 3rdparty/shmem                         |  0\n ascend_moonep/api.py                   | 44 ++++++++++++++++++++++\n ascend_moonep/launchers.py             | 18 +++++++++\n ascend_moonep/ops.py                   | 11 ++++++\n csrc/launcher.cpp                      | 15 ++++++++\n csrc/launcher.h                        |  6 +++\n csrc/ops/moonep_combine.cpp            | 67 ++++++++++++++++++++++++++++++++++\n csrc/ops/moonep_combine.h              |  7 ++++\n csrc/ops/planning.cpp                  | 13 +++++--\n csrc/ops/planning.h                    |  2 +\n csrc/torch_classes.cpp                 | 18 ++++++++-\n include/ascend_moonep/kernels/launch.h |  5 +++\n kernels/moonep_combine.cpp             | 66 ++++++++++++++++++++++++++++++---\n 13 files changed, 261 insertions(+), 11 deletions(-)\n"
+    },
+    "vllm-ascend": {
+      "status": " m csrc/third_party/catlass\n M vllm_ascend/ops/fused_moe/moonep_comm.py\n?? scripts/dsv4flash_service/.dp8_crossover_port_8444.lock\n?? scripts/dsv4flash_service/20261103_dp4_imbalance/\n?? scripts/dsv4flash_service/20261103_dp8_bisect/\n?? scripts/dsv4flash_service/20261103_dp8_crossover/\n?? scripts/dsv4flash_service/20261103_dp8_test/\n?? scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/\n",
+      "stat": " csrc/third_party/catlass                 |  0\n vllm_ascend/ops/fused_moe/moonep_comm.py | 30 ++++++++++++++++++++++++++++++\n 2 files changed, 30 insertions(+)\n"
+    }
+  }
+}

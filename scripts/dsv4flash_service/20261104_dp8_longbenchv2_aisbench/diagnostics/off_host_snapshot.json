@@ -1,0 +1,49 @@
+{
+  "mode": "off",
+  "phase": "pair02 formal round1",
+  "loadavg": "30.19 36.00 39.43 18/25333 1471026",
+  "logical_cpus": 384,
+  "elapsed": 1.001588869956322,
+  "workers": [
+    {
+      "pid": 1465400,
+      "threads": 303,
+      "cpu_percent": 64.8968872855332
+    },
+    {
+      "pid": 1465398,
+      "threads": 302,
+      "cpu_percent": 58.90640538225321
+    },
+    {
+      "pid": 1465383,
+      "threads": 302,
+      "cpu_percent": 55.91116443061322
+    },
+    {
+      "pid": 1465399,
+      "threads": 302,
+      "cpu_percent": 54.91275078006655
+    },
+    {
+      "pid": 1465392,
+      "threads": 302,
+      "cpu_percent": 55.91116443061322
+    },
+    {
+      "pid": 1465385,
+      "threads": 302,
+      "cpu_percent": 55.91116443061322
+    },
+    {
+      "pid": 1465393,
+      "threads": 302,
+      "cpu_percent": 55.91116443061322
+    },
+    {
+      "pid": 1465384,
+      "threads": 302,
+      "cpu_percent": 57.907991731706545
+    }
+  ]
+}

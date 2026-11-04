@@ -1,0 +1,28 @@
+{
+  "counterfactual_off_cross_rank_pairs": 4179745095,
+  "slot_borrowed_pairs": 321945782,
+  "borrowed_expert_assignments_lower_bound": 111301,
+  "borrowed_work_exceeds_local_gate_cells": 91505,
+  "expert_payload_bytes": 13369344,
+  "native_hidden_and_scale_bytes_per_pair": 12416,
+  "slot_hidden_bytes_per_pair": 16384,
+  "counterfactual_native_feature_bytes": 51895715099520,
+  "slot_prefetch_bytes_lower_bound": 1488021356544,
+  "slot_feature_plus_prefetch_bytes_lower_bound": 64694205300736,
+  "scope": "Conservative tensor-payload lower bound using the observed Slot routing as a counterfactual off workload; not measured link traffic or an attribution of runtime.",
+  "exclusions": [
+    "HCCL/SHMEM protocol metadata and synchronization",
+    "Local memory copies",
+    "Possible unused or duplicate prefetch assignments"
+  ],
+  "slot_feature_bytes_lower_bound": 63206183944192,
+  "ratio_lower_bound_tensor_payload": 1.2466194015569962,
+  "proof": "Relocating B token-expert pairs can reduce the number of cross-rank pairs by at most B. Thus C_slot >= C_off - B, whether or not borrowed work originated locally.",
+  "borrowed_work_exceeds_local_gate_cells_note": "Nonzero count invalidates an assumption that all borrowed rows originated on their compute rank; it is not by itself a routing error.",
+  "assumptions": [
+    "W4A8MXFP native ALLTOALL uses FP8 activation plus one e8m0 scale per32 values, then BF16 expert output.",
+    "MoonEP sends BF16 activation and BF16 expert output.",
+    "At least one full12.75MiB weight+scale payload is fetched per distinct remote expert with nonzero work; persistent cache and early prefetch are off.",
+    "Protocol metadata and local device memory traffic are not included."
+  ]
+}

@@ -1,0 +1,25 @@
+原仓安装更新记录（2026-11-04，Asia/Shanghai）
+
+141.61.45.118 与 141.61.45.124 的 xzx_moonep 容器均已直接使用：
+  /mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep
+  /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend
+
+已在原 ascend-moonep 仓构建 Ascend950/a5 设备内核与 C++ 扩展。
+124 editable 安装已由修复副本切回原仓；118 原本已指向原仓，现加载新的共享编译产物。
+两台均在新 Python 进程中检查：SDK路径、vllm-ascend路径、compute_weighted接口、全部MoonEP/SHMEM动态库路径。
+这些实际加载路径全部位于原仓，没有从 precision_fix 副本加载库。
+两台动态库SHA256完全一致。
+
+原仓13个修改文件与之前经过2卡/8卡验证的源码副本逐字一致。
+原仓设备内核SHA256与此前8卡验证通过的设备内核完全一致。
+git diff --check、可复用算子runner的bash语法检查通过。
+已将可复用的算子测试脚本及124 SDK安装脚本改为原仓路径；历史副本和历史日志保留作记录。
+
+124迁移后上卡短测被空闲保护拦截：当前0..7卡均被其他进程占用。
+该次未启动设备测试；没有停止其他进程。此前2卡、8卡算子结果仍在host124/results目录。
+模型服务与模型精度/性能复测未启动。
+此次源码尚未提交；原有子模块修改保留。
+
+构建安装日志：logs/build_install_124.log
+两台实际加载路径和动态库SHA：results/installed_118.json、results/installed_124.json
+旧原仓编译库备份：before/

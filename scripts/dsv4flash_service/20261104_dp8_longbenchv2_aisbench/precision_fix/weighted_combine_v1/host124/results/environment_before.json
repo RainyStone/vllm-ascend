@@ -1,0 +1,13 @@
+{
+  "host": "141.61.45.124",
+  "container": "xzx_moonep",
+  "python": "3.11.10 (main, Sep  2 2026, 19:38:21) [GCC 12.3.1 (openEuler 12.3.1-110.oe2403sp4)]",
+  "packages": {
+    "torch": "2.10.0",
+    "torch-npu": "2.10.0.post4",
+    "vllm": "0.23.0+empty",
+    "vllm-ascend": "0.23.1.dev130+gd2666bfb7.d20261103",
+    "ascend-moonep": "0.1.0"
+  },
+  "scope": "operator only; no model service; original shared source unchanged"
+}

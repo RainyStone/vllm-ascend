@@ -1,0 +1,464 @@
+{
+  "execution": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807",
+  "diagnostic_only": true,
+  "formal_performance_results_unchanged": true,
+  "census_requests": 632,
+  "precision_requests": 96,
+  "marker_requests": 6,
+  "cleanup": {
+    "at": "2026-11-04T14:43:30.343079+08:00",
+    "eight_npus_released": true,
+    "port8444_bindable": true
+  },
+  "off_main_prefill": {
+    "global_routed_pairs_threshold_exclusive": 768,
+    "step_layers": 12857,
+    "pair_coverage_of_aligned_rows": 1.0,
+    "rank_imbalance_before": {
+      "samples": 12857,
+      "mean": 1.259401920032399,
+      "weighted_mean": 1.253941832819605,
+      "p50": 1.2342716806033243,
+      "p90": 1.4111686320381114,
+      "p99": 1.6730808068695389,
+      "maximum": 2.8889701996178396
+    },
+    "rank_imbalance_after": {
+      "samples": 12857,
+      "mean": 1.259401920032399,
+      "weighted_mean": 1.253941832819605,
+      "p50": 1.2342716806033243,
+      "p90": 1.4111686320381114,
+      "p99": 1.6730808068695389,
+      "maximum": 2.8889701996178396
+    },
+    "expert_imbalance": {
+      "samples": 12857,
+      "mean": 7.311620241603024,
+      "weighted_mean": 7.120195908439554,
+      "p50": 6.688151041666667,
+      "p90": 10.875651041666666,
+      "p99": 16.58464405593163,
+      "maximum": 39.200878155872665
+    }
+  },
+  "slot_main_prefill": {
+    "global_routed_pairs_threshold_exclusive": 768,
+    "step_layers": 13201,
+    "pair_coverage_of_aligned_rows": 1.0,
+    "rank_imbalance_before": {
+      "samples": 13201,
+      "mean": 1.2693842775600097,
+      "weighted_mean": 1.2547094921973658,
+      "p50": 1.2375284830729167,
+      "p90": 1.4336954752604167,
+      "p99": 1.7976277669270833,
+      "maximum": 2.89970321583933
+    },
+    "rank_imbalance_after": {
+      "samples": 13201,
+      "mean": 1.000054044001352,
+      "weighted_mean": 1.0000276642537986,
+      "p50": 1.0,
+      "p90": 1.0001220681838,
+      "p99": 1.0002845875513273,
+      "maximum": 1.0050395968322534
+    },
+    "expert_imbalance": {
+      "samples": 13201,
+      "mean": 7.675350495682526,
+      "weighted_mean": 7.11106470221741,
+      "p50": 6.69921875,
+      "p90": 11.40456302496585,
+      "p99": 27.825181932756028,
+      "maximum": 40.16359718664878
+    }
+  },
+  "slot_expert_count_conservation": true,
+  "critical_rank_work_reduction_linear_model_pct": 20.29807134857522,
+  "precision": {
+    "samples": 8,
+    "requests_per_mode": 48,
+    "selected_not_random_sample": true,
+    "all_mode_repeats_stable": true,
+    "matching_samples": 2,
+    "comparisons": [
+      {
+        "id": 24,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.5514945983886719
+            ],
+            [
+              "\".\n\n",
+              -1.5514945983886719
+            ]
+          ],
+          "top_two_margin": 1.0
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -1.0256370306015015
+            ],
+            [
+              " -->",
+              -1.1506370306015015
+            ]
+          ],
+          "top_two_margin": 0.125
+        },
+        "cross_mode_equal": true
+      },
+      {
+        "id": 122,
+        "off": {
+          "all_six_stable": true,
+          "prediction": " -->",
+          "top_two": [
+            [
+              " -->",
+              -0.5393227934837341
+            ],
+            [
+              "\"\"",
+              -1.414322853088379
+            ]
+          ],
+          "top_two_margin": 0.8750000596046448
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.32005298137664795
+            ],
+            [
+              " -->",
+              -1.695052981376648
+            ]
+          ],
+          "top_two_margin": 1.375
+        },
+        "cross_mode_equal": false
+      },
+      {
+        "id": 143,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\".\n\n",
+          "top_two": [
+            [
+              "\".\n\n",
+              -0.7821844816207886
+            ],
+            [
+              "\"\"",
+              -1.2821844816207886
+            ]
+          ],
+          "top_two_margin": 0.5
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\".\n\n",
+          "top_two": [
+            [
+              "\".\n\n",
+              -0.3315041959285736
+            ],
+            [
+              "\"\"",
+              -1.706504225730896
+            ]
+          ],
+          "top_two_margin": 1.3750000298023224
+        },
+        "cross_mode_equal": true
+      },
+      {
+        "id": 205,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.35717102885246277
+            ],
+            [
+              "\".\n\n",
+              -1.4821710586547852
+            ]
+          ],
+          "top_two_margin": 1.1250000298023224
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\".\n\n",
+          "top_two": [
+            [
+              "\".\n\n",
+              -0.5144039988517761
+            ],
+            [
+              "\"\"",
+              -1.264404058456421
+            ]
+          ],
+          "top_two_margin": 0.7500000596046448
+        },
+        "cross_mode_equal": false
+      },
+      {
+        "id": 206,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.6533299088478088
+            ],
+            [
+              "\".\n\n",
+              -1.528329849243164
+            ]
+          ],
+          "top_two_margin": 0.8749999403953552
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\".\n\n",
+          "top_two": [
+            [
+              "\".\n\n",
+              -1.0844389200210571
+            ],
+            [
+              "\"\"",
+              -1.2094389200210571
+            ]
+          ],
+          "top_two_margin": 0.125
+        },
+        "cross_mode_equal": false
+      },
+      {
+        "id": 208,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.6040780544281006
+            ],
+            [
+              "\".\n\n",
+              -0.9790780544281006
+            ]
+          ],
+          "top_two_margin": 0.375
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\".\n\n",
+          "top_two": [
+            [
+              "\".\n\n",
+              -0.7211903929710388
+            ],
+            [
+              "\"\"",
+              -0.8461903929710388
+            ]
+          ],
+          "top_two_margin": 0.125
+        },
+        "cross_mode_equal": false
+      },
+      {
+        "id": 278,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.9691706299781799
+            ],
+            [
+              "\".\n\n",
+              -0.9691706299781799
+            ]
+          ],
+          "top_two_margin": 0.0
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": "\".\n\n",
+          "top_two": [
+            [
+              "\".\n\n",
+              -0.7014236450195312
+            ],
+            [
+              "\"\"",
+              -1.4514236450195312
+            ]
+          ],
+          "top_two_margin": 0.75
+        },
+        "cross_mode_equal": false
+      },
+      {
+        "id": 289,
+        "off": {
+          "all_six_stable": true,
+          "prediction": "\"\"",
+          "top_two": [
+            [
+              "\"\"",
+              -0.5758032202720642
+            ],
+            [
+              " -->",
+              -1.325803279876709
+            ]
+          ],
+          "top_two_margin": 0.7500000596046448
+        },
+        "slot": {
+          "all_six_stable": true,
+          "prediction": " -->",
+          "top_two": [
+            [
+              " -->",
+              -0.7392158508300781
+            ],
+            [
+              "\"\"",
+              -1.1142158508300781
+            ]
+          ],
+          "top_two_margin": 0.375
+        },
+        "cross_mode_equal": false
+      }
+    ],
+    "full_task_accuracy_not_measured": true
+  },
+  "weighted_reduce": {
+    "route_weight_sum": 1.0,
+    "results": [
+      {
+        "tokens": 1,
+        "topk": 6,
+        "hidden_size": 4096,
+        "native_vs_repeat": {
+          "mismatched_elements": 0,
+          "elements": 4096,
+          "max_abs": 0.0,
+          "mean_abs": 0.0
+        },
+        "native_vs_round_each_expert": {
+          "mismatched_elements": 1676,
+          "elements": 4096,
+          "max_abs": 0.0078125,
+          "mean_abs": 0.0006281535024754703
+        },
+        "native_vs_sum_then_round": {
+          "mismatched_elements": 0,
+          "elements": 4096,
+          "max_abs": 0.0,
+          "mean_abs": 0.0
+        }
+      },
+      {
+        "tokens": 16,
+        "topk": 6,
+        "hidden_size": 4096,
+        "native_vs_repeat": {
+          "mismatched_elements": 0,
+          "elements": 65536,
+          "max_abs": 0.0,
+          "mean_abs": 0.0
+        },
+        "native_vs_round_each_expert": {
+          "mismatched_elements": 26241,
+          "elements": 65536,
+          "max_abs": 0.0078125,
+          "mean_abs": 0.0005960894632153213
+        },
+        "native_vs_sum_then_round": {
+          "mismatched_elements": 0,
+          "elements": 65536,
+          "max_abs": 0.0,
+          "mean_abs": 0.0
+        }
+      },
+      {
+        "tokens": 128,
+        "topk": 6,
+        "hidden_size": 4096,
+        "native_vs_repeat": {
+          "mismatched_elements": 0,
+          "elements": 524288,
+          "max_abs": 0.0,
+          "mean_abs": 0.0
+        },
+        "native_vs_round_each_expert": {
+          "mismatched_elements": 207929,
+          "elements": 524288,
+          "max_abs": 0.015625,
+          "mean_abs": 0.0006003901362419128
+        },
+        "native_vs_sum_then_round": {
+          "mismatched_elements": 0,
+          "elements": 524288,
+          "max_abs": 0.0,
+          "mean_abs": 0.0
+        }
+      }
+    ],
+    "scope": "Isolated native weighted-unpermute vs two reduction formulas; not an end-to-end proof of the observed first-token cause."
+  },
+  "communication_payload_bound": {
+    "counterfactual_off_cross_rank_pairs": 4179745095,
+    "slot_borrowed_pairs": 321945782,
+    "borrowed_expert_assignments_lower_bound": 111301,
+    "borrowed_work_exceeds_local_gate_cells": 91505,
+    "expert_payload_bytes": 13369344,
+    "native_hidden_and_scale_bytes_per_pair": 12416,
+    "slot_hidden_bytes_per_pair": 16384,
+    "counterfactual_native_feature_bytes": 51895715099520,
+    "slot_prefetch_bytes_lower_bound": 1488021356544,
+    "slot_feature_plus_prefetch_bytes_lower_bound": 64694205300736,
+    "scope": "Conservative tensor-payload lower bound using the observed Slot routing as a counterfactual off workload; not measured link traffic or an attribution of runtime.",
+    "exclusions": [
+      "HCCL/SHMEM protocol metadata and synchronization",
+      "Local memory copies",
+      "Possible unused or duplicate prefetch assignments"
+    ],
+    "slot_feature_bytes_lower_bound": 63206183944192,
+    "ratio_lower_bound_tensor_payload": 1.2466194015569962,
+    "proof": "Relocating B token-expert pairs can reduce the number of cross-rank pairs by at most B. Thus C_slot >= C_off - B, whether or not borrowed work originated locally.",
+    "borrowed_work_exceeds_local_gate_cells_note": "Nonzero count invalidates an assumption that all borrowed rows originated on their compute rank; it is not by itself a routing error.",
+    "assumptions": [
+      "W4A8MXFP native ALLTOALL uses FP8 activation plus one e8m0 scale per32 values, then BF16 expert output.",
+      "MoonEP sends BF16 activation and BF16 expert output.",
+      "At least one full12.75MiB weight+scale payload is fetched per distinct remote expert with nonzero work; persistent cache and early prefetch are off.",
+      "Protocol metadata and local device memory traffic are not included."
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+step,layer,routed_pairs,computed_pairs,rank_imbalance_before,rank_imbalance_after,expert_imbalance,expert_count_l1,owner_rank0,compute_rank0,owner_rank1,compute_rank1,owner_rank2,compute_rank2,owner_rank3,compute_rank3,owner_rank4,compute_rank4,owner_rank5,compute_rank5,owner_rank6,compute_rank6,owner_rank7,compute_rank7
+0,0,2048,2048,1.0,1.0,1.0,0,256,256,256,256,256,256,256,256,256,256,256,256,256,256,256,256
+1,0,256,255,8.0,1.003921568627451,256.0,1,256,31,0,32,0,32,0,32,0,32,0,32,0,32,0,32

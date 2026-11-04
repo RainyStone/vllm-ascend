@@ -1,0 +1,24 @@
+{
+  "ascend-moonep": {
+    "branch": "urma_dev",
+    "head": "ceabdc2ec2d9559a7757be266456ebb061306066",
+    "tracked_status": "m 3rdparty/shmem"
+  },
+  "vllm-ascend": {
+    "branch": "moonep_v0.23.0",
+    "head": "d2666bfb7d10f2704efeabc5888209f499e01183",
+    "tracked_status": "m csrc/third_party/catlass"
+  },
+  "source_sha256": {
+    "ascend-moonep/ascend_moonep/api.py": "b9c0aa5cf1f0643f9a414c395e093b92ab4f6bdbb395274cb7e7841cc9496cdd",
+    "ascend-moonep/ascend_moonep/combine.py": "2c7e291ac0e7fea29546c3d3b9efd957591570a7a3f7dc19b36e5d105f6c4afc",
+    "ascend-moonep/ascend_moonep/ops.py": "90531355bb5d68fe2b3169f40b5c1f0ec27df3bcc624baf460312a07a0766c31",
+    "ascend-moonep/csrc/ops/moonep_combine.cpp": "4900439513c8a01499f6ba79056b972fed8cab46fcde7a00bf0e0abd24eb8a2c",
+    "ascend-moonep/csrc/torch_classes.cpp": "672f4b4f0a9e4ccf59ac215fe1843cfc9e7532b55d3f6bdfd4a2697db757157b",
+    "ascend-moonep/kernels/moonep_combine.cpp": "39994f31ef25b31ffd399b85c79e0731407bf5d0fe1724d9f52fe301cbb7e12c",
+    "ascend-moonep/include/ascend_moonep/kernels/types.h": "22432b41b41074d4b55052bb9b9d118bd0070954b9bf7bead7daab28dd4bd96d",
+    "vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "05afe313f7a59974496e23deb70f826bf76c36e80bd341f095d648a4ab2ff01b"
+  },
+  "production_code_changed_by_plan_preparation": false,
+  "build_or_npu_tests_started": false
+}

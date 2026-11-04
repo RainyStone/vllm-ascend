@@ -1,0 +1,654 @@
+{
+  "status": "passed",
+  "rank": 0,
+  "world": 2,
+  "records": [
+    {
+      "name": "loaded_libraries",
+      "rank": 0,
+      "package": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/__init__.py",
+      "libraries": [
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_config_store.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_uid.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libshmem.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libshmem_utils.so"
+      ]
+    },
+    {
+      "name": "S128_K6_T1_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 4096,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T1_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 4096,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T1_normal_v0_legacy",
+      "rank": 0,
+      "elements": 4096,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T1_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 595,
+      "elements": 4096
+    },
+    {
+      "name": "S128_K6_T1_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 4096,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_legacy",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 13084,
+      "elements": 65536
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v0_legacy",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 102226,
+      "elements": 524288
+    },
+    {
+      "name": "S128_K6_T128_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_normal_v0_legacy",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 6560540,
+      "elements": 33554432
+    },
+    {
+      "name": "S8192_K6_T8192_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T1024_padding_v0_vs_native",
+      "rank": 0,
+      "elements": 4194304,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T1024_padding_v0_vs_fp32",
+      "rank": 0,
+      "elements": 4194304,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T1024_padding_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 4194304,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_unequal_v0_vs_native",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_unequal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S8192_K6_T8192_unequal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 33554432,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_alias_v0_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_alias_v0_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_alias_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_invalid_v0_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_invalid_v0_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_invalid_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_zero_v0_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_zero_v0_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_zero_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S16_K1_T16_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S16_K1_T16_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S16_K1_T16_normal_v0_legacy",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S16_K1_T16_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 0,
+      "elements": 65536
+    },
+    {
+      "name": "S16_K1_T16_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K8_T128_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K8_T128_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K8_T128_normal_v0_legacy",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K8_T128_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 104575,
+      "elements": 524288
+    },
+    {
+      "name": "S128_K8_T128_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K16_T128_normal_v0_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K16_T128_normal_v0_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K16_T128_normal_v0_legacy",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K16_T128_normal_v0_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 131462,
+      "elements": 524288
+    },
+    {
+      "name": "S128_K16_T128_normal_v0_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v1_vs_native",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v1_vs_fp32",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v1_legacy",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T128_normal_v1_old_rounding_evidence",
+      "rank": 0,
+      "mismatches": 102237,
+      "elements": 524288
+    },
+    {
+      "name": "S128_K6_T128_normal_v1_scratch_reuse",
+      "rank": 0,
+      "elements": 524288,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "real_planning_dispatch_weighted_roundtrip",
+      "rank": 0,
+      "elements": 397312,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "zero_real_tokens",
+      "rank": 0,
+      "rejected": true,
+      "message": "weighted combine requires explicit real tokens in [1,S]"
+    },
+    {
+      "name": "bad_weights_dtype",
+      "rank": 0,
+      "rejected": true,
+      "message": "source_topk_weights_sk must be contiguous FP32 [S,align8(K)]"
+    },
+    {
+      "name": "bad_weights_stride",
+      "rank": 0,
+      "rejected": true,
+      "message": "source_topk_weights_sk must be contiguous FP32 [S,align8(K)]"
+    },
+    {
+      "name": "nonalias_zero_copy",
+      "rank": 0,
+      "rejected": true,
+      "message": "zero_copy hidden input must alias the symmetric local shard"
+    }
+  ],
+  "timings": [
+    {
+      "S": 128,
+      "K": 6,
+      "T": 16,
+      "kind": "normal",
+      "rank": 0,
+      "max_rank_samples_ms": {
+        "old": [
+          0.08255280256271362,
+          0.08253955245018005,
+          0.07980340123176574,
+          0.08159815073013306,
+          0.08110635280609131
+        ],
+        "new": [
+          0.07206060290336609,
+          0.07133294939994812,
+          0.06829215288162231,
+          0.06953514814376831,
+          0.090836900472641
+        ]
+      },
+      "medians_ms": {
+        "old": 0.08159815073013306,
+        "new": 0.07133294939994812
+      },
+      "regression_percent": -12.580188690960291,
+      "peak_allocated_bytes": {
+        "old": 45103104,
+        "new": 10499584
+      }
+    },
+    {
+      "S": 128,
+      "K": 6,
+      "T": 128,
+      "kind": "normal",
+      "rank": 0,
+      "max_rank_samples_ms": {
+        "old": [
+          0.11623489856719971,
+          0.11789050102233886,
+          0.17602920532226562,
+          0.11712230443954467,
+          0.11719390153884887
+        ],
+        "new": [
+          0.1081015944480896,
+          0.10612964630126953,
+          0.10855460166931152,
+          0.11227359771728515,
+          0.10625109672546387
+        ]
+      },
+      "medians_ms": {
+        "old": 0.11719390153884887,
+        "new": 0.1081015944480896
+      },
+      "regression_percent": -7.758344906492631,
+      "peak_allocated_bytes": {
+        "old": 45105664,
+        "new": 10502144
+      }
+    },
+    {
+      "S": 8192,
+      "K": 6,
+      "T": 8192,
+      "kind": "normal",
+      "rank": 0,
+      "max_rank_samples_ms": {
+        "old": [
+          6.744879913330078,
+          6.7448883056640625,
+          6.744844055175781,
+          6.743447113037109,
+          6.745002746582031
+        ],
+        "new": [
+          5.986798477172852,
+          5.988533020019531,
+          5.984835815429688,
+          5.985719299316406,
+          5.984260940551758
+        ]
+      },
+      "medians_ms": {
+        "old": 6.744879913330078,
+        "new": 5.985719299316406
+      },
+      "regression_percent": -11.255361455929314,
+      "peak_allocated_bytes": {
+        "old": 1699650560,
+        "new": 540984320
+      }
+    },
+    {
+      "S": 8192,
+      "K": 6,
+      "T": 8192,
+      "kind": "unequal",
+      "rank": 0,
+      "max_rank_samples_ms": {
+        "old": [
+          6.226779556274414,
+          6.2257343292236325,
+          6.225704193115234,
+          6.228189086914062,
+          6.2262931823730465
+        ],
+        "new": [
+          5.2322441101074215,
+          5.232083511352539,
+          5.233612442016602,
+          5.233011627197266,
+          5.230736923217774
+        ]
+      },
+      "medians_ms": {
+        "old": 6.2262931823730465,
+        "new": 5.2322441101074215
+      },
+      "regression_percent": -15.965343152806044,
+      "peak_allocated_bytes": {
+        "old": 1699650560,
+        "new": 540984320
+      }
+    }
+  ]
+}

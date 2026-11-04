@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "rank": 1,
+  "world": 2,
+  "records": [
+    {
+      "name": "loaded_libraries",
+      "rank": 1,
+      "package": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/__init__.py",
+      "libraries": [
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_config_store.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_uid.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libshmem.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libshmem_utils.so"
+      ]
+    },
+    {
+      "name": "SKIP_DUP_off_rejected",
+      "rank": 1,
+      "passed": true,
+      "message": "weighted combine requires ASCEND_MOONEP_SKIP_DUP=1 before planning"
+    }
+  ],
+  "timings": []
+}

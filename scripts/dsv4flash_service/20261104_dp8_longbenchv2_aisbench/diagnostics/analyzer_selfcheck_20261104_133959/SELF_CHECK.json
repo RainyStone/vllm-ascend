@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "checks": [
+    "uniform ratio1",
+    "skew rank ratio8 to balanced1",
+    "native owner mapping",
+    "weighted aggregation",
+    "intentional lost row detected"
+  ]
+}

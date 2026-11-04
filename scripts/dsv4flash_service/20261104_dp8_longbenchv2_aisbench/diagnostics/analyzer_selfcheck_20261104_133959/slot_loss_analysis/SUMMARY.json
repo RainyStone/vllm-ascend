@@ -1,0 +1,193 @@
+{
+  "mode": "slot",
+  "diagnostic_only": true,
+  "formal_performance_rounds_instrumented": false,
+  "definition": "s_rank=max(rank token-expert pairs)/(sum(rank pairs)/8); s_expert=max(expert pairs)/mean(expert pairs)",
+  "complete_step_layers": 2,
+  "nonempty_step_layers": 2,
+  "incomplete_step_layer_keys_excluded": 0,
+  "excluded_keys": [],
+  "recorded_steps": 2,
+  "rank_imbalance_before": {
+    "samples": 2,
+    "mean": 4.5,
+    "weighted_mean": 1.7777777777777777,
+    "p50": 4.5,
+    "p90": 7.3,
+    "p99": 7.93,
+    "maximum": 8.0
+  },
+  "rank_imbalance_after": {
+    "samples": 2,
+    "mean": 1.0019607843137255,
+    "weighted_mean": 1.0004357298474946,
+    "p50": 1.0019607843137255,
+    "p90": 1.0035294117647058,
+    "p99": 1.0038823529411764,
+    "maximum": 1.003921568627451
+  },
+  "expert_imbalance": {
+    "samples": 2,
+    "mean": 128.5,
+    "weighted_mean": 29.333333333333332,
+    "p50": 128.5,
+    "p90": 230.5,
+    "p99": 253.45,
+    "maximum": 256.0
+  },
+  "owner_rank_totals": [
+    512,
+    256,
+    256,
+    256,
+    256,
+    256,
+    256,
+    256
+  ],
+  "compute_rank_totals": [
+    287,
+    288,
+    288,
+    288,
+    288,
+    288,
+    288,
+    288
+  ],
+  "aggregate_owner_rank_imbalance": 1.7777777777777777,
+  "aggregate_compute_rank_imbalance": 1.0004342162396873,
+  "count_conservation_ok": false,
+  "conservation_failures": [
+    {
+      "step": 1,
+      "layer": 0,
+      "expert_count_l1": 1,
+      "routed_pairs": 256,
+      "computed_pairs": 255
+    }
+  ],
+  "per_layer": {
+    "0": {
+      "rank_imbalance_before": {
+        "samples": 2,
+        "mean": 4.5,
+        "weighted_mean": 1.7777777777777777,
+        "p50": 4.5,
+        "p90": 7.3,
+        "p99": 7.93,
+        "maximum": 8.0
+      },
+      "rank_imbalance_after": {
+        "samples": 2,
+        "mean": 1.0019607843137255,
+        "weighted_mean": 1.0004357298474946,
+        "p50": 1.0019607843137255,
+        "p90": 1.0035294117647058,
+        "p99": 1.0038823529411764,
+        "maximum": 1.003921568627451
+      },
+      "expert_imbalance": {
+        "samples": 2,
+        "mean": 128.5,
+        "weighted_mean": 29.333333333333332,
+        "p50": 128.5,
+        "p90": 230.5,
+        "p99": 253.45,
+        "maximum": 256.0
+      }
+    }
+  },
+  "method_rank_records": {
+    "MoonEPCommImpl": 16
+  },
+  "metadata": {
+    "0": {
+      "rank": "0",
+      "ep_rank": "0",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "1": {
+      "rank": "1",
+      "ep_rank": "1",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "2": {
+      "rank": "2",
+      "ep_rank": "2",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "3": {
+      "rank": "3",
+      "ep_rank": "3",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "4": {
+      "rank": "4",
+      "ep_rank": "4",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "5": {
+      "rank": "5",
+      "ep_rank": "5",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "6": {
+      "rank": "6",
+      "ep_rank": "6",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    },
+    "7": {
+      "rank": "7",
+      "ep_rank": "7",
+      "ep_size": "8",
+      "global_experts": "256",
+      "local_experts": "32",
+      "redundant_experts": "0",
+      "counts_scope": "global+compute"
+    }
+  },
+  "raw_files": [
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank0.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank1.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank2.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank3.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank4.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank5.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank6.log",
+    "diagnostics/analyzer_selfcheck_20261104_133959/slot/moe_par_fixture_rank7.log"
+  ],
+  "limitations": [
+    "Same request corpus and concurrency; scheduler batches may differ from the uninstrumented performance runs.",
+    "Off records received local expert counts; its routing and compute views coincide and are not independent conservation checks.",
+    "Slot conservation compares per-expert routing and computed counts; this does not verify copied weight bytes or tensor values."
+  ]
+}

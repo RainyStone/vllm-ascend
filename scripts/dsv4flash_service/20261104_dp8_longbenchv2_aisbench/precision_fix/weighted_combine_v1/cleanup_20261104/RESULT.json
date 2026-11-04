@@ -1,0 +1,201 @@
+{
+  "scope": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1",
+  "authorization": "user requested redundant experiment code cleanup",
+  "targets": [
+    {
+      "path": "__pycache__",
+      "files": 3,
+      "symlinks": 0,
+      "bytes": 27405
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/baseline",
+      "files": 517,
+      "symlinks": 2,
+      "bytes": 179687473
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/build-host",
+      "files": 14,
+      "symlinks": 0,
+      "bytes": 163363157
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/build-kernels",
+      "files": 28,
+      "symlinks": 0,
+      "bytes": 2011795
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/build_isolated.sh",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1475
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/edit_fix.py",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 19810
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/fixed",
+      "files": 531,
+      "symlinks": 2,
+      "bytes": 229832756
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/review_export",
+      "files": 15,
+      "symlinks": 0,
+      "bytes": 555809
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/baseline",
+      "files": 517,
+      "symlinks": 2,
+      "bytes": 179687473
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/build-host",
+      "files": 14,
+      "symlinks": 0,
+      "bytes": 163364311
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/build-kernels",
+      "files": 28,
+      "symlinks": 0,
+      "bytes": 2021871
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/build_isolated.sh",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1483
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/fixed",
+      "files": 528,
+      "symlinks": 2,
+      "bytes": 229738748
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/review_export",
+      "files": 42,
+      "symlinks": 0,
+      "bytes": 776892
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/main_repo_install_20261104/review_export",
+      "files": 9,
+      "symlinks": 0,
+      "bytes": 317808
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/source_apply_20261104_191317/before",
+      "files": 13,
+      "symlinks": 0,
+      "bytes": 252860
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/tests/__pycache__",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 25693
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/tests/planning_roundtrip_snippet.py",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1449
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/tests/run_operator_dp2.sh",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1827
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/tests/run_operator_dp8.sh",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1839
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/tests/run_operator_skipdup_guard.sh",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1856
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/tests/guard_snippet.txt",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 503
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/tests/planning_roundtrip_snippet.py",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1449
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/tests/run_operator_installed_smoke.sh",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 1866
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/tests/test_host_validation.py",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 2165
+    },
+    {
+      "path": "precision_fix/weighted_combine_v1/host124/tests/test_weighted_combine.py",
+      "files": 1,
+      "symlinks": 0,
+      "bytes": 14082
+    }
+  ],
+  "rescued_export_evidence": [
+    "precision_fix/weighted_combine_v1/results/built_libraries_sha256.json",
+    "precision_fix/weighted_combine_v1/host124/results/weighted_combine.patch",
+    "precision_fix/weighted_combine_v1/cleanup_20261104/unique_export_evidence/host124/results/collect_stdout.json"
+  ],
+  "preserved_raw_files": 38,
+  "source_sha256_before": {
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/api.py": "e25d223ec8290ada9ce056149086689c8c0eed22a3d321a99463844efcc32161",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/ops.py": "de8d3b51170379c3d31a0c4546adcc7665682b5889eaf90ce626add5ab742328",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/launchers.py": "db6da4345fb28c065480c5b9bcf1b4e09dbdbd8a2d210a10670469f331ad876c",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/launcher.cpp": "8dda2b5a87857a9bba49a7943946f133feecd56860a1204cb7aa1c2642605a48",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/torch_classes.cpp": "f83d13388a89ac4537429293c8ed17edbcc1655403371a342c95eee17db4e5a4",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/launcher.h": "37985c7ff33aa1dad0b229114627bfab87b6b4fda61d99ca335da762ad5678bb",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/ops/planning.h": "8083b258bef8a66659065c6f71a967050df840b876e3633981cb226a018adad7",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/ops/moonep_combine.cpp": "54248448e09ef132bbb3babf94afbbf85798b60bb65172b89cf30bc81442a14e",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/ops/moonep_combine.h": "6ca0357bab854aefd1c20b65fa43d8f5dd708565f7ba18e001deebed7e50bed5",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/csrc/ops/planning.cpp": "4a97da75f032b62361102baeba9a8e1ca1daac1cb971711d9e679b4b41731e75",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/kernels/moonep_combine.cpp": "d55a83c4502824d1f52a395816a5fe85c607a2b1a1f1ad521761f519322e60ec",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/include/ascend_moonep/kernels/launch.h": "50bb626700f0ff195911b1e0d1d599dafc2e2c044322cb0f6eff81379f8b8194",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "a673e4fc85422c5bdde2073f783522d6460d4cf29a27a719c341331d01055fb2",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-312-x86_64-linux-gnu.so": "4d38c6f22e750cf443297086f9576f5ad9b4e50a2a1b2f506b42c62a82eb06dd",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-312-aarch64-linux-gnu.so": "c43442908e3fc8bc448b6069b71d167c2487dc0b0a0c9abc9bfd2d49d41fb6e0",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "d5f4f86d71b5f9fa996b381fc104b080eda2e08b871f21956d28e89696e89974",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "be7c6b8bfdaf58a570b5ae225e0b96a2ad2c0647e396911b1f95252ee0e43d6b"
+  },
+  "validation": {
+    "raw_results_unchanged": true,
+    "original_source_and_libraries_unchanged": true,
+    "historical_metrics_recomputed_exactly": true,
+    "shell_syntax": "passed",
+    "python_syntax": "passed",
+    "git_diff_check": "passed",
+    "post_cleanup_original_repo_import": {
+      "141.61.45.118": "passed",
+      "141.61.45.124": "passed"
+    }
+  },
+  "removed_files": 2272,
+  "removed_logical_bytes": 1151713855
+}

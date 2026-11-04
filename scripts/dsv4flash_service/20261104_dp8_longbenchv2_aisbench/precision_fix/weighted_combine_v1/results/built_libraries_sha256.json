@@ -1,0 +1,6 @@
+{
+  "fixed/ascend-moonep/ascend_moonep/_C.cpython-312-x86_64-linux-gnu.so": "4d38c6f22e750cf443297086f9576f5ad9b4e50a2a1b2f506b42c62a82eb06dd",
+  "fixed/ascend-moonep/ascend_moonep/_C.cpython-312-aarch64-linux-gnu.so": "c43442908e3fc8bc448b6069b71d167c2487dc0b0a0c9abc9bfd2d49d41fb6e0",
+  "fixed/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "45e9a1e4ac5f6ba230a162e7571484d331084c61643d123202049f0f44d2f0e5",
+  "fixed/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "be7c6b8bfdaf58a570b5ae225e0b96a2ad2c0647e396911b1f95252ee0e43d6b"
+}

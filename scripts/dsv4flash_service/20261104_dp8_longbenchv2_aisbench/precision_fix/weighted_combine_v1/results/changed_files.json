@@ -1,0 +1,15 @@
+[
+  "ascend-moonep/ascend_moonep/api.py",
+  "ascend-moonep/ascend_moonep/ops.py",
+  "ascend-moonep/ascend_moonep/launchers.py",
+  "ascend-moonep/csrc/launcher.cpp",
+  "ascend-moonep/csrc/torch_classes.cpp",
+  "ascend-moonep/csrc/launcher.h",
+  "ascend-moonep/csrc/ops/planning.h",
+  "ascend-moonep/csrc/ops/moonep_combine.cpp",
+  "ascend-moonep/csrc/ops/moonep_combine.h",
+  "ascend-moonep/csrc/ops/planning.cpp",
+  "ascend-moonep/kernels/moonep_combine.cpp",
+  "ascend-moonep/include/ascend_moonep/kernels/launch.h",
+  "vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py"
+]

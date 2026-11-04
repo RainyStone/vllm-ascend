@@ -1,0 +1,64 @@
+清理更新：隔离源码与构建副本已删除；当前复现入口见 CLEANUP.txt（host124报告对应 ../CLEANUP.txt）。原始数据与日志保留。
+
+当前安装状态更新：118、124均已切回共享原仓并完成原仓编译。SDK副本仅保留历史验证记录。详细见 main_repo_install_20261104/REPORT.txt。
+
+UPDATE 2026-11-04: operator tests completed on 141.61.45.124; see host124/REPORT.txt and host124/results/summary.json. SDK in the 124 container was updated; model retests remain deferred.
+
+MoonEP Slot weighted-combine precision fix — operator-only scope
+Updated: 2026-11-04, Asia/Shanghai
+
+Authorization:
+Implement the low-overhead fix in isolated copies, compile and test the operator.
+Model retests, model services, full performance matrices and replacement of the main repositories are deferred by the user.
+
+Current state:
+- Isolated native kernel and PyTorch C++ extension builds succeeded.
+- Fixed SDK imports from this directory and exposes Combine.compute_weighted.
+- Python source compilation and two shell script syntax checks passed.
+- Eight host API rejection checks passed; these checks do not execute a device kernel.
+- Original baseline audit: 517 files checked, zero changed and zero missing.
+- Positive NPU operator correctness and timing tests have NOT run.
+- All eight cards had resident vLLM workers (about 80 GiB/card), outside the current container's /proc.
+- Their services were not stopped. Waiting for idle card IDs from the user.
+- Consequently, neither numerical correctness of the new kernel nor the <=2% overhead target has been established.
+
+Implementation:
+- New explicit native weighted-combine entry point; legacy combine behavior and tiling ABI retained.
+- Input expert rows stay BF16; source-rank original FP32 top-K weights are applied inside the combine kernel.
+- Multiplication and accumulation use FP32; BF16 rounding occurs once at output.
+- No extra collective, remote weight fetch or host synchronization is added.
+- Reusable aligned source-weight scratch is 256 KiB for S=8192,K=6.
+- The new path avoids the old full [S*K,H] FP32 product (768 MiB at S=8192,K=6,H=4096).
+  These are allocation sizes from the design; measured peak memory and timing remain pending.
+- Current supported path: native/non-UDMA, source dedup disabled via the existing SKIP_DUP switch.
+- Only fixed/ascend-moonep and fixed/vllm-ascend were modified.
+
+Operator test plan prepared:
+- Two ranks first, then eight ranks; H=4096, K=1/6/8/16.
+- Real token counts 1/16/128/1024/8192; per-rank unequal real lengths.
+- Exact BF16 comparison against native npu_moe_token_unpermute and explicit ordered FP32 multiply/sum.
+- Legacy unweighted combine regression, negative destination aliases, invalid routes, zero weights, padded NaNs.
+- Same-stream scratch reuse with changed values, API guard checks.
+- Full-chain timing alternates old/new order; includes local source-weight copy on the new path.
+  Old timing uses the original BF16*FP32 promotion expression, without an artificial extra FP32 input conversion.
+- Five groups of twenty calls after warmup; report maximum-rank device-event time, median regression and peak allocation.
+- Shell scripts refuse to run if selected cards have resident processes.
+
+Files:
+  build_isolated.sh
+  tests/test_weighted_combine.py
+  tests/run_operator_dp2.sh          fixed cards 0,1
+  tests/run_operator_dp8.sh          fixed cards 0..7
+  tests/test_host_validation.py
+  logs/build.log
+  results/host_validation.json
+  results/original_audit.json
+  results/weighted_combine.patch
+  results/changed_files.json
+  results/npu_before_tests.txt
+
+Commands after cards are idle:
+  bash tests/run_operator_dp2.sh
+  bash tests/run_operator_dp8.sh
+
+No model-level accuracy or performance claim can be made from compilation or host checks.

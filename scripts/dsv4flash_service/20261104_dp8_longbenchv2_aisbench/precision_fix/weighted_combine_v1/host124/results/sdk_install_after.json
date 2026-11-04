@@ -1,0 +1,6 @@
+{
+  "package": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/__init__.py",
+  "version": "0.1.0",
+  "direct_url": "{\"dir_info\": {\"editable\": true}, \"url\": \"file:///mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep\"}",
+  "compute_weighted": true
+}

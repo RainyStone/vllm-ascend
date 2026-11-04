@@ -1,0 +1,23 @@
+{
+  "host": "141.61.45.118",
+  "sdk": "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/__init__.py",
+  "sdk_direct_url": "{\"dir_info\": {\"editable\": true}, \"url\": \"file:///mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep\"}",
+  "vllm_ascend": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/__init__.py",
+  "compute_weighted": true,
+  "libraries": [
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_config_store.so",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_uid.so",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libshmem.so",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libshmem_utils.so"
+  ],
+  "library_sha256": {
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "d5f4f86d71b5f9fa996b381fc104b080eda2e08b871f21956d28e89696e89974",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_config_store.so": "dbd931dd688298449fd6383a286581eddff277c5a100cd41aea5eee24ed307d0",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_uid.so": "6ef48f851d3d04398527d1aab3a5cf1a602aab72cde0b7c09fb532f2aea19627",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "be7c6b8bfdaf58a570b5ae225e0b96a2ad2c0647e396911b1f95252ee0e43d6b",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libshmem.so": "11a331976a0066be849f1d759bd44048ea3eb89269ae971a3d3ddfc95638e734",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libshmem_utils.so": "421ead54f8c78a095341e3a04417d8d7be32b0c6663eb0f2d08abfc9e5033c40"
+  }
+}

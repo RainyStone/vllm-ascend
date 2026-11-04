@@ -1,0 +1,6 @@
+{
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-312-x86_64-linux-gnu.so": "4d38c6f22e750cf443297086f9576f5ad9b4e50a2a1b2f506b42c62a82eb06dd",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-312-aarch64-linux-gnu.so": "c43442908e3fc8bc448b6069b71d167c2487dc0b0a0c9abc9bfd2d49d41fb6e0",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "2ed21bc370a45f983313f7ccb44be26d2e24b6bd8229556d917023b95e37bf10",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "871e7984df12ef29fafb19f9a1985e1e252285ded7a7fc9027e6d38aeae7f08d"
+}

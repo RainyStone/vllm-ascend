@@ -1,0 +1,96 @@
+{
+  "status": "passed",
+  "rank": 1,
+  "world": 2,
+  "records": [
+    {
+      "name": "loaded_libraries",
+      "rank": 1,
+      "package": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/__init__.py",
+      "libraries": [
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_config_store.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_uid.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libshmem.so",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/host124/fixed/ascend-moonep/ascend_moonep/lib/libshmem_utils.so"
+      ]
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_vs_native",
+      "rank": 1,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_vs_fp32",
+      "rank": 1,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_legacy",
+      "rank": 1,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_old_rounding_evidence",
+      "rank": 1,
+      "mismatches": 11297,
+      "elements": 65536
+    },
+    {
+      "name": "S128_K6_T16_normal_v0_scratch_reuse",
+      "rank": 1,
+      "elements": 65536,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "real_planning_dispatch_weighted_roundtrip",
+      "rank": 1,
+      "elements": 397312,
+      "finite": true,
+      "mismatches": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "name": "zero_real_tokens",
+      "rank": 1,
+      "rejected": true,
+      "message": "weighted combine requires explicit real tokens in [1,S]"
+    },
+    {
+      "name": "bad_weights_dtype",
+      "rank": 1,
+      "rejected": true,
+      "message": "source_topk_weights_sk must be contiguous FP32 [S,align8(K)]"
+    },
+    {
+      "name": "bad_weights_stride",
+      "rank": 1,
+      "rejected": true,
+      "message": "source_topk_weights_sk must be contiguous FP32 [S,align8(K)]"
+    },
+    {
+      "name": "nonalias_zero_copy",
+      "rank": 1,
+      "rejected": true,
+      "message": "zero_copy hidden input must alias the symmetric local shard"
+    }
+  ],
+  "timings": []
+}

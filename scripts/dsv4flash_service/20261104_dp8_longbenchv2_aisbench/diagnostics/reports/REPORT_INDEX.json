@@ -1,0 +1,86 @@
+[
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/communication_byte_accounting.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/communication_byte_accounting.json",
+    "bytes": 1733,
+    "sha256": "c6391eb20001f8117f4f158980fe3f535f53e59374506ccf214a01e19d029a73"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/REPORT.md",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/REPORT.md",
+    "bytes": 6765,
+    "sha256": "67384ef08955c278bc4dfaf9445a85ef72bec5499165d5d7301de0438d57451f"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/RANK_SUMMARY.csv",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/RANK_SUMMARY.csv",
+    "bytes": 2071,
+    "sha256": "c2dbb3262d68ef3a069f96ecf2e47520c48d68388c997e1d885dfd3fa36e6fc3"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/PRECISION_COMPARISON.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/PRECISION_COMPARISON.json",
+    "bytes": 5677,
+    "sha256": "053b6479dcdd653cb34c748dda382232e8c18daeb93163d89721f08152a849e1"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/CLEANUP_CHECK.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/CLEANUP_CHECK.json",
+    "bytes": 107,
+    "sha256": "f2199028746d570c2b75f4dce427de0eec0d37e8287339f2d554d3bba56682fa"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/DIAGNOSIS.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/DIAGNOSIS.json",
+    "bytes": 12592,
+    "sha256": "155282d3ecfe762c0bd3b5c1fa655acd1174d6929444501bb5a9946a477eec2a"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/MTM_UNWEIGHTED.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/MTM_UNWEIGHTED.json",
+    "bytes": 996,
+    "sha256": "a58c69971f0d89eaef3433dd3307aa92cb7e942d0fbec49ca38b6e30121bf9eb"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/MTM_PER_LAYER.csv",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/MTM_PER_LAYER.csv",
+    "bytes": 13951,
+    "sha256": "e20b50ae1e29f4b21a5aa4af1da69696db3661cbabdcda7880402cf36d4ba3cf"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/MTM_UNWEIGHTED.md",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/MTM_UNWEIGHTED.md",
+    "bytes": 915,
+    "sha256": "4780fc131e3b19cc760a8bb2ef7a6013790a676b87f4d80ab8f89c9832558847"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/GLOBAL_RANK_MTM.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/GLOBAL_RANK_MTM.json",
+    "bytes": 1436,
+    "sha256": "4772e739c205557728c522015916fbb2a80ca7b563f5e9e5224679558182538d"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/off/load_analysis/SUMMARY.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/off/load_analysis/SUMMARY.json",
+    "bytes": 83843,
+    "sha256": "bf97198d94b1b54f919467fa16e8bed16ca8c8b14a9f761eaca8db602a3f43ec"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/off/phase_boundaries.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/off/phase_boundaries.json",
+    "bytes": 676,
+    "sha256": "e0ab90cc7458f9d84ffbfe67c39f129e483ee09b51800c9d4da366ab4d51d728"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/slot/load_analysis/SUMMARY.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/slot/load_analysis/SUMMARY.json",
+    "bytes": 84963,
+    "sha256": "c2d210f9a45be26c7bf310bd6ad0c630a964b5e45e43393c20626d2ca7236d9e"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/data/executions/diagnosis_20261104_140807/slot/phase_boundaries.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/diagnostics/reports/diagnosis_20261104_140807/slot/phase_boundaries.json",
+    "bytes": 676,
+    "sha256": "90d364f635245c1bceec8652fb83747c8b09a2828efd42c0f3013a6c893c30fa"
+  }
+]

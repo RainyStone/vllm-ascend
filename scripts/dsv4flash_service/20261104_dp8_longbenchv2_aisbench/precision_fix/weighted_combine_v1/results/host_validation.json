@@ -1,0 +1,48 @@
+{
+  "status": "passed",
+  "scope": "host-only; no device execution",
+  "package": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/precision_fix/weighted_combine_v1/fixed/ascend-moonep/ascend_moonep/__init__.py",
+  "new_host_method_registered": true,
+  "tests": [
+    {
+      "test": "zero_T",
+      "passed": true,
+      "message": "weighted combine requires explicit real tokens in [1,S]"
+    },
+    {
+      "test": "excess_T",
+      "passed": true,
+      "message": "weighted combine requires explicit real tokens in [1,S]"
+    },
+    {
+      "test": "BF16_weight_rejected",
+      "passed": true,
+      "message": "source_topk_weights_sk must be contiguous FP32 [S,align8(K)]"
+    },
+    {
+      "test": "unpadded_weight_rejected",
+      "passed": true,
+      "message": "source_topk_weights_sk must be contiguous FP32 [S,align8(K)]"
+    },
+    {
+      "test": "noncontiguous_hidden_rejected",
+      "passed": true,
+      "message": "hidden_nvsh must be contiguous BF16 [S*K,H]"
+    },
+    {
+      "test": "missing_plan_rejected",
+      "passed": true,
+      "message": "plan must be a MoonEPCommPlan"
+    },
+    {
+      "test": "nonalias_zero_copy_rejected",
+      "passed": true,
+      "message": "zero_copy hidden input must alias the symmetric local shard"
+    },
+    {
+      "test": "UDMA_rejected",
+      "passed": true,
+      "message": "weighted combine currently requires native non-UDMA"
+    }
+  ]
+}

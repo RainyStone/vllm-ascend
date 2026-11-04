@@ -1,0 +1,31 @@
+{
+  "definition": "Per(step,MoE layer) MTM=max(rank token-expert pairs)/mean(rank token-expert pairs), followed by unweighted statistics across windows.",
+  "scope": "Same aligned active prefill windows as diagnosis; tiny/idle/startup windows excluded; no rerun.",
+  "quantile_method": "numpy percentile default linear interpolation",
+  "summary": {
+    "off_actual": {
+      "windows": 12857,
+      "mean": 1.259401920032399,
+      "p50": 1.2342716806033243,
+      "p95": 1.4831123968370126,
+      "p99": 1.6730808068695389,
+      "maximum": 2.8889701996178396
+    },
+    "slot_before": {
+      "windows": 13201,
+      "mean": 1.2693842775600097,
+      "p50": 1.2375284830729167,
+      "p95": 1.5264078776041667,
+      "p99": 1.7976277669270833,
+      "maximum": 2.89970321583933
+    },
+    "slot_after": {
+      "windows": 13201,
+      "mean": 1.000054044001352,
+      "p50": 1.0,
+      "p95": 1.000176460208223,
+      "p99": 1.0002845875513273,
+      "maximum": 1.0050395968322534
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "method": "A pre-census one-forward marker is held in the recorder; the first census forward flushes it. Post marker flushes the final census step.",
+  "ranks": {
+    "0": {
+      "start_step": 3,
+      "end_step": 351
+    },
+    "1": {
+      "start_step": 3,
+      "end_step": 352
+    },
+    "2": {
+      "start_step": 4,
+      "end_step": 352
+    },
+    "3": {
+      "start_step": 4,
+      "end_step": 352
+    },
+    "4": {
+      "start_step": 4,
+      "end_step": 352
+    },
+    "5": {
+      "start_step": 4,
+      "end_step": 353
+    },
+    "6": {
+      "start_step": 4,
+      "end_step": 353
+    },
+    "7": {
+      "start_step": 4,
+      "end_step": 353
+    }
+  }
+}

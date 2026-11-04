@@ -1,0 +1,28 @@
+实验目录冗余代码清理（2026-11-04，Asia/Shanghai）
+
+范围：precision_fix/weighted_combine_v1
+已删除 2272 个冗余文件，文件大小合计 1.07 GiB（按逻辑大小统计）。
+删除项包括：8份源码仓副本、隔离构建缓存、重复导出包、重复算子测试代码、临时补丁生成及片段脚本、源码应用前的重复源码备份和字节码缓存。
+各删除目标及大小见 cleanup_20261104/RESULT.json；唯一的导出证据已迁回 results。
+原仓源码、原仓编译库与SHMEM链接目标均保留；本次清理前后SHA256一致。
+保留原始性能/算子结果、日志、对照补丁、版本哈希、安装验证记录和原仓二进制回滚备份。
+LongBench-v2测试数据、正式性能结果与其它历史实验未列入删除范围。
+
+现在保留的可复用入口：
+  tests/test_weighted_combine.py                 唯一的NPU算子测试实现
+  tests/test_host_validation.py                  主机接口检查
+  host124/tests/run_operator_dp2.sh              2卡算子与链路计时
+  host124/tests/run_operator_dp8.sh              8卡算子与链路计时
+  host124/tests/run_operator_skipdup_guard.sh    不支持配置的保护验证
+  host124/tests/run_operator_original_repo_smoke.sh  原仓短测
+  host124/collect_results.py                     兼容结果收集入口
+  host124/recompute_operator_results.py          从原始rank结果重算指标
+  main_repo_install_20261104/build_install_main.sh   原仓构建与安装
+所有保留算子runner使用原仓SDK，并调用唯一测试实现。
+
+验证：
+  原始日志/结果文件保留检查通过。
+  从原始结果重新计算的2卡、8卡全部指标与原summary.json完全一致。
+  Python语法、shell语法、git diff --check通过。
+  结果收集旧逻辑在替换前备份于cleanup_20261104/collect_results_before.py.txt；新的收集逻辑先验证了数值一致性。
+未重新运行设备压测或模型服务。
