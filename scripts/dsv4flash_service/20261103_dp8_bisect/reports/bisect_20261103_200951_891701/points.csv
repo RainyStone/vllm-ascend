@@ -1,0 +1,3 @@
+ratio,decision,votes,ttft_gain_pct,throughput_gain_pct,directory,reason
+1.75,gain,"[true, true]",13.912885208626202,14.875973288663511,points/01_s1p75,Both independent pairs meet the joint 3% criterion.
+1.0,gain,"[true, true]",8.484595227708436,12.052651632084514,points/02_s1,Both independent pairs meet the joint 3% criterion.

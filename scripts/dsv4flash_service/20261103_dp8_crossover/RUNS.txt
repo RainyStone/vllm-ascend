@@ -1,0 +1,34 @@
+# coarse plan sha256: 203465dcd6389210e04c86bc9e1b3340ec314828f317ee213452038021ed3787
+# phase ratio pair replicate mode case_id input_tokens batched_tokens
+coarse 1.75 coarse_s1p75_p01 1 slot coarse_s1p75_p01_slot 8192 8192
+coarse 1.75 coarse_s1p75_p01 1 off coarse_s1p75_p01_off 8192 8192
+coarse 1.0 coarse_s1_p01 1 off coarse_s1_p01_off 8192 8192
+coarse 1.0 coarse_s1_p01 1 slot coarse_s1_p01_slot 8192 8192
+coarse 1.5 coarse_s1p5_p01 1 off coarse_s1p5_p01_off 8192 8192
+coarse 1.5 coarse_s1p5_p01 1 slot coarse_s1p5_p01_slot 8192 8192
+coarse 2.0 coarse_s2_p01 1 off coarse_s2_p01_off 8192 8192
+coarse 2.0 coarse_s2_p01 1 slot coarse_s2_p01_slot 8192 8192
+coarse 2.25 coarse_s2p25_p01 1 slot coarse_s2p25_p01_slot 8192 8192
+coarse 2.25 coarse_s2p25_p01 1 off coarse_s2p25_p01_off 8192 8192
+coarse 2.4822164743083004 coarse_s2p4822164743_p01 1 off coarse_s2p4822164743_p01_off 8192 8192
+coarse 2.4822164743083004 coarse_s2p4822164743_p01 1 slot coarse_s2p4822164743_p01_slot 8192 8192
+coarse 2.5 coarse_s2p5_p01 1 slot coarse_s2p5_p01_slot 8192 8192
+coarse 2.5 coarse_s2p5_p01 1 off coarse_s2p5_p01_off 8192 8192
+coarse 1.25 coarse_s1p25_p01 1 slot coarse_s1p25_p01_slot 8192 8192
+coarse 1.25 coarse_s1p25_p01 1 off coarse_s1p25_p01_off 8192 8192
+coarse 2.25 coarse_s2p25_p02 2 off coarse_s2p25_p02_off 8192 8192
+coarse 2.25 coarse_s2p25_p02 2 slot coarse_s2p25_p02_slot 8192 8192
+coarse 1.25 coarse_s1p25_p02 2 off coarse_s1p25_p02_off 8192 8192
+coarse 1.25 coarse_s1p25_p02 2 slot coarse_s1p25_p02_slot 8192 8192
+coarse 1.75 coarse_s1p75_p02 2 off coarse_s1p75_p02_off 8192 8192
+coarse 1.75 coarse_s1p75_p02 2 slot coarse_s1p75_p02_slot 8192 8192
+coarse 2.5 coarse_s2p5_p02 2 off coarse_s2p5_p02_off 8192 8192
+coarse 2.5 coarse_s2p5_p02 2 slot coarse_s2p5_p02_slot 8192 8192
+coarse 2.4822164743083004 coarse_s2p4822164743_p02 2 slot coarse_s2p4822164743_p02_slot 8192 8192
+coarse 2.4822164743083004 coarse_s2p4822164743_p02 2 off coarse_s2p4822164743_p02_off 8192 8192
+coarse 1.5 coarse_s1p5_p02 2 slot coarse_s1p5_p02_slot 8192 8192
+coarse 1.5 coarse_s1p5_p02 2 off coarse_s1p5_p02_off 8192 8192
+coarse 2.0 coarse_s2_p02 2 slot coarse_s2_p02_slot 8192 8192
+coarse 2.0 coarse_s2_p02 2 off coarse_s2_p02_off 8192 8192
+coarse 1.0 coarse_s1_p02 2 slot coarse_s1_p02_slot 8192 8192
+coarse 1.0 coarse_s1_p02 2 off coarse_s1_p02_off 8192 8192

@@ -1,0 +1,8 @@
+# Adaptive strategy only; no measured point or service has been executed.
+# Fixed future point list is intentionally not invented.
+1.75: first point; two independent mode pairs, AB and BA.
+1.00: only if 1.75 gains consistently.
+1.375: first midpoint only if 1.00=no_gain and 1.75=gain.
+Later midpoints: computed from the current observed bracket; at most 4 total midpoint decisions.
+Disagreement/invalid data/non-monotonic evidence: stop, no third pair, no branch discard.
+Ideal maximum: 6 distinct ratios, 24 service starts, 96 bench calls including warmup.

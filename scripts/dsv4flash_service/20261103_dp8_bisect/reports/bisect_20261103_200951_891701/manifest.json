@@ -1,0 +1,100 @@
+{
+  "settings": {
+    "runtime": {
+      "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration",
+      "model": "/mnt/share/weight/DeepSeek-V4-Flash",
+      "python": "/usr/local/python3.11.10/bin/python",
+      "cann_env": "/usr/local/Ascend/cann/set_env.sh",
+      "cards": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "interface": "enp34s0f1",
+      "interface_ip": "141.61.45.118",
+      "port": 8444,
+      "served_model": "test_auto",
+      "modes": [
+        "off",
+        "slot"
+      ],
+      "slot_optimizations": true,
+      "routes": [
+        "rank_skew_2p48_dp8"
+      ],
+      "input_lengths": [
+        8192
+      ],
+      "batched_tokens": [
+        8192
+      ],
+      "num_prompts": 32,
+      "max_concurrency": 16,
+      "output_length": 1,
+      "rounds": 3,
+      "discard_rounds": 1,
+      "max_model_len": 8193,
+      "kv_cache_bytes": 4294967296,
+      "gpu_memory_utilization": 0.8,
+      "server_seed": 1024,
+      "route_seed": 0,
+      "min_dispatch_tokens": 16,
+      "omp_num_threads": 100,
+      "ready_timeout_seconds": 1500,
+      "bench_timeout_seconds": 1800,
+      "release_timeout_seconds": 300,
+      "idle_hbm_limit_mb": 12000,
+      "first_mode": "slot",
+      "bench_seed_base": 9000
+    },
+    "hot_rank": 0,
+    "plan_seed": 20261103,
+    "bounds": [
+      1.0,
+      1.75
+    ],
+    "tolerance": 0.05,
+    "pairs_per_point": 2,
+    "practical_gain_pct": 3.0,
+    "objective": "joint",
+    "stop_on_disagreement": true,
+    "design_confirmed": true,
+    "exploratory_only": true,
+    "note": "Design only; no execution until user notification."
+  },
+  "strategy": {
+    "bounds": [
+      1.0,
+      1.75
+    ],
+    "tolerance": 0.05,
+    "first_point": 1.75,
+    "second_point_if_upper_gains": 1.0,
+    "first_midpoint_if_bracketed": 1.375,
+    "max_midpoints": 4,
+    "max_distinct_points": 6,
+    "max_service_starts": 24,
+    "max_benchmark_calls": 96,
+    "ideal_final_width": 0.046875,
+    "point_policy": "both pairs gain -> gain; both fail -> no_gain; mixed -> stop",
+    "assumption": "Approximately monotone gain predicate, not proved by sparse sampling.",
+    "execution": "Deferred; no workloads until explicit --execute following user notification."
+  },
+  "sources": {
+    "runtime.py": "1a0e0586f1c826e71596c702a3e93be0851617b13ca267474c02c5aadbf4338d",
+    "study.py": "88fea95843be44fe65ff63269fcfa487384bdb774a7feffd4c7047a45d50fb43",
+    "measurements.py": "99a26f57f499f397dff3f7d30c8878a8bc73e36fcf2d383cc36148b78a5469c9",
+    "resources.py": "d4a68ef51e0db489d6c3a45af886819c23f67938600889d33964ac254b8c9a36",
+    "bisect_logic.py": "d0f72667f5a49ff21e664321483638a4d521c1e5f403915da654e7d7182ea6c7",
+    "run_bisect.py": "3347a0479e05b3d4996a50244a3ec8dff05e2999abd317e65e6b368a0e5f6a6b",
+    "settings.json": "1afd6a0c3397201f2c382ea4f1f6d8887d90a3b30c86995afe32560d7153806e",
+    "strategy.json": "947cdb16947a41995167a81055b136fc6434806a61619c87bd98692fce4bf0cd",
+    "EXPERIMENT.md": "d2c64c79c163dbd2d578d7853e2f0ea2e222ba9a311453fc4fefc1cbe2c1bf13"
+  },
+  "environment_signature": "ce3fdfa3e50216a3e61db8e2d5844dab0d15c87a3ba7b67bd22938c71d9e0e9f"
+}

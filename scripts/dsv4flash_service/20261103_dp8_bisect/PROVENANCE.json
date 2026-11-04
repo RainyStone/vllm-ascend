@@ -1,0 +1,10 @@
+{
+  "source_directory": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp8_crossover",
+  "source_sha256": {
+    "runtime.py": "87ce9ed35f39ed7088c68fe4a32fec6dd3bb3ef38dcfb50f64e864f6502ccca4",
+    "study.py": "c54ab61994d7512d063ca552065f8196da59e388ea83a5be6c8edb491bd68fcd",
+    "analyze.py": "492b6637b2352b14f12166571d46aae65893333833658e510a3964fcf193b304",
+    "run_sweep.py": "153f0caec13d4ab8229abf16656c329e276d5b8afa73b337b2210185674770cb"
+  },
+  "reuse": "Known DP8 runtime, routing, raw-pair validation, resource cleanup and environment checks; new adaptive controller."
+}

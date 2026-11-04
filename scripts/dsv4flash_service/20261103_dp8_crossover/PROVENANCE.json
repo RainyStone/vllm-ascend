@@ -1,0 +1,9 @@
+{
+  "source_runtime": "scripts/dsv4flash_service/20261103_dp8_test/run_experiment.py",
+  "source_sha256": "e73c645d7330980bc900ee257f39384a986f7c24525c0c3bc0fd0073cc5ca3ae",
+  "changes": [
+    "seed blocks differ across service-pair replicates, matched within each pair",
+    "direct runtime execution disabled"
+  ],
+  "model_and_resource_guards": "Copied from successfully executed DP8 test"
+}

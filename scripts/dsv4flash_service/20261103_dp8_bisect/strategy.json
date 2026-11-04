@@ -1,0 +1,18 @@
+{
+  "bounds": [
+    1.0,
+    1.75
+  ],
+  "tolerance": 0.05,
+  "first_point": 1.75,
+  "second_point_if_upper_gains": 1.0,
+  "first_midpoint_if_bracketed": 1.375,
+  "max_midpoints": 4,
+  "max_distinct_points": 6,
+  "max_service_starts": 24,
+  "max_benchmark_calls": 96,
+  "ideal_final_width": 0.046875,
+  "point_policy": "both pairs gain -> gain; both fail -> no_gain; mixed -> stop",
+  "assumption": "Approximately monotone gain predicate, not proved by sparse sampling.",
+  "execution": "Deferred; no workloads until explicit --execute following user notification."
+}

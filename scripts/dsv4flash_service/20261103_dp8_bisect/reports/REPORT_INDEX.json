@@ -1,0 +1,50 @@
+[
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/EXPERIMENT.md",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/EXPERIMENT.md",
+    "bytes": 7387,
+    "sha256": "d2c64c79c163dbd2d578d7853e2f0ea2e222ba9a311453fc4fefc1cbe2c1bf13"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/manifest.json",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/manifest.json",
+    "bytes": 3194,
+    "sha256": "56fdab2d5104228262384db705fd88f38475fa2783190bef51a5be5d5aace1f8"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/points.csv",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/points.csv",
+    "bytes": 332,
+    "sha256": "06bfc60955058329c6e84ccdf662b660a89705de3f7059732101b8498bc510b0"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/pairs.csv",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/pairs.csv",
+    "bytes": 800,
+    "sha256": "08b694fedb11733a3c3febb427abf3ff508fdcd49a9da4204387bf0038a5c826"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/REPORT.md",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/REPORT.md",
+    "bytes": 1153,
+    "sha256": "c24c89968a4cda4840107a77ba8408a6578433212cc7a08abc15df7dd4d02336"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/RESULT.md",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/RESULT.md",
+    "bytes": 2492,
+    "sha256": "384e9f95314e4defc67586d05342947ec25d8edb81248c5a127b3f6a206139a6"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/points/01_s1p75/plan.json",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/points/01_s1p75/plan.json",
+    "bytes": 4461,
+    "sha256": "ca60270a78520a5aac094c7611cacfbce081514ee58210c975582bbc3b2bb323"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261103_dp8_bisect/data/bisect_20261103_200951_891701/points/02_s1/plan.json",
+    "report": "scripts/dsv4flash_service/20261103_dp8_bisect/reports/bisect_20261103_200951_891701/points/02_s1/plan.json",
+    "bytes": 4273,
+    "sha256": "8642fd50449844169a9e1745df19e102c9b1f2faf27233c2efabadee85f03617"
+  }
+]

@@ -1,0 +1,854 @@
+{
+  "schema": "dp8-crossover-plan-v1",
+  "phase": "coarse",
+  "settings": {
+    "runtime": {
+      "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration",
+      "model": "/mnt/share/weight/DeepSeek-V4-Flash",
+      "python": "/usr/local/python3.11.10/bin/python",
+      "cann_env": "/usr/local/Ascend/cann/set_env.sh",
+      "cards": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "interface": "enp34s0f1",
+      "interface_ip": "141.61.45.118",
+      "port": 8444,
+      "served_model": "test_auto",
+      "modes": [
+        "off",
+        "slot"
+      ],
+      "slot_optimizations": true,
+      "routes": [
+        "rank_skew_2p48_dp8"
+      ],
+      "input_lengths": [
+        8192
+      ],
+      "batched_tokens": [
+        8192
+      ],
+      "num_prompts": 32,
+      "max_concurrency": 16,
+      "output_length": 1,
+      "rounds": 3,
+      "discard_rounds": 1,
+      "max_model_len": 8193,
+      "kv_cache_bytes": 4294967296,
+      "gpu_memory_utilization": 0.8,
+      "server_seed": 1024,
+      "route_seed": 0,
+      "min_dispatch_tokens": 16,
+      "omp_num_threads": 100,
+      "ready_timeout_seconds": 1500,
+      "bench_timeout_seconds": 1800,
+      "release_timeout_seconds": 300,
+      "idle_hbm_limit_mb": 12000,
+      "first_mode": "slot",
+      "bench_seed_base": 9000
+    },
+    "coarse_ratios": [
+      1.0,
+      1.25,
+      1.5,
+      1.75,
+      2.0,
+      2.25,
+      2.4822164743083004,
+      2.5
+    ],
+    "coarse_pairs": 2,
+    "fine_step": 0.05,
+    "fine_pairs": 2,
+    "minimum_confirm_pairs": 5,
+    "practical_gain_pct": 3.0,
+    "minimum_joint_win_fraction": 0.8,
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 20261103,
+    "plan_seed": 20261103,
+    "hot_rank": 0,
+    "fine_max_points": 8,
+    "note": "Design confirmed; execution deferred until user notification. Two independent pairs per ratio; no five-pair confirmation stage.",
+    "objective": "joint",
+    "design_confirmed": true,
+    "exploratory_only": true
+  },
+  "parent_summary_sha256": null,
+  "routes": [
+    {
+      "name": "s1",
+      "target_ratio": 1.0,
+      "home_rank_peak_to_mean": 1.0,
+      "rank_route_percent": [
+        12.5,
+        12.5,
+        12.5,
+        12.5,
+        12.5,
+        12.5,
+        12.5,
+        12.5
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 0.39062499999999983,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=1.000000000000; not post-slot compute imbalance.\n0:0.390625000000000\n16:0.390625000000000\n",
+      "filename": "route_s1.txt",
+      "sha256": "2763e995355999a7933d4c6732c1d4b4ea5826743e9957d5edd0e322f1241ffe",
+      "finite_token_ratio": {
+        "16": 2.6666666666666665,
+        "128": 1.0,
+        "1024": 1.0,
+        "8192": 1.0,
+        "65536": 1.0
+      }
+    },
+    {
+      "name": "s1p25",
+      "target_ratio": 1.25,
+      "home_rank_peak_to_mean": 1.2499999999999998,
+      "rank_route_percent": [
+        15.624999999999998,
+        12.053571428571427,
+        12.053571428571427,
+        12.053571428571427,
+        12.053571428571427,
+        12.053571428571427,
+        12.053571428571427,
+        12.053571428571427
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 2.162388392857143,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=1.250000000000; not post-slot compute imbalance.\n0:2.162388392857143\n16:2.162388392857143\n",
+      "filename": "route_s1p25.txt",
+      "sha256": "c5a067e3e74da79f403110bfee54156c294e812f58c9781383bf9baf8d3eb7f1",
+      "finite_token_ratio": {
+        "16": 2.8333333333333335,
+        "128": 1.2708333333333333,
+        "1024": 1.2838541666666667,
+        "8192": 1.2542317708333333,
+        "65536": 1.2505289713541667
+      }
+    },
+    {
+      "name": "s1p5",
+      "target_ratio": 1.5,
+      "home_rank_peak_to_mean": 1.5,
+      "rank_route_percent": [
+        18.75,
+        11.607142857142858,
+        11.607142857142858,
+        11.607142857142858,
+        11.607142857142858,
+        11.607142857142858,
+        11.607142857142858,
+        11.607142857142858
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 3.9341517857142856,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=1.500000000000; not post-slot compute imbalance.\n0:3.934151785714286\n16:3.934151785714286\n",
+      "filename": "route_s1p5.txt",
+      "sha256": "a381ce4d2d804679d71655999f5717dab5b6b20dbf3b112a21bd0bbfdc044876",
+      "finite_token_ratio": {
+        "16": 3.1666666666666665,
+        "128": 1.5625,
+        "1024": 1.5286458333333333,
+        "8192": 1.5035807291666667,
+        "65536": 1.5004475911458333
+      }
+    },
+    {
+      "name": "s1p75",
+      "target_ratio": 1.75,
+      "home_rank_peak_to_mean": 1.75,
+      "rank_route_percent": [
+        21.875,
+        11.160714285714285,
+        11.160714285714285,
+        11.160714285714285,
+        11.160714285714285,
+        11.160714285714285,
+        11.160714285714285,
+        11.160714285714285
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 5.705915178571429,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=1.750000000000; not post-slot compute imbalance.\n0:5.705915178571429\n16:5.705915178571429\n",
+      "filename": "route_s1p75.txt",
+      "sha256": "cd8a3357bdfe8cc83af1367a9dcd89f92da5dc8441dfb38c5a0ee9c7849a3122",
+      "finite_token_ratio": {
+        "16": 3.5,
+        "128": 1.8541666666666667,
+        "1024": 1.7734375,
+        "8192": 1.7529296875,
+        "65536": 1.7503662109375
+      }
+    },
+    {
+      "name": "s2",
+      "target_ratio": 2.0,
+      "home_rank_peak_to_mean": 2.0,
+      "rank_route_percent": [
+        25.0,
+        10.714285714285715,
+        10.714285714285715,
+        10.714285714285715,
+        10.714285714285715,
+        10.714285714285715,
+        10.714285714285715,
+        10.714285714285715
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 7.477678571428571,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=2.000000000000; not post-slot compute imbalance.\n0:7.477678571428571\n16:7.477678571428571\n",
+      "filename": "route_s2.txt",
+      "sha256": "b0c983a73ac5f4707823f3e68b4548ff3b389303630766b20be0df871079ae00",
+      "finite_token_ratio": {
+        "16": 3.6666666666666665,
+        "128": 2.125,
+        "1024": 2.015625,
+        "8192": 2.001953125,
+        "65536": 2.000244140625
+      }
+    },
+    {
+      "name": "s2p25",
+      "target_ratio": 2.25,
+      "home_rank_peak_to_mean": 2.2499999999999996,
+      "rank_route_percent": [
+        28.124999999999996,
+        10.267857142857142,
+        10.267857142857142,
+        10.267857142857142,
+        10.267857142857142,
+        10.267857142857142,
+        10.267857142857142,
+        10.267857142857142
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 9.249441964285714,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=2.250000000000; not post-slot compute imbalance.\n0:9.249441964285714\n16:9.249441964285714\n",
+      "filename": "route_s2p25.txt",
+      "sha256": "5a41d50857443d27dc84641873cc65e068a5ea81c625bcce4683949c9194c970",
+      "finite_token_ratio": {
+        "16": 4.0,
+        "128": 2.4166666666666665,
+        "1024": 2.2604166666666665,
+        "8192": 2.2513020833333335,
+        "65536": 2.2501627604166665
+      }
+    },
+    {
+      "name": "s2p4822164743",
+      "target_ratio": 2.4822164743083004,
+      "home_rank_peak_to_mean": 2.4822164743083004,
+      "rank_route_percent": [
+        31.027705928853756,
+        9.853184867306608,
+        9.853184867306608,
+        9.853184867306608,
+        9.853184867306608,
+        9.853184867306608,
+        9.853184867306608,
+        9.853184867306608
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 10.895172557876906,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=2.482216474308; not post-slot compute imbalance.\n0:10.895172557876906\n16:10.895172557876906\n",
+      "filename": "route_s2p4822164743.txt",
+      "sha256": "7426ba2a678c21e85705ceb6e984db109b0d9ddc5c7ffe77412422cdf329d33d",
+      "finite_token_ratio": {
+        "16": 4.333333333333333,
+        "128": 2.6875,
+        "1024": 2.484375,
+        "8192": 2.4853515625,
+        "65536": 2.4823404947916665
+      }
+    },
+    {
+      "name": "s2p5",
+      "target_ratio": 2.5,
+      "home_rank_peak_to_mean": 2.5,
+      "rank_route_percent": [
+        31.25,
+        9.821428571428571,
+        9.821428571428571,
+        9.821428571428571,
+        9.821428571428571,
+        9.821428571428571,
+        9.821428571428571,
+        9.821428571428571
+      ],
+      "hot_experts": [
+        0,
+        16
+      ],
+      "hot_expert_share_pct": 11.021205357142858,
+      "text": "# E=256 K=6 EP=8; fixed two hot experts on rank 0.\n# Target home-rank peak/mean=2.500000000000; not post-slot compute imbalance.\n0:11.021205357142858\n16:11.021205357142858\n",
+      "filename": "route_s2p5.txt",
+      "sha256": "7cb0900c8ac25d8875a0f316d3af189df0ebc27a7c387fc4c7a2911ae9f3550e",
+      "finite_token_ratio": {
+        "16": 4.333333333333333,
+        "128": 2.7083333333333335,
+        "1024": 2.5052083333333335,
+        "8192": 2.5006510416666665,
+        "65536": 2.5000813802083335
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "id": "coarse_s1p75_p01",
+      "ratio": 1.75,
+      "replicate": 1,
+      "route": "s1p75",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1p75_p01_slot",
+          "pair_id": "coarse_s1p75_p01",
+          "route": "s1p75",
+          "mode": "slot",
+          "target_ratio": 1.75,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1p75_p01_off",
+          "pair_id": "coarse_s1p75_p01",
+          "route": "s1p75",
+          "mode": "off",
+          "target_ratio": 1.75,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1_p01",
+      "ratio": 1.0,
+      "replicate": 1,
+      "route": "s1",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1_p01_off",
+          "pair_id": "coarse_s1_p01",
+          "route": "s1",
+          "mode": "off",
+          "target_ratio": 1.0,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1_p01_slot",
+          "pair_id": "coarse_s1_p01",
+          "route": "s1",
+          "mode": "slot",
+          "target_ratio": 1.0,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1p5_p01",
+      "ratio": 1.5,
+      "replicate": 1,
+      "route": "s1p5",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1p5_p01_off",
+          "pair_id": "coarse_s1p5_p01",
+          "route": "s1p5",
+          "mode": "off",
+          "target_ratio": 1.5,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1p5_p01_slot",
+          "pair_id": "coarse_s1p5_p01",
+          "route": "s1p5",
+          "mode": "slot",
+          "target_ratio": 1.5,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2_p01",
+      "ratio": 2.0,
+      "replicate": 1,
+      "route": "s2",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2_p01_off",
+          "pair_id": "coarse_s2_p01",
+          "route": "s2",
+          "mode": "off",
+          "target_ratio": 2.0,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2_p01_slot",
+          "pair_id": "coarse_s2_p01",
+          "route": "s2",
+          "mode": "slot",
+          "target_ratio": 2.0,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2p25_p01",
+      "ratio": 2.25,
+      "replicate": 1,
+      "route": "s2p25",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2p25_p01_slot",
+          "pair_id": "coarse_s2p25_p01",
+          "route": "s2p25",
+          "mode": "slot",
+          "target_ratio": 2.25,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2p25_p01_off",
+          "pair_id": "coarse_s2p25_p01",
+          "route": "s2p25",
+          "mode": "off",
+          "target_ratio": 2.25,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2p4822164743_p01",
+      "ratio": 2.4822164743083004,
+      "replicate": 1,
+      "route": "s2p4822164743",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2p4822164743_p01_off",
+          "pair_id": "coarse_s2p4822164743_p01",
+          "route": "s2p4822164743",
+          "mode": "off",
+          "target_ratio": 2.4822164743083004,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2p4822164743_p01_slot",
+          "pair_id": "coarse_s2p4822164743_p01",
+          "route": "s2p4822164743",
+          "mode": "slot",
+          "target_ratio": 2.4822164743083004,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2p5_p01",
+      "ratio": 2.5,
+      "replicate": 1,
+      "route": "s2p5",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2p5_p01_slot",
+          "pair_id": "coarse_s2p5_p01",
+          "route": "s2p5",
+          "mode": "slot",
+          "target_ratio": 2.5,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2p5_p01_off",
+          "pair_id": "coarse_s2p5_p01",
+          "route": "s2p5",
+          "mode": "off",
+          "target_ratio": 2.5,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1p25_p01",
+      "ratio": 1.25,
+      "replicate": 1,
+      "route": "s1p25",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1p25_p01_slot",
+          "pair_id": "coarse_s1p25_p01",
+          "route": "s1p25",
+          "mode": "slot",
+          "target_ratio": 1.25,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1p25_p01_off",
+          "pair_id": "coarse_s1p25_p01",
+          "route": "s1p25",
+          "mode": "off",
+          "target_ratio": 1.25,
+          "replicate": 1,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2p25_p02",
+      "ratio": 2.25,
+      "replicate": 2,
+      "route": "s2p25",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2p25_p02_off",
+          "pair_id": "coarse_s2p25_p02",
+          "route": "s2p25",
+          "mode": "off",
+          "target_ratio": 2.25,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2p25_p02_slot",
+          "pair_id": "coarse_s2p25_p02",
+          "route": "s2p25",
+          "mode": "slot",
+          "target_ratio": 2.25,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1p25_p02",
+      "ratio": 1.25,
+      "replicate": 2,
+      "route": "s1p25",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1p25_p02_off",
+          "pair_id": "coarse_s1p25_p02",
+          "route": "s1p25",
+          "mode": "off",
+          "target_ratio": 1.25,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1p25_p02_slot",
+          "pair_id": "coarse_s1p25_p02",
+          "route": "s1p25",
+          "mode": "slot",
+          "target_ratio": 1.25,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1p75_p02",
+      "ratio": 1.75,
+      "replicate": 2,
+      "route": "s1p75",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1p75_p02_off",
+          "pair_id": "coarse_s1p75_p02",
+          "route": "s1p75",
+          "mode": "off",
+          "target_ratio": 1.75,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1p75_p02_slot",
+          "pair_id": "coarse_s1p75_p02",
+          "route": "s1p75",
+          "mode": "slot",
+          "target_ratio": 1.75,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2p5_p02",
+      "ratio": 2.5,
+      "replicate": 2,
+      "route": "s2p5",
+      "mode_order": [
+        "off",
+        "slot"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2p5_p02_off",
+          "pair_id": "coarse_s2p5_p02",
+          "route": "s2p5",
+          "mode": "off",
+          "target_ratio": 2.5,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2p5_p02_slot",
+          "pair_id": "coarse_s2p5_p02",
+          "route": "s2p5",
+          "mode": "slot",
+          "target_ratio": 2.5,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2p4822164743_p02",
+      "ratio": 2.4822164743083004,
+      "replicate": 2,
+      "route": "s2p4822164743",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2p4822164743_p02_slot",
+          "pair_id": "coarse_s2p4822164743_p02",
+          "route": "s2p4822164743",
+          "mode": "slot",
+          "target_ratio": 2.4822164743083004,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2p4822164743_p02_off",
+          "pair_id": "coarse_s2p4822164743_p02",
+          "route": "s2p4822164743",
+          "mode": "off",
+          "target_ratio": 2.4822164743083004,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1p5_p02",
+      "ratio": 1.5,
+      "replicate": 2,
+      "route": "s1p5",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1p5_p02_slot",
+          "pair_id": "coarse_s1p5_p02",
+          "route": "s1p5",
+          "mode": "slot",
+          "target_ratio": 1.5,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1p5_p02_off",
+          "pair_id": "coarse_s1p5_p02",
+          "route": "s1p5",
+          "mode": "off",
+          "target_ratio": 1.5,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s2_p02",
+      "ratio": 2.0,
+      "replicate": 2,
+      "route": "s2",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s2_p02_slot",
+          "pair_id": "coarse_s2_p02",
+          "route": "s2",
+          "mode": "slot",
+          "target_ratio": 2.0,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s2_p02_off",
+          "pair_id": "coarse_s2_p02",
+          "route": "s2",
+          "mode": "off",
+          "target_ratio": 2.0,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    },
+    {
+      "id": "coarse_s1_p02",
+      "ratio": 1.0,
+      "replicate": 2,
+      "route": "s1",
+      "mode_order": [
+        "slot",
+        "off"
+      ],
+      "cases": [
+        {
+          "id": "coarse_s1_p02_slot",
+          "pair_id": "coarse_s1_p02",
+          "route": "s1",
+          "mode": "slot",
+          "target_ratio": 1.0,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        },
+        {
+          "id": "coarse_s1_p02_off",
+          "pair_id": "coarse_s1_p02",
+          "route": "s1",
+          "mode": "off",
+          "target_ratio": 1.0,
+          "replicate": 2,
+          "input_length": 8192,
+          "batched_tokens": 8192
+        }
+      ]
+    }
+  ],
+  "ratios": [
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+    2.25,
+    2.4822164743083004,
+    2.5
+  ],
+  "service_starts": 32,
+  "benchmark_calls": 128,
+  "independent_pairs_per_ratio": 2,
+  "plan_sha256": "203465dcd6389210e04c86bc9e1b3340ec314828f317ee213452038021ed3787"
+}
