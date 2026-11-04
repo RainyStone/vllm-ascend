@@ -1,0 +1,19 @@
+准备与验证记录：2026-11-03
+目标主机：141.61.45.118
+目标容器：xzx_moonep
+
+用户确认：off vs slot（三项历史优化）；四个现有路由；完整8K/16K矩阵。
+仅编写脚本。未启动服务、未执行benchmark、未停止任何现有任务。
+
+检查结果：
+1. 三个Python文件AST语法检查和尾随空白检查通过。
+2. PYTHONDONTWRITEBYTECODE=1 python -m unittest -v test_harness.py：5项全部通过。
+   覆盖配对顺序、route峰均比、物理卡4..7限制、旧环境清理、相同seed、96GiB显存解析、
+   忙卡/未知格式拒绝、失败请求/非有限数据拒绝、丢弃预热轮、收益公式与缺失/不配对结果排除。
+3. main(--plan)在subprocess.Popen和capture_npu被禁止的条件下通过；仅生成计划。
+4. 计划32次起服、128次bench调用（含预热）；实际均未执行。
+5. home-rank峰均比：uniform=1.0，4hot=1.661377，3hot1r=2.482216，4hot1r=2.984131。
+6. data/当前仅有README.txt，无真实或合成性能数据；逻辑测试的临时合成数据已自动清理。
+
+未验证项：96GiB A5实际模型起服、MoonEP跨卡通信、完整矩阵性能和输出正确性。
+容器内未安装ruff，本次未运行ruff；没有提交或推送。

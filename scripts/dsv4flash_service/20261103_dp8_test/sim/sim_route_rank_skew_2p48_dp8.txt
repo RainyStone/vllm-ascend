@@ -1,0 +1,4 @@
+# DP8/EP8: E=256,K=6,32 experts/rank. Target home-rank peak/mean=2.4822164743.
+# Two hot experts on rank0, remaining experts share the residual equally.
+0:10.895172557877
+16:10.895172557877

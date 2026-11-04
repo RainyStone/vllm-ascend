@@ -1,0 +1,186 @@
+{
+  "source": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297",
+  "config": {
+    "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration",
+    "model": "/mnt/share/weight/DeepSeek-V4-Flash",
+    "python": "/usr/local/python3.11.10/bin/python",
+    "cann_env": "/usr/local/Ascend/cann/set_env.sh",
+    "cards": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "interface": "enp34s0f1",
+    "interface_ip": "141.61.45.118",
+    "port": 8444,
+    "served_model": "test_auto",
+    "modes": [
+      "off",
+      "slot"
+    ],
+    "slot_optimizations": true,
+    "routes": [
+      "3hot1r"
+    ],
+    "input_lengths": [
+      8192,
+      16384
+    ],
+    "batched_tokens": [
+      8192,
+      16384
+    ],
+    "num_prompts": 32,
+    "max_concurrency": 16,
+    "output_length": 1,
+    "rounds": 3,
+    "discard_rounds": 1,
+    "max_model_len": 20480,
+    "kv_cache_bytes": 9663676416,
+    "gpu_memory_utilization": 0.8,
+    "server_seed": 1024,
+    "route_seed": 0,
+    "min_dispatch_tokens": 16,
+    "omp_num_threads": 100,
+    "ready_timeout_seconds": 1500,
+    "bench_timeout_seconds": 1800,
+    "release_timeout_seconds": 300,
+    "idle_hbm_limit_mb": 12000
+  },
+  "cases": [
+    {
+      "case": {
+        "id": "3hot1r_L8192_B8192_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 8192,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "ValueError: Case metadata is incomplete or does not match the plan: RuntimeError: Service exited early: 1",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L8192_B8192_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 8192,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L8192_B8192_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L8192_B16384_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 8192,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L8192_B16384_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L8192_B16384_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 8192,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L8192_B16384_off/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B8192_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 16384,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L16384_B8192_off/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B8192_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 16384,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L16384_B8192_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B16384_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 16384,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L16384_B16384_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B16384_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 16384,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141216_015297/3hot1r_L16384_B16384_off/metadata.json'",
+      "rounds": []
+    }
+  ],
+  "comparisons": [
+    {
+      "route": "3hot1r",
+      "input_length": 8192,
+      "batched_tokens": 8192,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    },
+    {
+      "route": "3hot1r",
+      "input_length": 8192,
+      "batched_tokens": 16384,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    },
+    {
+      "route": "3hot1r",
+      "input_length": 16384,
+      "batched_tokens": 8192,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    },
+    {
+      "route": "3hot1r",
+      "input_length": 16384,
+      "batched_tokens": 16384,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    }
+  ],
+  "all_complete": false,
+  "statistic": "Arithmetic mean across retained rounds; no confidence claim with n=2.",
+  "routing_scope": "Synthetic home-rank route peak/mean, not measured post-slot compute skew."
+}

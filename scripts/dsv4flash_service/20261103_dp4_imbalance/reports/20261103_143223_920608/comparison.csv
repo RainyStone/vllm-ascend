@@ -1,0 +1,2 @@
+route,home_rank_peak_to_mean,input_length,batched_tokens,moonep_mode,status,reason,samples_per_mode,off_ttft_ms,on_ttft_ms,ttft_reduction_pct,off_input_tps,on_input_tps,input_throughput_gain_pct,off_total_tps,on_total_tps,total_throughput_gain_pct,off_duration_s,on_duration_s,duration_reduction_pct
+3hot1r,,8192,8192,slot,incomplete,Both complete modes are required; missing/failed cases are not averaged.,,,,,,,,,,,,,

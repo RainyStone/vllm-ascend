@@ -1,0 +1,316 @@
+{
+  "source": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344",
+  "config": {
+    "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration",
+    "model": "/mnt/share/weight/DeepSeek-V4-Flash",
+    "python": "/usr/local/python3.11.10/bin/python",
+    "cann_env": "/usr/local/Ascend/cann/set_env.sh",
+    "cards": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "interface": "enp34s0f1",
+    "interface_ip": "141.61.45.118",
+    "port": 8444,
+    "served_model": "test_auto",
+    "modes": [
+      "off",
+      "slot"
+    ],
+    "slot_optimizations": true,
+    "routes": [
+      "3hot1r"
+    ],
+    "input_lengths": [
+      8192,
+      16384
+    ],
+    "batched_tokens": [
+      8192,
+      16384
+    ],
+    "num_prompts": 32,
+    "max_concurrency": 16,
+    "output_length": 1,
+    "rounds": 3,
+    "discard_rounds": 1,
+    "max_model_len": 20480,
+    "kv_cache_bytes": 9663676416,
+    "gpu_memory_utilization": 0.8,
+    "server_seed": 1024,
+    "route_seed": 0,
+    "min_dispatch_tokens": 16,
+    "omp_num_threads": 100,
+    "ready_timeout_seconds": 1500,
+    "bench_timeout_seconds": 1800,
+    "release_timeout_seconds": 300,
+    "idle_hbm_limit_mb": 12000
+  },
+  "cases": [
+    {
+      "case": {
+        "id": "3hot1r_L8192_B8192_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 8192,
+        "batched_tokens": 8192
+      },
+      "status": "complete",
+      "reason": "",
+      "rounds": [
+        {
+          "round": 2,
+          "metrics": {
+            "date": "20261103-141924",
+            "endpoint_type": "openai",
+            "backend": "openai",
+            "label": null,
+            "model_id": "/mnt/share/weight/DeepSeek-V4-Flash",
+            "tokenizer_id": "/mnt/share/weight/DeepSeek-V4-Flash",
+            "num_prompts": 32,
+            "request_rate": "inf",
+            "burstiness": 1.0,
+            "max_concurrency": 16,
+            "duration": 9.54098149004858,
+            "completed": 32,
+            "failed": 0,
+            "total_input_tokens": 262144,
+            "total_output_tokens": 32,
+            "request_throughput": 3.353952634053068,
+            "request_goodput": null,
+            "output_throughput": 3.353952634053068,
+            "total_token_throughput": 27478.933930796786,
+            "max_output_tokens_per_s": 4.0,
+            "max_concurrent_requests": 20,
+            "rtfx": 0.0,
+            "mean_ttft_ms": 3643.1700206157984,
+            "median_ttft_ms": 3764.5479399361648,
+            "std_ttft_ms": 1212.4265896654094,
+            "p50_ttft_ms": 3764.5479399361648,
+            "p90_ttft_ms": 5046.774655021728,
+            "p99_ttft_ms": 6028.896363208769,
+            "mean_e2el_ms": 3643.1698724954913,
+            "median_e2el_ms": 3764.5477799815126,
+            "std_e2el_ms": 1212.4266153992337,
+            "p50_e2el_ms": 3764.5477799815126,
+            "p90_e2el_ms": 5046.774538001046,
+            "p99_e2el_ms": 6028.896276287269,
+            "input_throughput": 27475.579978162732
+          }
+        },
+        {
+          "round": 3,
+          "metrics": {
+            "date": "20261103-141950",
+            "endpoint_type": "openai",
+            "backend": "openai",
+            "label": null,
+            "model_id": "/mnt/share/weight/DeepSeek-V4-Flash",
+            "tokenizer_id": "/mnt/share/weight/DeepSeek-V4-Flash",
+            "num_prompts": 32,
+            "request_rate": "inf",
+            "burstiness": 1.0,
+            "max_concurrency": 16,
+            "duration": 9.244804240064695,
+            "completed": 32,
+            "failed": 0,
+            "total_input_tokens": 262144,
+            "total_output_tokens": 32,
+            "request_throughput": 3.461403743014905,
+            "request_goodput": null,
+            "output_throughput": 3.461403743014905,
+            "total_token_throughput": 28359.280866521116,
+            "max_output_tokens_per_s": 4.0,
+            "max_concurrent_requests": 20,
+            "rtfx": 0.0,
+            "mean_ttft_ms": 3740.217331873282,
+            "median_ttft_ms": 4014.830384985544,
+            "std_ttft_ms": 902.0523067636096,
+            "p50_ttft_ms": 4014.830384985544,
+            "p90_ttft_ms": 4224.209319986403,
+            "p99_ttft_ms": 5218.353507312713,
+            "mean_e2el_ms": 3740.2171099929546,
+            "median_e2el_ms": 4014.830229978543,
+            "std_e2el_ms": 902.0523271021817,
+            "p50_e2el_ms": 4014.830229978543,
+            "p90_e2el_ms": 4224.208829936106,
+            "p99_e2el_ms": 5218.353375875158,
+            "input_throughput": 28355.8194627781
+          }
+        }
+      ],
+      "route": {
+        "name": "3hot1r",
+        "path": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/sim/sim_route_3hot_1rank.txt",
+        "sha256": "62d85e81d1c19a33f011ff9792e5ddf61f6a4a41d17d07e40cdde78f3aca5f08",
+        "rank_route_percent": [
+          62.055411857707504,
+          12.648196047430831,
+          12.648196047430831,
+          12.648196047430831
+        ],
+        "home_rank_peak_to_mean": 2.4822164743083004
+      },
+      "sample_count": 2,
+      "means": {
+        "duration": 9.392892865056638,
+        "mean_ttft_ms": 3691.6936762445403,
+        "median_ttft_ms": 3889.6891624608543,
+        "p90_ttft_ms": 4635.491987504065,
+        "p99_ttft_ms": 5623.624935260741,
+        "std_ttft_ms": 1057.2394482145096,
+        "mean_e2el_ms": 3691.693491244223,
+        "median_e2el_ms": 3889.6890049800277,
+        "p90_e2el_ms": 4635.491683968576,
+        "p99_e2el_ms": 5623.6248260812135,
+        "request_throughput": 3.4076781885339864,
+        "input_throughput": 27915.699720470417,
+        "output_throughput": 3.4076781885339864,
+        "total_token_throughput": 27919.10739865895,
+        "total_input_tokens": 262144,
+        "total_output_tokens": 32
+      },
+      "across_round_stdev": {
+        "duration": 0.20942894189678793,
+        "mean_ttft_ms": 68.62281188608827,
+        "median_ttft_ms": 176.97641410636535,
+        "p90_ttft_ms": 581.6415263724627,
+        "p99_ttft_ms": 573.1403498464116,
+        "std_ttft_ms": 219.46776014577455,
+        "mean_e2el_ms": 68.62275972987773,
+        "median_e2el_ms": 176.97641760488307,
+        "p90_e2el_ms": 581.6417901442329,
+        "p99_e2el_ms": 573.1403813240158,
+        "request_throughput": 0.0759794077929296,
+        "input_throughput": 622.4233086396792,
+        "output_throughput": 0.0759794077929296,
+        "total_token_throughput": 622.4992880474716,
+        "total_input_tokens": 0.0,
+        "total_output_tokens": 0.0
+      }
+    },
+    {
+      "case": {
+        "id": "3hot1r_L8192_B8192_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 8192,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "ValueError: Case metadata is incomplete or does not match the plan: KeyboardInterrupt: Interrupted by signal 15",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L8192_B16384_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 8192,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344/3hot1r_L8192_B16384_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L8192_B16384_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 8192,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344/3hot1r_L8192_B16384_off/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B8192_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 16384,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344/3hot1r_L16384_B8192_off/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B8192_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 16384,
+        "batched_tokens": 8192
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344/3hot1r_L16384_B8192_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B16384_slot",
+        "route": "3hot1r",
+        "mode": "slot",
+        "input_length": 16384,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344/3hot1r_L16384_B16384_slot/metadata.json'",
+      "rounds": []
+    },
+    {
+      "case": {
+        "id": "3hot1r_L16384_B16384_off",
+        "route": "3hot1r",
+        "mode": "off",
+        "input_length": 16384,
+        "batched_tokens": 16384
+      },
+      "status": "incomplete",
+      "reason": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261103_dp4_imbalance/data/20261103_141611_350344/3hot1r_L16384_B16384_off/metadata.json'",
+      "rounds": []
+    }
+  ],
+  "comparisons": [
+    {
+      "route": "3hot1r",
+      "input_length": 8192,
+      "batched_tokens": 8192,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    },
+    {
+      "route": "3hot1r",
+      "input_length": 8192,
+      "batched_tokens": 16384,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    },
+    {
+      "route": "3hot1r",
+      "input_length": 16384,
+      "batched_tokens": 8192,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    },
+    {
+      "route": "3hot1r",
+      "input_length": 16384,
+      "batched_tokens": 16384,
+      "moonep_mode": "slot",
+      "status": "incomplete",
+      "reason": "Both complete modes are required; missing/failed cases are not averaged."
+    }
+  ],
+  "all_complete": false,
+  "statistic": "Arithmetic mean across retained rounds; no confidence claim with n=2.",
+  "routing_scope": "Synthetic home-rank route peak/mean, not measured post-slot compute skew."
+}

@@ -1,0 +1,2 @@
+# Preserve report bytes and recognize CSV CRLF line endings.
+*.csv -text whitespace=trailing-space,space-before-tab,cr-at-eol

@@ -1,0 +1,47 @@
+{
+  "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration",
+  "model": "/mnt/share/weight/DeepSeek-V4-Flash",
+  "python": "/usr/local/python3.11.10/bin/python",
+  "cann_env": "/usr/local/Ascend/cann/set_env.sh",
+  "cards": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "interface": "enp34s0f1",
+  "interface_ip": "141.61.45.118",
+  "port": 8444,
+  "served_model": "test_auto",
+  "modes": [
+    "off",
+    "slot"
+  ],
+  "slot_optimizations": true,
+  "routes": [
+    "3hot1r"
+  ],
+  "input_lengths": [
+    8192
+  ],
+  "batched_tokens": [
+    8192
+  ],
+  "num_prompts": 32,
+  "max_concurrency": 16,
+  "output_length": 1,
+  "rounds": 3,
+  "discard_rounds": 1,
+  "max_model_len": 8193,
+  "kv_cache_bytes": 4294967296,
+  "gpu_memory_utilization": 0.8,
+  "server_seed": 1024,
+  "route_seed": 0,
+  "min_dispatch_tokens": 16,
+  "omp_num_threads": 100,
+  "ready_timeout_seconds": 1500,
+  "bench_timeout_seconds": 1800,
+  "release_timeout_seconds": 300,
+  "idle_hbm_limit_mb": 12000,
+  "first_mode": "slot"
+}

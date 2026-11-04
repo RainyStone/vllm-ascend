@@ -1,0 +1,37 @@
+# Generated workload data stays on the shared filesystem.
+**/data/
+**/review_export/
+**/review_export_prompt_fix/
+**/result_export/
+**/paused_export/
+**/commit_review_*/
+**/before/
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
+*.log
+*.pid
+*.pgid
+*.lock
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.so
+*.so.*
+*.o
+*.a
+**/*_before.py.txt
+**/CURRENT_EXECUTION.json
+**/CURRENT_DIAGNOSIS.json
+
+# Superseded local drafts; active entry points are retained.
+20261104_dp8_longbenchv2_aisbench/aisbench_off_proposed.py
+20261104_dp8_longbenchv2_aisbench/aisbench_slot_proposed.py
+20261104_dp8_longbenchv2_aisbench/run_remaining.py
+
+# Core fixes are tracked by their original-repository commits.
+20261104_dp8_longbenchv2_aisbench/precision_fix/**/*.patch
+
+# Duplicate collected stdout, not canonical result records.
+**/collect_stdout.json
