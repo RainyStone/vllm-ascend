@@ -1,0 +1,10 @@
+CPU/static validation only; no vLLM service or aisbench inference executed.
+bash -n: all four shell scripts passed.
+Python AST: all audit, preparation, config and validation Python files passed.
+mmengine.Config.fromfile: off/slot configs parsed; stream=True, batch_size=16, max_out_len=1, retry=0 verified in earlier check.
+Dataset: 316 full original records, 187 excluded, original order and all fields unchanged, longest complete-prompt audit length 130285.
+Round validator: flat JSONL and UUID-mapped JSONL accepted; wrong output length, mismatched input token count and duplicate/missing ids rejected.
+Service startup, dynamic library linking, 24-GiB KV allocation, longest request and client concurrency remain unexecuted and unvalidated.
+Runtime correction: JSONL reader handles literal Unicode U+2028 inside JSON strings; regression passed.
+Proposed single-pass formatter: both configurations parse/build; all316 complete rendered prompts byte-identical to source template.
+Current experiment stopped awaiting required config change confirmation; first316-request round excluded because upstream formatter changed3 source contexts. Eight NPUs/8444 released.

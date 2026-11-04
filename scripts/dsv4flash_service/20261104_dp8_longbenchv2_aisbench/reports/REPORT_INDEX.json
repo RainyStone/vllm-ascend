@@ -1,0 +1,122 @@
+[
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/selection_manifest.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/selection_manifest.json",
+    "bytes": 92905,
+    "sha256": "a2e83ed45ccc91a149fb89b1b107af4dce1fc2a5f5bf3a2653e7919152620a81"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_114303/RESULT.md",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_114303/RESULT.md",
+    "bytes": 916,
+    "sha256": "60bb569f3ed2d22e1a6fd05f5a55081c0e8f4a1b1bcb271a283a9be365db374b"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/CLEANUP_CHECK.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/CLEANUP_CHECK.json",
+    "bytes": 108,
+    "sha256": "3f1544d82e3cc984d6fdbb774a7fde07f4c84ae1aef09ada1e7a5e9b06aefc5d"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/results.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/results.json",
+    "bytes": 133407,
+    "sha256": "1a8053841f9dbd96e29f8d52acd40dcbe55b43ec2b843d9e6d20ff45f03232cd"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/rounds.csv",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/rounds.csv",
+    "bytes": 1347,
+    "sha256": "7a22dbf1dabdde15f63344abe4d3d525e9f4a8b899b59fd62482af7eb067d70a"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/RESULT.md",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/RESULT.md",
+    "bytes": 1743,
+    "sha256": "548af1787096f7b73af0e4931dc7b9fc5443608597b8f42f93955b620e724aa3"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/request_metrics.csv",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/request_metrics.csv",
+    "bytes": 323975,
+    "sha256": "6b22a7a93ca9eb04b8969cc9ef2ba0703e64781e90ae6c46188dd743ab4ef356"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/length_group_comparison.csv",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/length_group_comparison.csv",
+    "bytes": 371,
+    "sha256": "e2ad451678ff8490361d3c2138bdf5736605850294a453677e000685fe1a3a79"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/LENGTH_ANALYSIS.md",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/LENGTH_ANALYSIS.md",
+    "bytes": 641,
+    "sha256": "3fb738e1fe5f48981992d478646d6e40abb54d1d0ed5dc102e605190c0d34689"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/first_token_diagnostics.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/first_token_diagnostics.json",
+    "bytes": 3004,
+    "sha256": "04834c339d46ec8b9752c1dde56429136af496e693190dc63ad067a0bdbb7920"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_122031_literal/ANALYSIS_STATUS.md",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_122031_literal/ANALYSIS_STATUS.md",
+    "bytes": 4837,
+    "sha256": "677cf776a1ac72dd11308e5e3387d7d8443ca7bf9c7222db65c026180710d797"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/SOURCE_PROVENANCE.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/SOURCE_PROVENANCE.json",
+    "bytes": 3506,
+    "sha256": "e702b7c4dea1a86f3f5badef88556ba0747c784a43a690ecf047c295e999635e"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/RUN_DESCRIPTION.txt",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/RUN_DESCRIPTION.txt",
+    "bytes": 209,
+    "sha256": "af1a0b7824468dda15c6095883f8279241f61aabe52e72a64710548512b31867"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/ANALYSIS_NOTES.txt",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/ANALYSIS_NOTES.txt",
+    "bytes": 235,
+    "sha256": "9edc11eda43203f44cf6c35ce9343132fac2734a14b68941ec7a26785780a01b"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/FIRST_PAIR_TOKEN_COMPARISON.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/FIRST_PAIR_TOKEN_COMPARISON.json",
+    "bytes": 8048,
+    "sha256": "78666da7f2667b41b91928270541c36dac911461546946559be22908b8263570"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/PARTIAL_RESULTS.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/PARTIAL_RESULTS.json",
+    "bytes": 11432,
+    "sha256": "13b2dedde2a123c2422e0015954861a5fa54f5cd03da2ae22c898df04c99c333"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/CLEANUP_CHECK.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/CLEANUP_CHECK.json",
+    "bytes": 103,
+    "sha256": "898959fa6586d7c488f947629534f564ca2744d770ca508144da8583b0d707f0"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/PARTIAL_RESULT.txt",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/PARTIAL_RESULT.txt",
+    "bytes": 456,
+    "sha256": "b4214ada55f8d7668295e15504bb026f057e986b48600664366c5a3bdf2790b5"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/STOP_AFTER_SLOT_COMPLETE.json",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/STOP_AFTER_SLOT_COMPLETE.json",
+    "bytes": 417,
+    "sha256": "48ee78bc652e4154d5b5004ec211cf97af77b4cc665438d4a0801d8e82572292"
+  },
+  {
+    "source": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/PAUSE_NOTE.txt",
+    "report": "scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/reports/run_20261104_202555_weighted_combine_fixed/PAUSE_NOTE.txt",
+    "bytes": 311,
+    "sha256": "77bafa7d31e0b82c99e4a0c7ff271c54a991347b8a41351752ecb02b05bf5020"
+  }
+]

@@ -1,0 +1,40 @@
+{
+  "host": "141.61.45.118",
+  "container": "xzx_moonep",
+  "implementation": "original repositories; fused weighted combine",
+  "files": {
+    "ascend-moonep/ascend_moonep/api.py": "e25d223ec8290ada9ce056149086689c8c0eed22a3d321a99463844efcc32161",
+    "ascend-moonep/ascend_moonep/ops.py": "de8d3b51170379c3d31a0c4546adcc7665682b5889eaf90ce626add5ab742328",
+    "ascend-moonep/ascend_moonep/launchers.py": "db6da4345fb28c065480c5b9bcf1b4e09dbdbd8a2d210a10670469f331ad876c",
+    "ascend-moonep/csrc/launcher.cpp": "8dda2b5a87857a9bba49a7943946f133feecd56860a1204cb7aa1c2642605a48",
+    "ascend-moonep/csrc/torch_classes.cpp": "f83d13388a89ac4537429293c8ed17edbcc1655403371a342c95eee17db4e5a4",
+    "ascend-moonep/csrc/launcher.h": "37985c7ff33aa1dad0b229114627bfab87b6b4fda61d99ca335da762ad5678bb",
+    "ascend-moonep/csrc/ops/planning.h": "8083b258bef8a66659065c6f71a967050df840b876e3633981cb226a018adad7",
+    "ascend-moonep/csrc/ops/moonep_combine.cpp": "54248448e09ef132bbb3babf94afbbf85798b60bb65172b89cf30bc81442a14e",
+    "ascend-moonep/csrc/ops/moonep_combine.h": "6ca0357bab854aefd1c20b65fa43d8f5dd708565f7ba18e001deebed7e50bed5",
+    "ascend-moonep/csrc/ops/planning.cpp": "4a97da75f032b62361102baeba9a8e1ca1daac1cb971711d9e679b4b41731e75",
+    "ascend-moonep/kernels/moonep_combine.cpp": "d55a83c4502824d1f52a395816a5fe85c607a2b1a1f1ad521761f519322e60ec",
+    "ascend-moonep/include/ascend_moonep/kernels/launch.h": "50bb626700f0ff195911b1e0d1d599dafc2e2c044322cb0f6eff81379f8b8194",
+    "vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "a673e4fc85422c5bdde2073f783522d6460d4cf29a27a719c341331d01055fb2",
+    "ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "be7c6b8bfdaf58a570b5ae225e0b96a2ad2c0647e396911b1f95252ee0e43d6b",
+    "ascend-moonep/ascend_moonep/_C.cpython-312-x86_64-linux-gnu.so": "4d38c6f22e750cf443297086f9576f5ad9b4e50a2a1b2f506b42c62a82eb06dd",
+    "ascend-moonep/ascend_moonep/_C.cpython-312-aarch64-linux-gnu.so": "c43442908e3fc8bc448b6069b71d167c2487dc0b0a0c9abc9bfd2d49d41fb6e0",
+    "ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "d5f4f86d71b5f9fa996b381fc104b080eda2e08b871f21956d28e89696e89974"
+  },
+  "model": "/mnt/share/weight/DeepSeek-V4-Flash",
+  "order": [
+    "pair01_off",
+    "pair01_slot",
+    "pair02_slot",
+    "pair02_off"
+  ],
+  "formal_requests": 3792,
+  "ascend-moonep": {
+    "head": "ceabdc2ec2d9559a7757be266456ebb061306066",
+    "diff": " 3rdparty/shmem                         |  0\n ascend_moonep/api.py                   | 44 ++++++++++++++++++++++\n ascend_moonep/launchers.py             | 18 +++++++++\n ascend_moonep/ops.py                   | 11 ++++++\n csrc/launcher.cpp                      | 15 ++++++++\n csrc/launcher.h                        |  6 +++\n csrc/ops/moonep_combine.cpp            | 67 ++++++++++++++++++++++++++++++++++\n csrc/ops/moonep_combine.h              |  7 ++++\n csrc/ops/planning.cpp                  | 13 +++++--\n csrc/ops/planning.h                    |  2 +\n csrc/torch_classes.cpp                 | 18 ++++++++-\n include/ascend_moonep/kernels/launch.h |  5 +++\n kernels/moonep_combine.cpp             | 66 ++++++++++++++++++++++++++++++---\n 13 files changed, 261 insertions(+), 11 deletions(-)\n"
+  },
+  "vllm-ascend": {
+    "head": "d2666bfb7d10f2704efeabc5888209f499e01183",
+    "diff": " csrc/third_party/catlass                 |  0\n vllm_ascend/ops/fused_moe/moonep_comm.py | 30 ++++++++++++++++++++++++++++++\n 2 files changed, 30 insertions(+)\n"
+  }
+}

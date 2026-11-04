@@ -1,0 +1,1 @@
+此目录保存轻量结果，REPORT_INDEX.json记录原路径与SHA256。原始数据未删除，继续保存在共享盘data目录。Git不纳入LongBench全文样本、JSONL、SQLite、debug日志、服务快照、锁文件与二进制。修复前完整对照为run_20261104_122031_literal；修复后重跑run_20261104_202555_weighted_combine_fixed按用户要求完成9轮后暂停，最后Off未执行。只有第1对是完整配对，不能把9轮结果写成完整12轮结果。

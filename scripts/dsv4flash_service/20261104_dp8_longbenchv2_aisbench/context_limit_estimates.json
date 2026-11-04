@@ -1,0 +1,231 @@
+{
+  "assumptions": [
+    "DP8/TP1/EP8, A5 cache layout, 43 attention layers, no MTP",
+    "hybrid KV manager enabled, max-num-batched-tokens=8192",
+    "static cache planning only, not total NPU memory or a runtime guarantee"
+  ],
+  "source_sha256": {
+    "vllm/vllm/v1/kv_cache_interface.py": "8d6be98bbf75b3d55007b64ccf5afef047ca01790a432522f70a196412c103d9",
+    "vllm-ascend/vllm_ascend/core/kv_cache_interface.py": "a83a04d288f61e60218242fd31bb0ebdd36e44bdbb83b4649cab0c871cdda26b",
+    "vllm/vllm/v1/core/kv_cache_utils.py": "b89f9afa7f95fcc30412ae2031d5370a23e95f35d068fa14e5824dce1c900ee5"
+  },
+  "results": [
+    {
+      "input_cap": 8192,
+      "max_model_len": 8193,
+      "cache_block_size": 128,
+      "original_samples": 0,
+      "one_max_length_request_kv_gib": 6.422651767730713,
+      "two_max_length_requests_kv_gib": 12.845303535461426,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 16384,
+      "max_model_len": 16385,
+      "cache_block_size": 128,
+      "original_samples": 33,
+      "one_max_length_request_kv_gib": 6.513669013977051,
+      "two_max_length_requests_kv_gib": 13.027338027954102,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 32768,
+      "max_model_len": 32769,
+      "cache_block_size": 128,
+      "original_samples": 116,
+      "one_max_length_request_kv_gib": 6.640301704406738,
+      "two_max_length_requests_kv_gib": 13.280603408813477,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 65536,
+      "max_model_len": 65537,
+      "cache_block_size": 128,
+      "original_samples": 190,
+      "one_max_length_request_kv_gib": 6.893567085266113,
+      "two_max_length_requests_kv_gib": 13.787134170532227,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 131072,
+      "max_model_len": 131073,
+      "cache_block_size": 128,
+      "original_samples": 316,
+      "one_max_length_request_kv_gib": 7.400097846984863,
+      "two_max_length_requests_kv_gib": 14.800195693969727,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 262144,
+      "max_model_len": 262145,
+      "cache_block_size": 128,
+      "original_samples": 407,
+      "one_max_length_request_kv_gib": 8.413159370422363,
+      "two_max_length_requests_kv_gib": 16.826318740844727,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 524288,
+      "max_model_len": 524289,
+      "cache_block_size": 128,
+      "original_samples": 455,
+      "one_max_length_request_kv_gib": 10.439282417297363,
+      "two_max_length_requests_kv_gib": 20.878564834594727,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 1048575,
+      "max_model_len": 1048576,
+      "cache_block_size": 128,
+      "original_samples": 473,
+      "one_max_length_request_kv_gib": 14.487571239471436,
+      "two_max_length_requests_kv_gib": 28.97514247894287,
+      "kv_pool_bytes_per_block": 3877376
+    },
+    {
+      "input_cap": 8192,
+      "max_model_len": 8193,
+      "cache_block_size": 64,
+      "original_samples": 0,
+      "one_max_length_request_kv_gib": 6.408801317214966,
+      "two_max_length_requests_kv_gib": 12.817602634429932,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 16384,
+      "max_model_len": 16385,
+      "cache_block_size": 64,
+      "original_samples": 33,
+      "one_max_length_request_kv_gib": 6.505754470825195,
+      "two_max_length_requests_kv_gib": 13.01150894165039,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 32768,
+      "max_model_len": 32769,
+      "cache_block_size": 64,
+      "original_samples": 116,
+      "one_max_length_request_kv_gib": 6.632387161254883,
+      "two_max_length_requests_kv_gib": 13.264774322509766,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 65536,
+      "max_model_len": 65537,
+      "cache_block_size": 64,
+      "original_samples": 190,
+      "one_max_length_request_kv_gib": 6.885652542114258,
+      "two_max_length_requests_kv_gib": 13.771305084228516,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 131072,
+      "max_model_len": 131073,
+      "cache_block_size": 64,
+      "original_samples": 316,
+      "one_max_length_request_kv_gib": 7.392183303833008,
+      "two_max_length_requests_kv_gib": 14.784366607666016,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 262144,
+      "max_model_len": 262145,
+      "cache_block_size": 64,
+      "original_samples": 407,
+      "one_max_length_request_kv_gib": 8.405244827270508,
+      "two_max_length_requests_kv_gib": 16.810489654541016,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 524288,
+      "max_model_len": 524289,
+      "cache_block_size": 64,
+      "original_samples": 455,
+      "one_max_length_request_kv_gib": 10.431367874145508,
+      "two_max_length_requests_kv_gib": 20.862735748291016,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 1048575,
+      "max_model_len": 1048576,
+      "cache_block_size": 64,
+      "original_samples": 473,
+      "one_max_length_request_kv_gib": 14.481635332107544,
+      "two_max_length_requests_kv_gib": 28.963270664215088,
+      "kv_pool_bytes_per_block": 1938688
+    },
+    {
+      "input_cap": 8192,
+      "max_model_len": 8193,
+      "cache_block_size": 32,
+      "original_samples": 0,
+      "one_max_length_request_kv_gib": 6.401876091957092,
+      "two_max_length_requests_kv_gib": 12.803752183914185,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 16384,
+      "max_model_len": 16385,
+      "cache_block_size": 32,
+      "original_samples": 33,
+      "one_max_length_request_kv_gib": 6.501797199249268,
+      "two_max_length_requests_kv_gib": 13.003594398498535,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 32768,
+      "max_model_len": 32769,
+      "cache_block_size": 32,
+      "original_samples": 116,
+      "one_max_length_request_kv_gib": 6.628429889678955,
+      "two_max_length_requests_kv_gib": 13.25685977935791,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 65536,
+      "max_model_len": 65537,
+      "cache_block_size": 32,
+      "original_samples": 190,
+      "one_max_length_request_kv_gib": 6.88169527053833,
+      "two_max_length_requests_kv_gib": 13.76339054107666,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 131072,
+      "max_model_len": 131073,
+      "cache_block_size": 32,
+      "original_samples": 316,
+      "one_max_length_request_kv_gib": 7.38822603225708,
+      "two_max_length_requests_kv_gib": 14.77645206451416,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 262144,
+      "max_model_len": 262145,
+      "cache_block_size": 32,
+      "original_samples": 407,
+      "one_max_length_request_kv_gib": 8.40128755569458,
+      "two_max_length_requests_kv_gib": 16.80257511138916,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 524288,
+      "max_model_len": 524289,
+      "cache_block_size": 32,
+      "original_samples": 455,
+      "one_max_length_request_kv_gib": 10.42741060256958,
+      "two_max_length_requests_kv_gib": 20.85482120513916,
+      "kv_pool_bytes_per_block": 969344
+    },
+    {
+      "input_cap": 1048575,
+      "max_model_len": 1048576,
+      "cache_block_size": 32,
+      "original_samples": 473,
+      "one_max_length_request_kv_gib": 14.478667378425598,
+      "two_max_length_requests_kv_gib": 28.957334756851196,
+      "kv_pool_bytes_per_block": 969344
+    }
+  ],
+  "validation_status": "Unvalidated static reconstruction; not calibrated to the prior 4 GiB / 8193-token startup. Do not treat numeric estimates as measured requirements or proof of service feasibility."
+}

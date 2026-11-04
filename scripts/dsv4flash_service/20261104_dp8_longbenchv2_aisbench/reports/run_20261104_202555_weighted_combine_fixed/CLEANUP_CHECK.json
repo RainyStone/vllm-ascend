@@ -1,0 +1,5 @@
+{
+  "eight_npus_released": true,
+  "port_8444_bindable": true,
+  "no_final_off_service_started": true
+}

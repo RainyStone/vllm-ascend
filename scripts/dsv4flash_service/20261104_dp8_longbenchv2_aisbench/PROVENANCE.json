@@ -1,0 +1,23 @@
+{
+  "at": "2026-11-04T10:27:21.397329+08:00",
+  "status": "draft_awaiting_content_review_no_experiment_execution",
+  "sha256": {
+    "start_off.sh": "653e3f9a4be25964d63e7f35496a7abdfd2b4821f90f5d6f7a44738e3338931c",
+    "start_slot.sh": "a2336e68c1eb4d218c0347ab97c653d009b58ce4828cedc56e1ac7001d1c3454",
+    "bench_off.sh": "0236e8859e8e537211323c3d8ab1c34925c0c30a8d70f9a116a20edb08489b93",
+    "bench_slot.sh": "084939a050826cf797116578156270aca9f1f2f962676d4aa5dacf2fe7f7eecc",
+    "aisbench_off.py": "51a6a6943b635fc3655c29973ecfc45c3957df3fb2b98bd4293548a2ee178928",
+    "aisbench_slot.py": "2a453de230b641b73515cbed1abadc0c2df54c735cf2e5e9313eb2572674dd8b",
+    "prepare_dataset.py": "44b23c74353f19e21c83faabe2d80e350071b474750ce83af514bdf282b97574",
+    "validate_round.py": "ad09f466fd527a64b1f6b68d2772df4c086e588a0c36e6b42499c1b36250f456",
+    "data/selection_manifest.json": "ddd0b296106a42341b99a4fe0f8a62bb68a5c4cdb0e4d5306195d7f66c670d19",
+    "data/longbenchv2_full_le128k.json": "fef00721db994b6352c0591705b5818fa1c5c83521867edbbe37ca7042eb9b55",
+    "length_summary.json": "c319ce56b8da9f8dfb2fcbc655802e2cd79adaa99fea1bab7225698fe75b5601"
+  },
+  "repo_heads": {
+    "vllm": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+    "vllm-ascend": "d2666bfb7d10f2704efeabc5888209f499e01183",
+    "ascend-moonep": "ceabdc2ec2d9559a7757be266456ebb061306066",
+    "benchmark": "6fa4f7d8ed53c74c32aca1c57c7dcb2515e6bd50"
+  }
+}

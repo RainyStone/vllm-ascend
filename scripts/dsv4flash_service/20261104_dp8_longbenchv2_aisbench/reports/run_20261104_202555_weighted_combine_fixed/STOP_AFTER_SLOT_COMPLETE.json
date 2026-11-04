@@ -1,0 +1,10 @@
+{
+  "paused": true,
+  "at": "2026-11-04T21:31:26.998809+08:00",
+  "cleanup": {
+    "eight_npus_released": true,
+    "port_8444_bindable": true,
+    "no_final_off_service_started": true
+  },
+  "partial_result": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/executions/run_20261104_202555_weighted_combine_fixed/PARTIAL_RESULTS.json"
+}

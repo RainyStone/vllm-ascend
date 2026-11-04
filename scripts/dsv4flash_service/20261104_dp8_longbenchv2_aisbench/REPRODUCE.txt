@@ -1,0 +1,57 @@
+LongBench-v2 实验代码与结果说明
+
+环境与范围
+- 本目录面向共享盘上的 DSV4 Flash、141.61.45.118 的 xzx_moonep、8张Ascend950卡。
+- 服务与aisbench参数直接修改对应sh和配置文件；不从外部传入调优环境变量。
+- 模型权重、benchmark中的原始LongBench-v2数据集需预先提供，不随Git提交。
+- data/保存生成的全文样本、debug日志、JSONL、SQLite、状态和服务快照，保留在共享盘但不入Git。
+- reports/保存轻量结果；REPORT_INDEX.json给出原始路径和SHA256。
+
+已有数据
+- run_20261104_114303：花括号模板问题影响首轮，结果无效，仅留作问题记录。
+- run_20261104_122031_literal：修复模板后的完整off/Slot基线，4次起服12轮。
+- run_20261104_202555_weighted_combine_fixed：融合归并修复版，完成1台off、2台Slot，
+  共9轮2844条请求；最后off三轮按用户要求暂停，不是完整两对结论。
+- 用户未通知恢复前，不继续最后off，也不执行新的模型实验。
+
+复现一轮全新完整实验
+以下步骤用于将来明确安排的新执行，本次提交检查没有运行服务或压测。
+1. 按EXPERIMENT.md核对模型、数据集、原仓SDK和8卡资源，检查两份服务sh与两份aisbench配置。
+2. 数据未准备时，先运行audit_lengths.py和prepare_dataset.py，生成data/selection_manifest.json
+   与data/longbenchv2_full_le128k.json；已有数据应先核对哈希，不覆盖历史结果。
+3. 在本目录创建独立执行目录和CURRENT_EXECUTION.json，例如：
+
+python - <<'PY'
+import json, shutil
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+root = Path.cwd()
+stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+session = root / "data/executions" / ("run_" + stamp + "_manual")
+session.mkdir(parents=True, exist_ok=False)
+shutil.copy2(root / "data/selection_manifest.json", session / "selection_manifest.json")
+(root / "CURRENT_EXECUTION.json").write_text(
+    json.dumps({"session": str(session), "status": "prepared"}, indent=2))
+print(session)
+PY
+
+4. 用上一步打印的绝对目录作为参数运行：
+   python -u run_full_matrix.py <新执行目录>
+   控制器依次执行off→Slot、Slot→off，独立起服，每台3轮，并在结束后自动校验、汇总与释放资源。
+5. 查看matrix_status.py、执行目录remaining_state.json及RESULT.md。
+   RESULT.md和rounds.csv取每台服务第2、3轮均值，同模式两台服务再等权平均。
+   postprocess_when_complete.py用于本次历史修复版对照汇总，不是必需的通用执行入口。
+
+补充验证
+- diagnostics/包含独立的负载和固定请求诊断，不将诊断时间混入正式性能。
+- precision_fix/weighted_combine_v1/tests/为唯一的算子测试代码，
+  host124/tests/中的启动脚本已指向共享原仓SDK。
+- 所有同模式、跨模式首token比较只描述1-token文本一致性，不等价于LongBench任务准确率。
+- 老基线results.json的duration_seconds字段历史上误存毫秒；新版汇总脚本已换算为秒。
+  TTFT与输入吞吐字段不受此历史标签错误影响。
+
+代码位置
+- SDK原仓：/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep
+- vLLM Ascend原仓：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend
+- 核心修复提交：ascend-moonep 579bf37，vllm-ascend 791e100a9。

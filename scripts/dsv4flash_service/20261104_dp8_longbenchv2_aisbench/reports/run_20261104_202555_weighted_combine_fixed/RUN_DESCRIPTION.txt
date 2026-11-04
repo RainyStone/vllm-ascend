@@ -1,0 +1,1 @@
+User-authorized rerun after weighted-combine precision fix. Same 316 prompts and service parameters; off/slot + slot/off, 3 rounds per service, retain rounds 2 and 3. Full debug and raw request data retained.

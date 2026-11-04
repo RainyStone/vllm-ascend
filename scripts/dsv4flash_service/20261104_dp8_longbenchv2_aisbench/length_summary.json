@@ -1,0 +1,21 @@
+{
+  "samples": 503,
+  "minimum": 10285,
+  "median": 100414,
+  "p90": 484608,
+  "maximum": 4643843,
+  "model_max_position_embeddings": 1048576,
+  "counts_at_input_caps": {
+    "8192": 0,
+    "16384": 33,
+    "32768": 116,
+    "65536": 190,
+    "131072": 316,
+    "1048575": 473
+  },
+  "template": "Please read the following text and answer the questions below.\n <text> \n {context} \n </text> \n \n What is the correct answer to this question: {question} \n \n Choices: \n (A) {choice_A} \n (B) {choice_B} \n (C) {choice_C} \n (D) {choice_D} \n Let’s think step by step. Based on the above, what is the single, most likely answer choice? Format your response as follows: \"The correct answer is (insert answer here)",
+  "tokenizer_add_special_tokens": true,
+  "dataset_sha256": "15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2",
+  "tokenizer_sha256": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+  "note": "Native LongBench-v2 template; plain completions API; no chat template; tokenizer-only CPU audit."
+}

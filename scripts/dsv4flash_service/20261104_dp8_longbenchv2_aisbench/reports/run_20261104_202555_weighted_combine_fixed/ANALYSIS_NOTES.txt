@@ -1,0 +1,1 @@
+Corrected the analysis-only duration_seconds field: aisbench Benchmark Duration is reported in ms and is now divided by 1000. TTFT, throughput, model parameters and raw data are unaffected. Verified against a previous completed round.

@@ -1,0 +1,14 @@
+{
+  "model_confirmed": true,
+  "input_cap": 131072,
+  "max_model_len": 131073,
+  "dataset_policy": "original_full_text_subset",
+  "selected_samples": 316,
+  "independent_pairs": 2,
+  "rounds_per_service": 3,
+  "discard_rounds": [
+    1
+  ],
+  "content_review_confirmed": true,
+  "execution_authorized": true
+}

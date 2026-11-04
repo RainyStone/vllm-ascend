@@ -1,0 +1,1 @@
+The final Off startup script was intentionally blocked before CANN/model/service initialization by the user deferral guard. Controller exit code 75 was expected; it is not a model or benchmark failure. Nine completed rounds remain valid. No further model or diagnostic requests will run until the user resumes.
