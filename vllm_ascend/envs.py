@@ -25,9 +25,30 @@ from typing import Any
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
+def _moonep_dispatch_dtype() -> str:
+    value = os.getenv("VLLM_ASCEND_MOONEP_DISPATCH_DTYPE", "bf16").lower()
+    if value not in ("bf16", "mxfp8"):
+        raise ValueError("VLLM_ASCEND_MOONEP_DISPATCH_DTYPE must be bf16 or mxfp8")
+    return value
+
+
+def _moonep_fused_publish() -> bool:
+    value = os.getenv("VLLM_ASCEND_MOONEP_FUSED_PUBLISH", "0")
+    if value not in ("0", "1"):
+        raise ValueError("VLLM_ASCEND_MOONEP_FUSED_PUBLISH must be 0 or 1")
+    return value == "1"
+
+
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Fuse BF16 tail zeroing and SHMEM publication for MoonEP Slot weighted
+    # combine (MTE/UDMA, A5). 0 (default) keeps the legacy path; 1 requires
+    # libascend_moonep_publish.so. Non-sensitive. No quantization/math change.
+    "VLLM_ASCEND_MOONEP_FUSED_PUBLISH": _moonep_fused_publish,
+    # MoonEP activation transport: bf16 (default) or mxfp8 (Slot W4A8MXFP,
+    # REAL_T only). Non-sensitive; no change to model weights or combine dtype.
+    "VLLM_ASCEND_MOONEP_DISPATCH_DTYPE": _moonep_dispatch_dtype,
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

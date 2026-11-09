@@ -78,8 +78,10 @@ from vllm.forward_context import get_forward_context
 
 import atexit
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
+from vllm_ascend.ops.fused_moe.moe_par_stats import enabled as _route_stats_enabled
 from vllm_ascend.ops.fused_moe.moe_par_stats import note_compute_load as _note_compute_load
 from vllm_ascend.ops.fused_moe.moe_par_stats import note_route_counts as _note_route_counts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -1069,12 +1071,33 @@ def _scratch_for(E: int, K: int, H: int, s_max: int, extra: int, device) -> dict
     cu_pad = torch.zeros(nrows + 1, dtype=torch.int64, device=device)
     sc = {
         "cu_pad": cu_pad,
+        # Planning validates this vector but derives counts from topk itself.
+        "tpe_compat": torch.zeros(int(E), dtype=torch.int32, device=device),
         "counts": torch.empty(nrows, dtype=torch.int64, device=device),
         "own": torch.empty(int(E), dtype=torch.int64, device=device),
         "w": torch.empty(nvs, dtype=torch.float32, device=device),
     }
     _SCRATCH[key] = sc
     return sc
+
+
+def _route_histogram(topk_c, E: int, tokens: int, real_t, pad_expert,
+                     compatibility, collect: bool):
+    """Only diagnostics consume this histogram; planning rebuilds its own.
+
+    REAL_T excludes padded rows already, so its histogram carries no pad debt.
+    The compatibility tensor is immutable and reused, never passed to a recorder
+    that is enabled. SDK PlanningOp validates shape/dtype, not these values.
+    """
+    if not collect:
+        return compatibility, 0
+    routes = topk_c[:tokens] if real_t is not None else topk_c
+    histogram = torch.histc(routes.to(torch.float32), bins=E, min=0, max=E - 1).to(torch.int32)
+    pad_pairs = (
+        (topk_c.shape[0] - tokens) * topk_c.shape[1]
+        if real_t is None and pad_expert is not None else 0
+    )
+    return histogram, pad_pairs
 
 
 def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
@@ -1149,6 +1172,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self.top_k = int(kwargs.get("top_k", 0))
         self.num_experts = int(kwargs.get("num_experts", 0))
         self.num_local_experts = int(kwargs.get("num_local_experts", 0))
+        self.activation_transport = envs.VLLM_ASCEND_MOONEP_DISPATCH_DTYPE
+        self.fused_publish = envs.VLLM_ASCEND_MOONEP_FUSED_PUBLISH
 
     def _tstats(self, name: str, t0: float, t1: float | None = None) -> None:
         """MOONEP_TIME_STATS=1: per-phase wall accumulation (host, incl. syncs)."""
@@ -1181,6 +1206,16 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             raise ValueError(f"MoonEP dispatch expects 2D hidden_states, got shape {tuple(hidden_states.shape)}")
         T, H = hidden_states.shape
         E, K = self.num_experts, self.top_k
+        use_mxfp8 = self.activation_transport == "mxfp8"
+        if use_mxfp8:
+            from vllm_ascend.quantization.quant_type import QuantType
+
+            if not _ENV_SLOT_MODE or not _REAL_T:
+                raise ValueError("MXFP8 transport requires Slot mode and REAL_T=1")
+            if token_dispatch_input.quant.quant_type != QuantType.W4A8MXFP:
+                raise NotImplementedError("MXFP8 Slot transport currently supports W4A8MXFP")
+            if hidden_states.dtype != torch.bfloat16:
+                raise ValueError("MXFP8 transport expects the original BF16 activations")
         if K <= 0 or E <= 0:
             raise ValueError(f"MoonEP: invalid geometry K={K}, E={E}")
 
@@ -1258,7 +1293,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             tail["capacity"] = capacity
             tail["pad_expert"] = pad_expert
         # copy_ casts on the device: no per-call .to() temporaries.
-        hidden_c[:T].copy_(hidden_states)
+        if not use_mxfp8:
+            hidden_c[:T].copy_(hidden_states)
         route_c[:T].copy_(topk_weights)
         topk_c[:T].copy_(topk_ids)
         source_topk_weights_sk = None
@@ -1271,29 +1307,30 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # integers <= S*K <= 8192, exact in float32. Real-T mode histograms
         # only the copied prefix; the tail is never read by any kernel.
         #
-        # The library only *validates* tokens_per_expert (its planning kernel
-        # rebuilds the histogram from topk_c), but the real histogram is still
-        # built here because the load recorder consumes it host-side
-        # (_note_route_counts below).
-        tpe = torch.histc(
-            (topk_c[:T] if real_t is not None else topk_c).to(torch.float32),
-            bins=E, min=0, max=E - 1).to(torch.int32)
-        # Post-dispatch scratch (row counts, own rows, fp32 weight snapshot)
-        # sized for the largest pool rung: one set per (E, K, H) covers every
-        # step, replacing the ~8 allocating ops per layer the old chains cost.
+        # The native planning kernel consumes topk_c, not this compatibility
+        # histogram. Construct real counts only when the route recorder needs them.
         _pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
         sc = _scratch_for(E, K, H, max(_pool), buffer._require_ctx()["B"], topk_c.device)
+        tpe, histogram_pad_pairs = _route_histogram(
+            topk_c, E, T, real_t, pad_expert, sc["tpe_compat"], _route_stats_enabled()
+        )
 
         self._tstats("disp_pad", _t0, _tp0)
         self._tstats("disp_tpe", _tp0)
         self._tstats("disp_pre", _t0)
         _t1 = time.perf_counter()
-        h_nvs, w_nvs, cu, plan = buffer.dispatch(
-            hidden_c, route_c, topk_c, tpe,
-            zero_copy=False, inter_rank_sync=True,
-            num_tokens=real_t,
-            reuse_outputs=_ENV_REUSE_OUT,
-        )
+        dispatch_scale = None
+        if use_mxfp8:
+            h_nvs, dispatch_scale, w_nvs, cu, plan = buffer.dispatch_mxfp8(
+                hidden_states, route_c, topk_c, tpe, num_tokens=T, wire_storage=hidden_c,
+            )
+        else:
+            h_nvs, w_nvs, cu, plan = buffer.dispatch(
+                hidden_c, route_c, topk_c, tpe,
+                zero_copy=False, inter_rank_sync=True,
+                num_tokens=real_t,
+                reuse_outputs=_ENV_REUSE_OUT,
+            )
         _t2 = time.perf_counter()
         if _DUMP_PLAN_DIR is not None and _DUMP_PLAN_I[0] < _DUMP_PLAN_N:
             _dump_plan(plan, cu)
@@ -1338,7 +1375,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # without padding cannot inherit the previous layer's note.
         _note_route_counts(
             tpe,
-            pad_pairs=(capacity - T) * K if pad_expert is not None else 0,
+            pad_pairs=histogram_pad_pairs,
             pad_index=pad_expert if pad_expert is not None else -1,
         )
         slot_counts = None
@@ -1488,6 +1525,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         )
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
+            dynamic_scale=dispatch_scale[:hidden_trim.shape[0]] if dispatch_scale is not None else None,
             group_list=local_counts,
             group_list_type=1,  # count mode
             combine_metadata=MoonEPCombineMetadata(
@@ -1514,7 +1552,16 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         if combine_metadata.source_topk_weights_sk is not None:
             buffer = combine_metadata.buffer
             nvs = int(buffer._require_ctx()["NvS"])
-            if combine_metadata.tail_masked:
+            row_counts = None
+            if self.fused_publish:
+                if combine_metadata.tail_masked:
+                    row_counts = combine_metadata.group_list
+                    if row_counts is None:
+                        raise ValueError("Fused publish requires counts for a masked tail")
+                # Native publication writes valid rows and zeros the SHMEM tail.
+                # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
+                combine_input = hidden_states
+            elif combine_metadata.tail_masked:
                 rows_total = combine_metadata.group_list.sum().to(torch.int64)
                 mask = (_combine_row_ids(nvs, hidden_states.device) < rows_total).unsqueeze(-1)
                 # Keep the existing tail safety without materializing an FP32 shard.
@@ -1529,7 +1576,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             out, _, _ = buffer.combine_weighted(
                 plan=combine_metadata.plan, hidden_nvsh=combine_input,
                 source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
-                num_tokens=T, inter_rank_sync=True)
+                num_tokens=T, inter_rank_sync=True,
+                fused_publish=self.fused_publish, row_counts=row_counts)
             self._tstats("comb_buf", _t1c)
             self._tstats("combine", _t0c)
             return out[:T].view(combine_metadata.hidden_shape)
