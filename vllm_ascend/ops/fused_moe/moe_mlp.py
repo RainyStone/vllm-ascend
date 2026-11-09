@@ -110,6 +110,7 @@ def quant_apply_mlp(
     activation: str | None = None,
     swiglu_limit: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
+    record_before_gmm2: bool = True,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
@@ -207,7 +208,7 @@ def quant_apply_mlp(
                 activate_left=True,
                 quant_mode=1,
             )
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = torch.npu.current_stream().record_event() if record_before_gmm2 else None
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -246,7 +247,7 @@ def quant_apply_mlp(
             hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = torch.npu.current_stream().record_event() if record_before_gmm2 else None
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -338,7 +339,7 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = torch.npu.current_stream().record_event() if record_before_gmm2 else None
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -543,7 +544,9 @@ def unquant_apply_mlp(
 
 
 @_timed_moe("unified_apply_mlp")
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+def unified_apply_mlp(
+    *, mlp_compute_input: MoEMlpComputeInput, record_before_gmm2: bool = True
+) -> torch.Tensor:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
@@ -634,4 +637,5 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         activation=activation,
         swiglu_limit=swiglu_limit,
         use_w4a8_per_channel_gmm_swiglu=mlp_compute_input.quant.use_w4a8_per_channel_gmm_swiglu,
+        record_before_gmm2=record_before_gmm2,
     )

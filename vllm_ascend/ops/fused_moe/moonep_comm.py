@@ -843,6 +843,11 @@ class _MoonEPRuntime:
             self._states = states
             self._state_by_w13 = {id(st._w13_src): st for st in states}
 
+        from vllm_ascend.ops.fused_moe.moonep_balance import udma_prefetch_overlap_requested
+
+        prefetch_overlap = udma_prefetch_overlap_requested(use_udma, _ENV_SLOT_MODE)
+        if prefetch_overlap:
+            ShmemRuntime.validate_udma_prefetch_overlap()
         if not ShmemRuntime.is_initialized():
             # 必须在下面的 collective init 之前：它会把 peer 的物理内存映射进本地
             # VA，之后就再也起不了 AICPU custom 调度器了（见上方
@@ -867,16 +872,71 @@ class _MoonEPRuntime:
                 from ascend_moonep.buffer_c import symmetric_descriptors
 
                 port = int(os.environ.get("MOONEP_SHMEM_IP_PORT", "28765"))
+                # All nodes must connect to the same rank-0 config store.
+                # Use vLLM's existing cluster address; keep loopback valid for
+                # single-node deployments, but reject it for a multi-node group.
+                from vllm.config import get_current_vllm_config
+                import ipaddress
+
+                parallel = get_current_vllm_config().parallel_config
+                bootstrap_ip = parallel.data_parallel_master_ip
+                local_dp = parallel.data_parallel_size_local or parallel.data_parallel_size
+                if not bootstrap_ip:
+                    raise RuntimeError("MoonEP ipport bootstrap requires a DP master address")
+                if parallel.data_parallel_size > local_dp:
+                    try:
+                        loopback = ipaddress.ip_address(bootstrap_ip).is_loopback
+                    except ValueError:
+                        loopback = bootstrap_ip.lower() == "localhost"
+                    if loopback:
+                        raise RuntimeError(
+                            "Multi-node MoonEP requires --data-parallel-address "
+                            "to be reachable from every node, not loopback")
                 ShmemRuntime.init_with_ip_port(
                     group=group,
-                    ip_port=f"tcp://127.0.0.1:{port}",
+                    ip_port=f"tcp://{bootstrap_ip}:{port}",
                     descriptors=symmetric_descriptors(),
                     enable_udma=use_udma,
                     qp_count=0,
+                    prefetch_overlap=prefetch_overlap,
                 )
             else:
-                ShmemRuntime.init_with_buffer(group=group)
+                ShmemRuntime.init_with_buffer(
+                    group=group, enable_udma=use_udma,
+                    prefetch_overlap=prefetch_overlap)
             print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
+        qp_layout = ShmemRuntime.require_udma_prefetch_overlap() if prefetch_overlap else None
+        if qp_layout is not None:
+            print(f"[moonep-udma-qp] allocated={qp_layout[0]} "
+                  f"dispatch_count={qp_layout[1]} prefetch_qp={qp_layout[2]}", flush=True)
+        # Check effective context flags once at initialization. Planning is
+        # native in this SDK; the other three stages support UDMA.
+        expected_backends = {
+            "planning": False, "dispatch": use_udma,
+            "combine": use_udma, "prefetch": use_udma,
+        }
+        for (experts, topk, hidden), pool in self._buffers.items():
+            for cap, buffer in pool.items():
+                ctx = buffer._require_ctx()
+                ctx["udma_prefetch_overlap_ready"] = qp_layout is not None
+                actual = {
+                    name: bool(ctx[f"_{name}_use_udma"])
+                    for name in expected_backends
+                }
+                if actual != expected_backends:
+                    raise RuntimeError(
+                        f"MoonEP backend mismatch: requested={expected_backends}, "
+                        f"effective={actual}"
+                    )
+                backends = " ".join(
+                    f"{name}={'udma' if enabled else 'mte'}"
+                    for name, enabled in actual.items()
+                )
+                print(
+                    f"[moonep-backend r{get_ep_group().rank_in_group}] "
+                    f"E={experts} K={topk} H={hidden} S={cap} {backends}",
+                    flush=True,
+                )
         if _ENV_SLOT_MODE:
             for st in self._states:
                 st.publish()

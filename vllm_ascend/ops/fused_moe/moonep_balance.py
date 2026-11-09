@@ -63,6 +63,7 @@ import torch
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEWeights
 
@@ -500,6 +501,14 @@ class _LayerWeightState:
         self.cache_next = 0
         self.cache_stats = [0, 0]      # [hits, misses] over used slots
         self._vmm_tensors = list(self.homes.values())
+        # Read-only metadata is stable for the life of this layer's aliases.
+        self._prefetch_views = [self.fulls[spec.name] for spec in self._specs]
+        self._compute_weights = MoEWeights(
+            w1=self.aliases["w13"], w2=self.aliases["w2"],
+            w1_scale=self.aliases.get("w13_scale"), w2_scale=self.aliases.get("w2_scale"),
+        )
+        self._shared = shared
+        self._home_gmm_runner = None
 
     def publish(self) -> None:
         """One-time mirror of the local vllm weight rows into the home chunks.
@@ -574,16 +583,24 @@ class _LayerWeightState:
 
     def prefetch_views(self) -> list[torch.Tensor]:
         """The [E+B] projection descriptors handed to the prefetch kernel."""
-        return [self.fulls[spec.name] for spec in self._specs]
+        return self._prefetch_views
 
     def compute_weights(self) -> MoEWeights:
         """Grouped-matmul weights: [epn+B] aliases, scales included."""
-        return MoEWeights(
-            w1=self.aliases["w13"],
-            w2=self.aliases["w2"],
-            w1_scale=self.aliases.get("w13_scale"),
-            w2_scale=self.aliases.get("w2_scale"),
-        )
+        return self._compute_weights
+
+    def home_gmm_runner(self):
+        """Share the native entry points within this existing shape/device pool."""
+        if self._home_gmm_runner is None:
+            from ascend_moonep.home_gmm import HomeGmmRange
+
+            with _SharedSlots._lock:
+                runner = self._shared.get("home_gmm_range")
+                if runner is None:
+                    runner = HomeGmmRange()
+                    self._shared["home_gmm_range"] = runner
+                self._home_gmm_runner = runner
+        return self._home_gmm_runner
 
     def destroy(self):
         if getattr(self, "_released", False):
@@ -732,7 +749,8 @@ _EARLY_PF_DEV = os.environ.get("MOONEP_EARLY_PF_DEV", "1") == "1"
 #   0 = 关（默认）
 #   1 = 只走事件管道：钩子里 record_event + wait_event + 进出 stream 上下文都做，
 #       但 prefetch 仍留在主 stream —— 输出正确，用来单独量「事件管道的开销」
-#   2 = 全量：prefetch 真正发到 side stream
+#   2 = dispatch 与 side-stream prefetch 重叠，统一 GEMM 前等待
+#   3 = 在档 2 上提前执行 Home GEMM1，只在 Slot GEMM1 前等待；统一激活和 GEMM2
 _PF_STREAM = int(os.environ.get("MOONEP_PF_STREAM", "0"))
 _PF_STREAMED = [0]
 
@@ -929,6 +947,45 @@ def maybe_install_pf_stream(model) -> None:
         print(f"[pf-stream] install failed: {exc}", flush=True)
 
 
+def _prepare_slot_cache(state, plan):
+    """Mask cache hits before issuing remote GETs; consume once per layer call."""
+    if MOONEP_SLOT_CACHE <= 0 or state.caches.get("w13") is None:
+        return plan, None, False
+    from vllm.distributed.parallel_state import get_ep_group
+
+    rank = get_ep_group().rank_in_group
+    row = [int(v) for v in plan.experts_to_copy[rank].tolist()]
+    hits, misses = [], []
+    masked = list(row)
+    for i, expert in enumerate(row):
+        if expert < 0:
+            continue
+        if expert in state.cache_experts:
+            hits.append((state.cache_experts.index(expert), i))
+            masked[i] = -1
+        else:
+            misses.append((expert, i))
+    if hits:
+        experts_to_copy = plan.experts_to_copy.clone()
+        experts_to_copy[rank] = torch.tensor(
+            masked, dtype=experts_to_copy.dtype, device=experts_to_copy.device)
+        plan = dataclasses.replace(plan, experts_to_copy=experts_to_copy)
+    first_hit = state.cache_stats[0] == 0 and bool(hits)
+    state.cache_stats[0] += len(hits)
+    state.cache_stats[1] += len(misses)
+    _SLOT_CACHE_STATS[id(state)] = state.cache_stats
+    if first_hit:
+        print(f"[slot-cache-active r{rank}] layer={state.layer_index} "
+              f"capacity={MOONEP_SLOT_CACHE} hits={len(hits)} misses={len(misses)} "
+              f"payloads={','.join(state.caches)}", flush=True)
+    return plan, (hits, misses), not misses
+
+
+def udma_prefetch_overlap_requested(use_udma: bool, slot_mode: bool) -> bool:
+    """Use the existing side-stream switch; no independent transport toggle."""
+    return bool(use_udma and slot_mode and _PF_STREAM >= 2)
+
+
 def _pf_stream_hook(buffer):
     """装在库的 `after_planning_hook` 上的回调：在 side stream 上发 prefetch。
 
@@ -939,6 +996,12 @@ def _pf_stream_hook(buffer):
     才是 planning。
     """
     def _after(plan):
+        ctx = buffer._require_ctx()
+        # Check before any stream/event submission. Never silently run an old
+        # UDMA runtime on shared QP0 when overlap is requested.
+        if (_PF_STREAM >= 2 and ctx.get("_prefetch_use_udma", False)
+                and not ctx.get("udma_prefetch_overlap_ready", False)):
+            raise RuntimeError("UDMA prefetch overlap requires dedicated QP initialization")
         try:
             key = _PF.get("cur_key")
             state = _pf_state_for(key) if key is not None else None
@@ -953,17 +1016,33 @@ def _pf_stream_hook(buffer):
                 main.record_event()
                 _PF_STREAMED[0] += 1
                 return
+            ctx = buffer._require_ctx()
+            if ctx.get("slot_prefetch_ready") is not None:
+                raise RuntimeError("Unconsumed Slot prefetch from the preceding layer")
+            # Cache lookup must precede the side-stream GET. Doing it after
+            # dispatch would mask a plan whose full transfer was already issued.
+            plan_use, cache_plan, skip_prefetch = _prepare_slot_cache(state, plan)
             if _PF["stream"] is None:
                 _PF["stream"] = torch_npu.npu.Stream()
             side = _PF["stream"]
             side.wait_event(main.record_event())
             with torch_npu.npu.stream(side):
-                _pf_prefetch(buffer, state, plan)
-            # 单槽握手：层是严格串行的，所以一个 slot 就够，run_slot_forward
-            # 取走之后下一层才会再写。
-            _PF["pf_ev"] = side.record_event()
+                if not skip_prefetch:
+                    _pf_prefetch(buffer, state, plan_use)
+            # Keep the prepared decision and completion event together on this
+            # Buffer; forward must not re-read the plan or count hits twice.
+            ctx["slot_prefetch_ready"] = (
+                state, plan_use, cache_plan, skip_prefetch, side.record_event())
+            if _PF_STREAMED[0] == 0:
+                from vllm.distributed.parallel_state import get_ep_group
+
+                rank = get_ep_group().rank_in_group
+                print(f"[pf-stream-active r{rank}] mode={_PF_STREAM} cache_aware=1", flush=True)
             _PF_STREAMED[0] += 1
-        except Exception as exc:  # noqa: BLE001 - 绝不能让探测逻辑打断推理
+        except Exception as exc:  # noqa: BLE001 - preserve the MTE diagnostic path
+            if ctx.get("_prefetch_use_udma", False):
+                # A partial issue cannot safely fall back and submit again.
+                raise RuntimeError("UDMA side-stream prefetch failed") from exc
             _PF["fail"] += 1
             if _PF["fail"] in (1, 50):
                 print(f"[pf-stream] issue failed: {exc}", flush=True)
@@ -1002,6 +1081,9 @@ def run_slot_forward(
             "(MOONEP_ALLOW_CAPTURE=1 lifts this guard for the capture feasibility study; "
             "it is a deliberate override, not a claim that capture works.)"
         )
+    home_overlap = _PF_STREAM == 3
+    if home_overlap and (MOONEP_SLOT_CACHE > 0 or _EARLY_PF):
+        raise RuntimeError("Home GEMM mode 3 currently requires cache and early prefetch disabled")
     plan_use = plan
     if _EARLY_PF:
         try:
@@ -1036,54 +1118,22 @@ def run_slot_forward(
         # timer under MOONEP_TIME_STATS only sees the launch)
         torch.npu.synchronize()
         _t_dev = time.perf_counter()
-    # --- persistent per-layer cache: serve repeats with a local copy ---
-    cache_plan = None
-    skip_prefetch = False
-    if MOONEP_SLOT_CACHE > 0 and state.caches.get("w13") is not None:
-        try:
-            from vllm.distributed.parallel_state import get_ep_group
-
-            rank = get_ep_group().rank_in_group
-            row = [int(v) for v in plan_use.experts_to_copy[rank].tolist()]
-            hits, misses = [], []
-            for i, e in enumerate(row):
-                if e < 0:
-                    continue
-                if e in state.cache_experts:
-                    hits.append((state.cache_experts.index(e), i))
-                else:
-                    misses.append((e, i))
-            state.cache_stats[0] += len(hits)
-            state.cache_stats[1] += len(misses)
-            _SLOT_CACHE_STATS[id(state)] = state.cache_stats
-            if hits:
-                masked = list(row)
-                for _, i in hits:
-                    masked[i] = -1          # the library skips -1 slots
-                etc = plan_use.experts_to_copy.clone()
-                etc[rank] = torch.tensor(masked, dtype=etc.dtype, device=etc.device)
-                plan_use = dataclasses.replace(plan_use, experts_to_copy=etc)
-            cache_plan = (hits, misses)
-            # The prefetch's cost is dominated by its fixed part (kernel launch
-            # + two cross-rank barriers: ~0.38 ms of the measured 0.49 ms), not
-            # by the bytes, so masking hits out of the plan saves almost nothing
-            # -- the launch itself must be skipped. When this layer's cache
-            # covers every used slot, skip the whole call.
-            skip_prefetch = not misses
-        except Exception as exc:  # noqa: BLE001 - never break a step
-            _PF["fail"] += 1
-            if _PF["fail"] in (1, 50):
-                print(f"[slot-cache] skipped: {exc}", flush=True)
-            cache_plan = None
-    _t_pf = time.perf_counter() if os.environ.get("MOONEP_TIME_STATS", "0") == "1" else None
-    pf_ev = None
+    # Install before the next dispatch; first use safely takes the main-stream
+    # path. When the hook ran, reuse its cache decision and completion event.
+    prefetched = None
     if _PF_STREAM:
-        # 幂等安装：挂到本 buffer 的 ctx 上。第一次走到的 buffer 要从下一层
-        # 才生效（钩子必须在 dispatch 之前就位），首层退回原路径，无副作用。
         _pf_ctx = buffer._require_ctx()
         if _pf_ctx.get('after_planning_hook') is None:
             _pf_ctx['after_planning_hook'] = _pf_stream_hook(buffer)
-        pf_ev = _PF.pop("pf_ev", None)
+        prefetched = _pf_ctx.pop("slot_prefetch_ready", None)
+    pf_ev = None
+    if prefetched is not None:
+        prefetched_state, plan_use, cache_plan, skip_prefetch, pf_ev = prefetched
+        if prefetched_state is not state:
+            raise RuntimeError("Slot prefetch belongs to a different MoE layer")
+    else:
+        plan_use, cache_plan, skip_prefetch = _prepare_slot_cache(state, plan_use)
+    _t_pf = time.perf_counter() if os.environ.get("MOONEP_TIME_STATS", "0") == "1" else None
     if skip_prefetch:
         _PF_SKIPPED[0] += 1
     elif pf_ev is not None:
@@ -1104,7 +1154,7 @@ def run_slot_forward(
         acc = _MOONEP_TSTATS.setdefault("prefetch", [0.0, 0])
         acc[0] += time.perf_counter() - _t_pf
         acc[1] += 1
-    if pf_ev is not None:
+    if pf_ev is not None and not home_overlap:
         # MOONEP_PF_STREAM：prefetch 在 side stream 上跑，主 stream 一路走到
         # dispatch 结束都不用等它。但下面 cache 回填和 GEMM 都要读 slot，所以在
         # 这里 join。此时 dispatch 的 host 时间和设备时间都已经过去，prefetch
@@ -1136,10 +1186,28 @@ def run_slot_forward(
     )
     # Both branches of unified_apply_mlp return (hidden_states, before_gmm2_evt);
     # slot mode never runs under capture, so the event is not needed.
-    rows, _ = unified_apply_mlp(
-        mlp_compute_input=dataclasses.replace(
-            mlp_compute_input, weights=state.compute_weights())
-    )
+    mlp_compute_input = dataclasses.replace(mlp_compute_input, weights=state.compute_weights())
+    if home_overlap:
+        runner = state.home_gmm_runner()
+        rows, _ = home_gemm_apply_mlp(
+            mlp_compute_input=mlp_compute_input,
+            home_experts=state.epn, intermediate_size=state.F,
+            range_kernel=runner, prefetch_ready=pf_ev,
+        )
+        if pf_ev is not None and not runner.activation_logged:
+            from vllm.distributed.parallel_state import get_ep_group
+
+            rank = get_ep_group().rank_in_group
+            transport = "udma" if buffer._require_ctx().get("_prefetch_use_udma", False) else "mte"
+            print(f"[home-gemm-active r{rank}] mode=3 split=gemm1 home={state.epn} "
+                  f"slots={state.B} prefetch={transport} backend={mlp_compute_input.quant.quant_type} "
+                  f"library={runner.library_path}", flush=True)
+            runner.activation_logged = True
+    else:
+        # Slot consumes only rows; an unused before-GMM2 event need not be created.
+        rows, _ = unified_apply_mlp(
+            mlp_compute_input=mlp_compute_input, record_before_gmm2=False,
+        )
     if _sync:
         torch.npu.synchronize()
         _pf_time("gemm_after_prefetch", time.perf_counter() - _t_gemm)
