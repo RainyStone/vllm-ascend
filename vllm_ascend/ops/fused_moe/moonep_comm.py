@@ -1015,6 +1015,14 @@ def ensure_runtime_initialized() -> None:
 # time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
 # out of the hot path.
 _ENV_REUSE_OUT = os.environ.get("MOONEP_REUSE_OUT", "1") == "1"
+# Stage the MLP rows straight into the symmetric shard and hand it to the
+# weighted combine with zero_copy=True, so the library skips its internal
+# full-shard publish.  =0 restores upstream behaviour (fresh tensor + copy).
+_ENV_COMBINE_IN_SHARD = os.environ.get("MOONEP_COMBINE_IN_SHARD", "1") != "0"
+# Hand the MLP its input as a view of the symmetric shard (dispatch zero_copy),
+# so the library skips its full-shard copy-out into a private buffer.  =0
+# restores upstream behaviour (shard -> reused tensor -> MLP).
+_ENV_DISPATCH_IN_SHARD = os.environ.get("MOONEP_DISPATCH_IN_SHARD", "1") != "0"
 _ENV_SLOT_MODE = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 _ENV_NO_SYNC = os.environ.get("MOONEP_NO_SYNC", "1") != "0"
 _ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
@@ -1325,9 +1333,15 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 hidden_states, route_c, topk_c, tpe, num_tokens=T, wire_storage=hidden_c,
             )
         else:
+            # zero_copy=True returns a view of the symmetric shard the dispatch
+            # kernel already wrote, so the MLP reads it in place and the
+            # library's full-shard copy-out (402 MB/layer) disappears.  The
+            # combine staging below then overwrites those same rows with the
+            # MLP output; both are on the current stream, so the GMM has
+            # finished reading before the copy is enqueued.
             h_nvs, w_nvs, cu, plan = buffer.dispatch(
                 hidden_c, route_c, topk_c, tpe,
-                zero_copy=False, inter_rank_sync=True,
+                zero_copy=_ENV_DISPATCH_IN_SHARD, inter_rank_sync=True,
                 num_tokens=real_t,
                 reuse_outputs=_ENV_REUSE_OUT,
             )
@@ -1551,8 +1565,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # the MLP output rows in the dispatched shard order.
         if combine_metadata.source_topk_weights_sk is not None:
             buffer = combine_metadata.buffer
-            nvs = int(buffer._require_ctx()["NvS"])
+            ctx = buffer._require_ctx()
+            nvs = int(ctx["NvS"])
             row_counts = None
+            zero_copy = False
             if self.fused_publish:
                 if combine_metadata.tail_masked:
                     row_counts = combine_metadata.group_list
@@ -1561,6 +1577,24 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 # Native publication writes valid rows and zeros the SHMEM tail.
                 # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
                 combine_input = hidden_states
+            elif _ENV_COMBINE_IN_SHARD:
+                # Stage straight into the symmetric shard: combine_weighted then
+                # takes it with zero_copy=True and skips its own full-shard
+                # publish (the 402 MB/layer copy optimisation #1 removed).
+                combine_input = ctx["hidden_buf_local"]
+                if combine_metadata.tail_masked:
+                    rows_total = combine_metadata.group_list.sum().to(torch.int64)
+                    mask = (_combine_row_ids(
+                        nvs, hidden_states.device) < rows_total).unsqueeze(-1)
+                    torch.where(mask, hidden_states,
+                        _zero_bf16_scalar(hidden_states.device), out=combine_input)
+                else:
+                    rows = hidden_states.shape[0]
+                    if rows < nvs:
+                        # The kernel reads the whole shard; stale rows must be zero.
+                        combine_input[rows:].zero_()
+                    combine_input[:rows].copy_(hidden_states)
+                zero_copy = True
             elif combine_metadata.tail_masked:
                 rows_total = combine_metadata.group_list.sum().to(torch.int64)
                 mask = (_combine_row_ids(nvs, hidden_states.device) < rows_total).unsqueeze(-1)
@@ -1576,7 +1610,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             out, _, _ = buffer.combine_weighted(
                 plan=combine_metadata.plan, hidden_nvsh=combine_input,
                 source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
-                num_tokens=T, inter_rank_sync=True,
+                num_tokens=T, inter_rank_sync=True, zero_copy=zero_copy,
                 fused_publish=self.fused_publish, row_counts=row_counts)
             self._tstats("comb_buf", _t1c)
             self._tstats("combine", _t0c)

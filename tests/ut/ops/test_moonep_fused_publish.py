@@ -28,14 +28,15 @@ class Metadata(SimpleNamespace):
 
 
 class DispatcherPublishTest(unittest.TestCase):
-    def invoke(self, enabled, masked=True, counts=None):
+    def invoke(self, enabled, masked=True, counts=None, in_shard=False):
         source = torch.randn(6 if masked else 3, 4, dtype=torch.bfloat16)
         if masked:
             source[3:].fill_(float("nan"))
         calls = []
+        shard = torch.full((6, 4), float("nan"), dtype=torch.bfloat16)
         class FakeBuffer:
             def _require_ctx(self):
-                return {"NvS": 6}
+                return {"NvS": 6, "hidden_buf_local": shard}
             def combine_weighted(self, **kwargs):
                 calls.append(kwargs)
                 return torch.ones(2, 4, dtype=torch.bfloat16), None, None
@@ -43,6 +44,7 @@ class DispatcherPublishTest(unittest.TestCase):
             "torch": torch, "time": time, "MoonEPCombineMetadata": Metadata,
             "_combine_row_ids": lambda n, device: torch.arange(n, device=device),
             "_zero_bf16_scalar": lambda device: torch.zeros((), dtype=torch.bfloat16, device=device),
+            "_ENV_COMBINE_IN_SHARD": in_shard,
         }
         fn = load_method(ROOT / "vllm_ascend/ops/fused_moe/moonep_comm.py",
                          "TokenDispatcherWithMoonEP", "token_combine", namespace)
@@ -52,7 +54,7 @@ class DispatcherPublishTest(unittest.TestCase):
         obj = SimpleNamespace(fused_publish=enabled, _tstats=lambda *args: None)
         result = fn(obj, source, metadata)
         self.assertEqual(tuple(result.shape), (2, 4))
-        return source, calls[0]
+        return source, calls[0], shard
 
     def test_fused_passes_raw_tensor_and_device_counts_for_each_backend(self):
         class Counts:
@@ -62,21 +64,41 @@ class DispatcherPublishTest(unittest.TestCase):
             with self.subTest(backend=backend):
                 counts = Counts()
                 with patch.object(torch, "where", side_effect=AssertionError("No temporary clean matrix")):
-                    source, call = self.invoke(True, counts=counts)
+                    source, call, _ = self.invoke(True, counts=counts)
                 self.assertIs(call["hidden_nvsh"], source)
                 self.assertIs(call["row_counts"], counts)
                 self.assertTrue(call["fused_publish"])
                 self.assertEqual(source.dtype, torch.bfloat16)
 
     def test_default_path_still_cleans_nan_tail(self):
-        source, call = self.invoke(False, counts=torch.tensor([1, 2], dtype=torch.int64))
+        source, call, _ = self.invoke(False, counts=torch.tensor([1, 2], dtype=torch.int64),
+                                     in_shard=False)
         self.assertFalse(call["fused_publish"])
         self.assertIsNone(call["row_counts"])
+        self.assertFalse(call["zero_copy"])
         self.assertTrue(torch.equal(call["hidden_nvsh"][:3], source[:3]))
         self.assertTrue(torch.equal(call["hidden_nvsh"][3:], torch.zeros(3, 4, dtype=torch.bfloat16)))
 
+    def test_combine_stages_into_the_symmetric_shard(self):
+        source, call, shard = self.invoke(False, counts=torch.tensor([1, 2], dtype=torch.int64),
+                                          in_shard=True)
+        self.assertIs(call["hidden_nvsh"], shard)
+        self.assertTrue(call["zero_copy"])
+        self.assertFalse(call["fused_publish"])
+        self.assertTrue(torch.equal(shard[:3], source[:3]))
+        self.assertTrue(torch.equal(shard[3:], torch.zeros(3, 4, dtype=torch.bfloat16)))
+
+    def test_trimmed_in_shard_input_keeps_stale_rows_zero(self):
+        with patch.object(torch, "where", side_effect=AssertionError("No temporary clean matrix")):
+            source, call, shard = self.invoke(False, masked=False, in_shard=True)
+        self.assertIs(call["hidden_nvsh"], shard)
+        self.assertTrue(call["zero_copy"])
+        self.assertEqual(source.shape[0], 3)
+        self.assertTrue(torch.equal(shard[:3], source))
+        self.assertTrue(torch.equal(shard[3:], torch.zeros(3, 4, dtype=torch.bfloat16)))
+
     def test_trimmed_fused_input_uses_its_shape(self):
-        source, call = self.invoke(True, masked=False)
+        source, call, _ = self.invoke(True, masked=False)
         self.assertIs(call["hidden_nvsh"], source)
         self.assertEqual(source.shape[0], 3)
         self.assertIsNone(call["row_counts"])
