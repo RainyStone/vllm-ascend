@@ -1,0 +1,74 @@
+双机 UDMA weighted-combine 修改验证报告
+日期：2026-11-06（Asia/Shanghai）
+结果：通过；仅限双机2-rank weighted combine及融合BF16发布小算子。
+
+节点与运行
+rank0：141.61.45.118 / xzx_moonep / 物理NPU 1
+rank1：141.61.45.124 / xzx_moonep / 物理NPU 1
+通信域：WORLD_SIZE=2，双方LOCAL_RANK=0，bootstrap显式使用141.61.45.118。
+接受的RUN_ID：cross_udma_sync_audited_20261106T115850Z
+原始结果：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_fused_combine_publish/data/cross_udma_sync_audited_20261106T115850Z
+
+验证对象
+S→V 路由系数依赖修复，以及尾部清零与SHMEM发布融合。
+两端实际入口均通过dladdr定位到：
+ascend-moonep/build/udma_weighted_final_20261106/lib/libascend_moonep_udma_weight_scalar_fix.so
+SHA256：49008deff48dd883982f4ee3518b0a919f98fed6ec994d063dab33627b64ae90，候选标记ABI=2。
+融合发布库SHA256：e69aafba0bb53c235fa418409f41eeba7339d9a4e98bb6abe14bbc872856dacc。
+使用共享原仓源码及构建产物，没有SDK源码副本，没有覆盖已安装主库。
+
+真实跨机与后端证据
+1. 在每台容器中核对enp34s0f1实际地址；Gloo交换并核对两台机器的IP、hostname和rank。
+2. 合成plan的每条有效路由均指向另一物理节点；每条源行包含源rank及版本相关数据。
+3. 每rank实际调用CombineUrma.compute_weighted 68次，记录于rankN.json，未回退MTE combine。
+4. SHMEM日志确认读取本机/etc/hccl_rootinfo.json、解析phy_id=1、创建双向HCOMM UDMA通道。
+   两端日志均显示：Build UDMA info success, rank_count=2, totalChannelNum=3, qp_num=3。
+5. 对远端结果同时与独立CPU FP32乘系数/累加参考和本地原生weighted-unpermute参考比较。
+6. 刷新远端源数据与系数后重复使用同一缓冲区，避免只验证旧缓存中的固定数据。
+
+数值检查
+每rank 17组用例，130项比较；两rank合计260项。
+两端数值不一致数0、非零数据位不一致数0、最大绝对误差0，输出均为有限数值。
+仅零系数用例存在IEEE +0/-0符号差异：每个输出rank0有56916个、rank1有56867个；
+跨7次比较累计分别398412和398069。它们按零值数值一致判定，并在每项记录中单列。
+其他用例的BF16结果位模式一致，没有使用非零误差容限。
+
+覆盖
+- K6/H4096/S128，T=1、17、63、65、127、128：覆盖原来T>32的失效场景和每核多token复用。
+- K6/H128/S32768，T=16385、32768：覆盖每核512-token路由窗口边界。
+- K8/H2048、K1/H64、K16/H128，S64/T63：覆盖不同top-K、步长与向量/标量选择路径。
+- 别名负编码、非法目的路由、零系数、双方不同真实T（63与33）、NaN填充尾部。
+- 旧发布、融合发布、裁剪输入三路径；每组再修改系数并复用缓冲区。
+- 额外两组同时改变远端有效数据和系数版本。
+- 每rank旧非加权combine回归11项。
+
+资源审计与首轮记录
+首轮RUN_ID：cross_udma_sync_20261106T1154。
+首轮算子数值检查也全部通过，但118退出阶段的npu-smi记录了宿主机PID4120768、容器PID0。
+当时没有保存足够的namespace映射证据；后续该PID已退出，因此首轮未采纳为通过凭证。
+PRIOR_UNACCEPTED_VALIDITY.json保留这一判定。
+
+接受的第二轮新增宿主机/proc审计，核对命令行、NSpid和启动时钟：
+118：宿主机PID4166122 ↔ 容器PID3952175
+124：宿主机PID2277996 ↔ 容器PID971054
+监控持续记录已验证的PID绑定，未知宿主机PID仍会触发停止本任务。
+本轮没有资源告警、没有ABORT；两端子进程与owner均退出0，全部本任务进程已退出。
+收尾时两台机器物理1号卡均明确显示无运行进程。
+未终止其他用户或归属不明进程，未复位设备，未修改宿主机或容器拓扑文件。
+
+范围
+本轮没有执行planning、dispatch、专家权重prefetch、16-rank、DP16模型或LongBench测试。
+配置中的后端选择不作为上述未执行阶段通过的证据；不生成完整Slot验证凭证。
+本轮没有测量跨机性能，不将单机计时外推为跨机性能。
+已安装主库两端SHA仍为ded73ef0860ef4d1f1d946e27e4fffbba54015296b2120b0d1655595b1ec371e。
+双机启动脚本TEST_APPROVED已回到0；没有恢复定时检查任务。
+
+文件
+summary.json：汇总与范围边界；
+rank0.json/rank1.json：逐项数值、真实远端路由与实际调用；
+proof_rankN.json：库入口、SHA、物理节点和拓扑文件指纹；
+host_pid_audit_nodeN.json、cleanup_nodeN.json：宿主机PID审计及清理；
+resource_history_nodeN.jsonl：资源监测历史；
+shmem_nodeN/：实际通道初始化、运行和销毁日志；
+*.py.txt、*.sh.txt：本轮执行时的测试源码与脚本；
+source_manifest.json：执行时脚本指纹。

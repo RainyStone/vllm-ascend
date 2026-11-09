@@ -1,0 +1,45 @@
+MoonEP combine MXFP8 feasibility review (2026-11-06)
+Scope: analysis only. No combine quantization implemented or enabled.
+
+Verified current code:
+- ascend-moonep/ascend_moonep/api.py:1112 combine_weighted accepts BF16 expert outputs and FP32 routing weights.
+- kernels/moonep_combine.cpp:80 explicitly restricts payload to BF16.
+- MTE weighted gather converts BF16 rows to FP32, multiplies routing coefficients and accumulates on chip; final output converts once to BF16.
+- kernels/moonep_combine_udma.cpp:1960 instantiates GatherAccumulatePhase<bf16_t, ApplySourceWeights>. UDMA transport does not by itself change the payload dtype.
+
+Proposed future implementation, requiring separate approval:
+GEMM2 BF16 expert output
+ -> quantize each output row to FP8 E4M3 plus group32 E8M0 scales
+ -> publish compact FP8+scale payload to symmetric memory
+ -> MTE/UDMA remote reads of paired activation and scale bytes
+ -> dequantize directly to FP32 on chip
+ -> multiply original FP32 routing coefficient
+ -> accumulate FP32 across selected experts
+ -> one final BF16 output conversion.
+
+For H=4096:
+BF16 row=8192 B.
+FP8 row=4096 B plus 128 scale bytes=4224 B.
+Payload reduction=48.4375%, excluding metadata, alignment, protocol, synchronization.
+This does not imply the whole combine latency falls by 48.4%.
+
+Precision:
+Dispatch moves an existing native input quantization before communication and can preserve the original bytes.
+Combine adds a quantization stage because GEMM2 already produces BF16 and current combine transports BF16.
+Let original expert output e_j and decoded quantized value e_j+epsilon_j.
+The additional final error is sum_j(w_j*epsilon_j), before final BF16 output rounding.
+FP32 multiplication/accumulation does not recover lost FP8 information.
+Cancellation between expert outputs can amplify relative error. Large/small values, outliers, saturation, scale encoding, route coefficient scaling and small logit margins require testing.
+This would be a new precision tradeoff, distinct from the fixed external BF16 weighted-product rounding bug.
+
+Performance:
+Benefits depend on bandwidth-bound remote reads being a large enough fraction.
+Costs include quantization, scales, pack/publish and on-chip decode. Existing combine latency includes waits and synchronization.
+Prefer fusing quantization with publish packing and dequantization with weighted accumulation, avoid a full BF16 dequantized intermediate.
+Changing GEMM2 to output FP8 directly requires separate operator support and accuracy evaluation.
+MTE and UDMA both require explicit numerical decode support: reinterpreting bytes as BF16 only works for byte-only dispatch, never for the existing BF16 arithmetic combine.
+
+Recommended order:
+Finish currently authorized dispatch MXFP8 tests first.
+Keep combine BF16 in this work.
+If approved later, add a separate combine-only flag, numerical edge-case tests, output/logit validation and matched latency tests before any full-model rollout.

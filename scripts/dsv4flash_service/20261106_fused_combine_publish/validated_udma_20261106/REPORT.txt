@@ -1,0 +1,67 @@
+UDMA weighted combine 修复与124单机验证报告
+日期：2026-11-06（Asia/Shanghai）
+实验目录：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_fused_combine_publish
+范围：124 xzx_moonep，物理卡1、2，2 ranks；未启动模型，未运行跨机、8卡或DP16。
+
+结果
+S→V 同步修复通过数值回归。原仓源码已修改，最终独立构建库已经在卡上验证；已安装的主通信库未覆盖。
+源码：/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/kernels/moonep_combine_udma.cpp
+最终库：/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/udma_weighted_final_20261106/lib/libascend_moonep_udma_weight_scalar_fix.so
+最终库 SHA256：49008deff48dd883982f4ee3518b0a919f98fed6ec994d063dab33627b64ae90
+已安装主库 SHA256（保持不变）：ded73ef0860ef4d1f1d946e27e4fffbba54015296b2120b0d1655595b1ec371e
+
+定位证据
+1. 旧实现：随机FP32系数在T=63、8191、8192出现错误，重复执行可能不同；固定1/K系数通过。
+2. 只加S_MTE2：随机系数仍失败。该候选未被接受为修复。
+3. 只把GetValue结果写入局部float变量、没有S_V：仍然失败。该负对照排除了“仅改变量写法便修好”的解释。
+4. 局部float加S_V：原失败用例全部与独立CPU参考逐位一致，重复执行一致。
+这将问题定位到动态路由系数的Scalar→Vector使用依赖。现有S_MTE2约束后续MTE2覆盖，不能代替S_V。当前反汇编工具未解码A5指令，具体VF融合/自动同步的指令级细节尚未证明，不将它写成已经确认的硬件细节。
+本次没有改变BF16激活传输、FP32路由系数、FP32乘法与累加、最终一次BF16舍入。
+
+有效修复（两个Muls位置分别处理acc和tmp）
+    const float source_weight = source_weights.GetValue(
+        src_route[i] - token_id * K);
+    SetFlag<HardEvent::S_V>(EVENT_ID4);
+    WaitFlag<HardEvent::S_V>(EVENT_ID4);
+    Muls(acc_or_tmp, acc_or_tmp, source_weight, H);
+源文件SCALAR_FENCE默认1。0和2仅保留用于负对照构建；失败的WEIGHT_REUSE_FENCE默认0。三个候选构建选项均为CMake可选诊断目标，未默认替换主库。
+
+数值验证
+A. S8192/H4096/K6，T=1、17、63、8191、8192：
+   平衡、热点、远端热点流量；每路径3次随机系数重复、2次固定系数重复；旧发布/融合发布；两rank全部CPU参考不一致数为0。
+B. S32768/H128/K6，T=1、17、63、65、1025、16385、32768：
+   每个top-K专家使用不同的2的幂响应，避免恒等专家掩盖系数映射错误；每次使用新随机系数，每种T做3次；
+   旧发布、融合发布、裁剪输入三路径，两rank共126次CPU逐位比较全部通过。
+   T16385、32768覆盖每核512-token窗口切换；T65及以上覆盖输出缓冲区多次复用。
+这些是小算子用例的验证结果，不表示模型精度或全部UDMA场景均已验证。
+
+性能粗测
+为使对照两端都正确，开销测量使用固定1/K路由系数。S8192/H4096/K6，T8192，双卡；
+每种操作预执行5次，NPU events计时10次，交替操作顺序。
+聚合：每次取两个rank耗时的最大值，再对10次取均值。
+                              原库         S→V修复库
+native weighted combine       4.695626 ms  4.661953 ms
+旧发布+weighted combine       5.246383 ms  5.189572 ms
+融合发布+weighted combine     5.061631 ms  5.020766 ms
+native测量采用zero_copy=True、inter_rank_sync=False；内核自身的UDMA通信与同步仍在。
+修复库native较原库为-0.72%，应按本次测量波动解释，未观察到明显额外开销，不宣称同步本身带来确定加速。
+修复库内，融合发布相对旧发布耗时减少3.25%。
+固定系数计时不构成原库随机系数正确性证据；也不能代替LongBench服务性能测试。
+
+此前发布融合验证
+单卡本地发布：12项检查通过，含空输入、H17/31/4095非对齐、计数存储复用、尾部清零和边界保护。
+初次H17失败来自copy padding，已修正明确的右侧零padding并重新通过。
+MTE双卡：5组旧/新/裁剪路径逐位一致；此前rank0计时6.296700→6.130309 ms。
+单卡发布不等同于单卡MTE通信测试；未据此声称8卡或跨机通过。
+
+复现与审计
+所有验证加载原仓编译产物，没有SDK源码副本。各rank通过dladdr核对实际weighted kernel入口和候选标记，记录绝对库路径、ABI及SHA；计时记录另含实际映射库和CombineUrma.compute_weighted调用证据。
+运行ID、退出码和释放情况见run_manifest.json；逐次计时见metrics.json；源码与库指纹见source_manifest.json。
+evidence/保留失败的S_MTE2和仅变量对照，以及通过的S_V、扩展回归与性能数据。
+补丁见UDMA_WEIGHTED_SYNC_FIX.patch；补丁基线是此次UDMA同步候选前保存的原仓文件。
+原始完整日志仍保存在实验目录data/对应RUN_ID下。
+
+收尾
+六个测试组均已退出；仅管理本任务记录的PID，没有终止其他用户进程。卡1、2已确认释放，资源检查记录results/udma_final_idle.txt。
+本实验的双卡运行脚本TEST_APPROVED已回到0，资源轮询关闭。
+融合发布服务端开关仍默认关闭；未改变aisbench配置，未重启任何服务。

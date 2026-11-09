@@ -1,0 +1,58 @@
+{
+  "at": "2026-11-05T11:33:12.062227+08:00",
+  "physical_cards": {
+    "118": 1,
+    "124": 1
+  },
+  "mte": {
+    "passed": true,
+    "world_size": 2,
+    "checks_per_rank": 39,
+    "total_checks": 78,
+    "weighted_calls_per_rank": 22,
+    "max_abs_error": 0.0,
+    "run": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_udma_weighted_multinode/results/cross2_card1_20261105_112412_mte"
+  },
+  "udma": {
+    "valid": false,
+    "backend": "udma",
+    "world_size": 2,
+    "physical_cards": {
+      "118": 1,
+      "124": 1
+    },
+    "stage": "shmem_initialization",
+    "return_code": -3,
+    "error_code_name": "ACLSHMEM_SMEM_ERROR",
+    "direct_failure": "No product strategy for mainboard_id=0x27; generated rootinfo failed; UDMA PrepareOpenDevice failed",
+    "weighted_combine_executed": false,
+    "precision_validated": false,
+    "hardware_udma_support": "not determined by this failure",
+    "node_logs": [
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_udma_weighted_multinode/results/cross2_card1_20261105_112412_udma/node118_aclshmem_2287305_20261105112724.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_udma_weighted_multinode/results/cross2_card1_20261105_112412_udma/node124_aclshmem_315265_20261105112714.log"
+    ]
+  },
+  "cleanup": {
+    "118": {
+      "node": 118,
+      "card1_idle": true,
+      "remaining_test_workers": [],
+      "at": "2026-11-05T11:31:52.381175+08:00",
+      "existing_processes_stopped": false
+    },
+    "124": {
+      "node": 124,
+      "card1_idle": true,
+      "remaining_test_workers": [],
+      "at": "2026-11-05T11:31:45.400736+08:00",
+      "existing_processes_stopped": false
+    }
+  },
+  "runtime_binaries_unchanged": true,
+  "planning_dispatch_validated": false,
+  "expert_prefetch_validated": false,
+  "model_started": false,
+  "automation_resumed": false,
+  "scope": "Two-rank synthetic combine correctness only; no performance benchmark or model validation"
+}

@@ -1,0 +1,65 @@
+本轮 MXFP8 dispatch 适配与小算子验证记录
+日期：2026-11-06（北京时间）
+范围：不启动模型；combine 量化仅做可行性分析，没有实现或开启。
+
+结果：
+1. CPU：7 项测试通过，包括字节布局、容量边界、默认 BF16、后端不匹配拒绝、prefetch→单次量化→dispatch 顺序。
+2. 118/卡4：1、17、65、8192行打包/解包和原生量化行重排/复制等价性通过。
+3. 124/卡1、2/MTE：两rank基础验证通过并正常退出。
+4. 124/卡1、2/UDMA：两rank基础验证通过并正常退出。
+   上述两种后端均验证：
+   - balanced/hot/remote_hot/balanced_repeat；T=64/17/1/63。
+   - FP8激活与scale逐字节等于“旧BF16传输后再原生量化”的结果。
+   - Home MLP与最终BF16 weighted combine输出逐字节一致（受控合成权重与输入）。
+   - 全256字节模式（含BF16载体NaN编码）传输不改位。
+   - 强制跨rank读取16个专家的w13/w13_scale/w2/w2_scale，全payload SHA256匹配来源。
+   - 记录实际native dispatch后端参数、映射库SHA；planning仍为MTE。
+5. 124/MTE/8192容量：balanced/hot各T=8192、尾部T=8191通过；每rank有效行49152/49152/49146；FP8与scale逐字节一致。
+6. 124/UDMA/8192容量：尚未完成。启动后其他vLLM服务占满124全部8卡，守卫仅正常停止本任务的两个子进程并完成清理；该次作废，不计通过。
+7. 118在资源变化时中断的测试均单独保留，不作为合格证据。
+这些是单机两卡跨rank测试，不能宣称已通过双机、DP16或模型准确率/端到端性能测试。
+
+代码位置（原仓）：
+ascend-moonep/kernels/mxfp8_wire.cpp
+ascend-moonep/ascend_moonep/mxfp8_transport.py
+ascend-moonep/ascend_moonep/api.py（新增dispatch_mxfp8）
+ascend-moonep/CMakeLists.txt（OFF默认的可选wire库目标）
+ascend-moonep/scripts/build_mxfp8_wire.sh
+ascend-moonep/tests/test_mxfp8_transport_layout.py
+vllm-ascend/vllm_ascend/envs.py
+vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py
+
+实现/优化点：
+- 原生MXFP8量化从接收端移到发送端，每个原始token只量化一次；使用现有GMM1的dynamic_scale入口。
+- 每行将FP8激活及E8M0 scale打包，一同传输；H=4096时8192字节变为4224字节，payload减少48.4375%。
+- 复用MTE/UDMA现有“只搬字节”的dispatch内核；BF16只是原始字节载体，绝不进行数值转型。
+- 仅dispatch私有context使用carrier H=2112；原模型H=4096与BF16 combine不改。
+- 复用输入pad和SHMEM缓冲区的紧凑前缀；跳过发送端原有大BF16 pad-copy。
+- 每Buffer缓存输出、scale和packet；返回可释放的view，避免dispose_tensor破坏缓存本体。
+- 保持after_planning_hook在原生量化前触发，继续支持原有prefetch副流/Home GEMM调度。
+- 实际后端与Buffer初始化后端不一致时拒绝执行，避免静默回退。
+
+开关：
+VLLM_ASCEND_MOONEP_DISPATCH_DTYPE=bf16（默认，既有路径）
+VLLM_ASCEND_MOONEP_DISPATCH_DTYPE=mxfp8（仅Slot/W4A8MXFP/REAL_T=1/原BF16激活；当前显式要求T>=1）
+未改既有模型服务、aisbench配置；本轮不启动模型。
+仅测试显式加载原仓build/mxfp8_transport_20261106/lib/libascend_moonep_mxfp8_wire.so。
+尚未将该新wire库部署到默认安装lib目录；已有通信动态库没有替换。
+
+开销：
+118单卡8192行的粗测（包含Python提交与同步，非严格kernel profiling）pack约0.0667ms、unpack约0.0697ms。
+不能据此声称端到端提速，仍需完成UDMA大容量、集成/跨机验证及用户授权的模型复测。
+
+combine量化分析：
+当前MTE/UDMA weighted combine均使用BF16专家输出，FP32乘路由权重并累加，最后一次转BF16。
+可行候选为：
+GEMM2 BF16 → 新增MXFP8量化与scale → MTE/UDMA传输 → 片上反量化到FP32 → FP32乘权重和累加 → BF16输出。
+它会新增一次有损量化；不同于dispatch的“移动已有量化”，FP32累加不能恢复FP8丢失的信息。
+误差为各专家量化误差按路由权重求和；专家输出相互抵消时，相对误差可能放大。
+H=4096时理论payload同样可减少48.4%，但量化、打包、scale、片上解码和同步可能抵消收益。
+建议后续单独确认combine改造；本轮保留BF16 weighted combine及现有精度修复。
+
+后续待办：
+- 等124有两张稳定空闲卡，完成large_udma_124.sh的8192-token补测（新RUN_ID，资源守卫不可绕过）。
+- 按需要完成插件集成、跨机验证与模型复测；以上尚未执行。
+完整原始日志/逐rank JSON/资源快照/所有权记录：本实验目录data/。
