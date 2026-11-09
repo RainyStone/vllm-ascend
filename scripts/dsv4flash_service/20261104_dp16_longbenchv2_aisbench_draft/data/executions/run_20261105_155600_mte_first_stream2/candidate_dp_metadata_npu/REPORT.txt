@@ -1,0 +1,63 @@
+DP16 LongBench-v2：五种配置各一轮的探索性结果
+
+两机：141.61.45.118 / 141.61.45.124，均为 xzx_moonep；原仓源码与安装库。
+DSV4 Flash；DP16/TP1/EP16；完整503条，context中间截断，完整prompt上限131072，输出1。
+全局并发16；max-model-len=131073；max-num-batched-tokens=8192；KV24GiB/卡；chunked prefill；prefix cache关闭；eager。
+全部采用 dp_allreduce_on_npu=true；每个配置一次独立起服，正式测一轮503条，AISBench不预热，保留perf+debug。
+下表每行是独立配置，副流开启/关闭没有相互平均。off没有MoonEP预取副流。
+
+配置 | 副流模式 | TTFT均值(s) | 输入吞吐(token/s) | TTFT相对off | 吞吐相对off
+off | None | 12.5996 | 106480.0261 | +0.00% | +0.00%
+slot_mte_stream2 | 2 | 14.5221 | 92229.1783 | +15.26% | -13.38%
+slot_udma_stream2 | 2 | 17.0783 | 78602.5909 | +35.55% | -26.18%
+slot_mte_stream0 | 0 | 14.7154 | 91213.3601 | +16.79% | -14.34%
+slot_udma_stream0 | 0 | 17.1273 | 78377.9086 | +35.94% | -26.39%
+
+开启副流相对关闭副流（正值代表开启后改善）：
+slot_mte: TTFT下降 1.31%，输入吞吐增加 1.11%。
+slot_udma: TTFT下降 0.29%，输入吞吐增加 0.29%。
+
+验证与边界：
+每组503成功、0失败、每条输出1；逐请求完整prompt SHA和token数核对通过。每轮总输入43029416 token。
+两机16个真实worker启动/结束审计通过，worker PID保持一致；off没有MoonEP开关或映射库。
+Slot-MTE实际planning/dispatch/combine/prefetch均为MTE；Slot-UDMA的planning为MTE，另外三阶段为UDMA，不能称为全阶段UDMA。
+副流开启：PF_STREAM=2，16 rank均有实际启用日志；UDMA另有每机8份native队列查询(3,2,2)。日志交错的证据处理见QP_AUDIT_EVIDENCE.txt。
+副流关闭：PF_STREAM=0，预取仍保留在主流；独立审计检查启动设置、无冲突worker exec设置、无副流安装/激活记录及SHA固定源码。校验记录明确标记side_stream_activation_verified=False、side_stream_disabled_verified=True。
+关闭UDMA副流时，原代码同时关闭专用prefetch重叠队列布局；这属于该开关的正常行为，没有额外修改服务参数。
+旧CPU元数据off基线、原失败Slot-MTE轮、历史未完成矩阵均不混入这五行。精度暂不评估。
+各配置仅一轮、非交错重复的统计实验；小百分比差异不能据此断言稳定收益。
+
+错误分析：
+原失败首先出现在Gloo CPU元数据同步的报文长度检查，随后其他rank连接重置。采用vllm-ascend已有NPU元数据同步开关后，这五轮完成。
+这验证了规避方案的运行效果，未证明底层Gloo报文错误的唯一根因；该开关不是ascend-moonep新增能力，也未将MTE改成UDMA。
+
+性能分析：
+OFFLINE_LENGTH_ANALYSIS.json按相同样本ID/输入长度分档；PER_REQUEST_TTFT.csv由原始SQLite时间点重算，均值必须与AISBench汇总相符。
+源码中Slot发送BF16 hidden_states；原生All2AllV在FP8配置启用dispatch_with_quant时先量化再传输，并带scale。模型config声明动态FP8。Slot还需要规划与专家权重预取。
+因此通信字节量、规划/权重搬运及副流资源竞争都是候选解释。这里只做源码与端到端对照，没有逐算子profiling，不能把其中任何一项宣称为已证实根因。
+正式轮关闭逐层负载/计时诊断，没有本轮逐rank不均衡统计，不能沿用旧DP8数值或断言“不均衡比不足”。
+
+保存位置：
+/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/executions/run_20261105_155600_mte_first_stream2/candidate_dp_metadata_npu
+
+off
+  原始JSONL: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-off-20261105_174943-2588635/round_1/aisbench/20261105_174944/performances/dsv4flash-dp16-longbench-off/longbenchv2-all503-midcut128k_details.jsonl
+  汇总: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-off-20261105_174943-2588635/round_1/aisbench/20261105_174944/performances/dsv4flash-dp16-longbench-off/longbenchv2-all503-midcut128k.json
+  审计/调试/校验: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-off-20261105_174943-2588635/round_1
+slot_mte_stream2
+  原始JSONL: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-slot_mte-20261105_173417-2573861/round_1/aisbench/20261105_173419/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k_details.jsonl
+  汇总: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-slot_mte-20261105_173417-2573861/round_1/aisbench/20261105_173419/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k.json
+  审计/调试/校验: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-slot_mte-20261105_173417-2573861/round_1
+slot_udma_stream2
+  原始JSONL: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-slot_udma-20261105_180458-2603192/round_1/aisbench/20261105_180500/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k_details.jsonl
+  汇总: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-slot_udma-20261105_180458-2603192/round_1/aisbench/20261105_180500/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k.json
+  审计/调试/校验: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/metadata_npu-pair01-slot_udma-20261105_180458-2603192/round_1
+slot_mte_stream0
+  原始JSONL: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/mainstream-pair01-slot_mte-20261105_182328-2620024/round_1/aisbench/20261105_182329/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k_details.jsonl
+  汇总: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/mainstream-pair01-slot_mte-20261105_182328-2620024/round_1/aisbench/20261105_182329/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k.json
+  审计/调试/校验: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/mainstream-pair01-slot_mte-20261105_182328-2620024/round_1
+slot_udma_stream0
+  原始JSONL: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/mainstream-pair01-slot_udma-20261105_183750-2634277/round_1/aisbench/20261105_183752/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k_details.jsonl
+  汇总: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/mainstream-pair01-slot_udma-20261105_183750-2634277/round_1/aisbench/20261105_183752/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k.json
+  审计/调试/校验: /mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp16_longbenchv2_aisbench_draft/data/aisbench/mainstream-pair01-slot_udma-20261105_183750-2634277/round_1
+本任务已清理：两机各8卡均确认无运行进程；未终止其他用户进程，未复位设备。资源释放凭证：resource_release_node118.json、resource_release_node124.json。

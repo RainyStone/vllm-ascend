@@ -1,0 +1,25 @@
+DP16 LongBench-v2 优化版复测
+更新：2026-11-06T13:35:54.968558+00:00
+两机118/124，原仓默认安装；DSV4 Flash；DP16/TP1/EP16；503条、context中间截断至128K prompt；并发16，输出1，8K chunk，24GiB KV/卡，dp_allreduce_on_npu=true。
+每模式独立起服1次、正式503条1轮、0预热。Slot：MXFP8 dispatch＋融合BF16发布＋PF_STREAM=2；关闭Home拆分、持久专家缓存和提前预取。combine保持BF16传输、FP32加权累加。
+模式 | 平均TTFT(ms) | 相对off | P95 TTFT(ms) | 输入吞吐(token/s) | 相对off | 计时秒
+off | 12400.92 | +0.00% | 18199.04 | 108356.03 | +0.00% | 397.11
+slot_mte | 14261.40 | +15.00% | 20497.14 | 93920.50 | -13.32% | 458.15
+slot_udma | 17584.37 | +41.80% | 24782.47 | 76336.30 | -29.55% | 563.68
+
+已完成模式均通过：503成功、总输入43,029,416 token、总输出503 token、逐请求prompt与token数校验及两机16个worker前后模式审计。
+首次off起服因EngineCore控制面Gloo初始化等待而未发送正式请求，已保留无效记录并正常清理；本表off来自原参数重试后的完整有效轮。
+原仓主库以原子rename更新；两端分别验证默认editable安装路径、动态库SHA、实际映射和UDMA同步修复ABI=2。
+UDMA组的planning仍使用MTE，其余三个阶段使用UDMA。
+
+off 原始数据：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-off-20261106_205132-3991962/round_1
+统计JSON：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-off-20261106_205132-3991962/round_1/aisbench/20261106_205134/performances/dsv4flash-dp16-longbench-off/longbenchv2-all503-midcut128k.json
+逐请求JSONL：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-off-20261106_205132-3991962/round_1/aisbench/20261106_205134/performances/dsv4flash-dp16-longbench-off/longbenchv2-all503-midcut128k_details.jsonl
+
+slot_mte 原始数据：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_mte-20261106_210449-4005766/round_1
+统计JSON：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_mte-20261106_210449-4005766/round_1/aisbench/20261106_210450/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k.json
+逐请求JSONL：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_mte-20261106_210449-4005766/round_1/aisbench/20261106_210450/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k_details.jsonl
+
+slot_udma 原始数据：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_udma-20261106_212411-4023837/round_1
+统计JSON：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_udma-20261106_212411-4023837/round_1/aisbench/20261106_212413/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k.json
+逐请求JSONL：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_udma-20261106_212411-4023837/round_1/aisbench/20261106_212413/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k_details.jsonl

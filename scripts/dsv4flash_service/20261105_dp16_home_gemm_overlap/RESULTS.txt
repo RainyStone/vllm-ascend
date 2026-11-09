@@ -1,0 +1,83 @@
+Home GEMM1跨机DP16实现、复测及劣化分析
+
+结果：已在原仓完成MTE/UDMA适配与低开销优化，三组正式503条全部成功；本轮两种Slot仍劣于off。
+方案：off -> Slot-MTE -> Slot-UDMA；各一次独立起服、一次503条、无预热。所有诊断计时均排除。
+
+正式性能（TTFT越低越好，输入吞吐越高越好）
+模式 | 平均TTFT(ms) | 相对off | P95 TTFT(ms) | 输入token/s | 相对off | 成功
+off | 12512.33 | +0.00% | 18773.26 | 107153.61 | +0.00% | 503/503
+Slot-MTE + Home GEMM1 | 14949.69 | +19.48% | 21161.35 | 89763.48 | -16.23% | 503/503
+Slot-UDMA + Home GEMM1 | 17401.65 | +39.08% | 24525.63 | 77119.31 | -28.03% | 503/503
+
+每组输入43,029,416 token、输出503 token；逐请求prompt SHA/token数和输出1均已核验。
+TTFT取官方AIS口径：每请求1000*(time_points[1]-time_points[0])，再对503请求作不加权平均。SQLite numpy时间点原始数组保留。
+输入吞吐使用AIS原始统计，等于总输入token/Benchmark Duration。服务启动时间不计入该Duration。
+
+固定参数：DSV4 Flash原权重；DP16/TP1/EP16；118 API8445、124 headless；完整503条，仅context中间截断至完整prompt≤131072；
+max_model_len131073、全局并发16、max_num_seqs16、输出1、8192 chunked prefill、24 GiB KV/卡、eager、prefix cache off、seed1024、dp_allreduce_on_npu=true。
+Slot REAL_T=1，持久缓存和提前预取关闭；副流PF_STREAM=3，Home GEMM1掩盖开启。UDMA仅dispatch/combine/prefetch是UDMA，planning仍为MTE，QP[3,2,2]。
+off保持原生vLLM-Ascend通信，没有开启MoonEP；三组前后16-worker实际配置、源文件SHA和运行库映射均通过审计。
+
+完整503诊断：全程负载峰均比
+先分别累计每rank整个诊断范围的(token,expert)对数，再算16*max/总数。不累加每步峰值，也不把某张固定卡当作每步最忙卡。
+逐层逐专家路由计数与计算计数已核对，三组均完全守恒；并非少算token获得均衡。
+原始归属视角：按逻辑专家原owner归属。实际计算视角：按接收/实际执行的rank归属，含记录到的框架工作。
+模式 | 原始归属全程峰均比 | 实际计算全程峰均比 | 逐层原始归属范围 | 逐层实际计算范围
+off | 1.028388 | 1.028388 | 1.118719..1.503765 | 1.118719..1.503765
+Slot-MTE + Home GEMM1 | 1.028388 | 1.000003 | 1.118701..1.503765 | 1.000006..1.000025
+Slot-UDMA + Home GEMM1 | 1.028140 | 1.000003 | 1.118173..1.504686 | 1.000007..1.000036
+
+每rank完整计数（rank0..15）及总数：
+off
+routing_owner_pairs=[707162941, 713567061, 691037913, 704311023, 713029066, 697715495, 691201754, 693906074, 669824082, 661570779, 695217739, 712470111, 688783996, 678807231, 690037808, 693267465]
+compute_pairs=[707162941, 713567061, 691037913, 704311023, 713029066, 697715495, 691201754, 693906074, 669824082, 661570779, 695217739, 712470111, 688783996, 678807231, 690037808, 693267465]
+route_total=11101910538; compute_total=11101910538; dataset_tokens*topk6*43layers=11101589328
+Slot-MTE + Home GEMM1
+routing_owner_pairs=[707171521, 713575716, 691047632, 704319855, 713036444, 697723964, 691209712, 693913736, 669832181, 661578922, 695225915, 712478741, 688791045, 678815557, 690046898, 693276601]
+compute_pairs=[693878337, 693879581, 693877462, 693878005, 693879056, 693878448, 693877214, 693877574, 693875726, 693876274, 693877523, 693878718, 693877561, 693877076, 693877801, 693878084]
+route_total=11102044440; compute_total=11102044440; dataset_tokens*topk6*43layers=11101589328
+Slot-UDMA + Home GEMM1
+routing_owner_pairs=[707026272, 713403832, 691531436, 704181944, 712991555, 697842314, 691030289, 693914079, 670039440, 661345076, 694883954, 712446593, 688878674, 678726405, 690478772, 693324837]
+compute_pairs=[693878075, 693879165, 693877642, 693878727, 693879743, 693878281, 693877092, 693877344, 693876523, 693876109, 693877103, 693879543, 693877518, 693877126, 693878167, 693877314]
+route_total=11102045472; compute_total=11102045472; dataset_tokens*topk6*43layers=11101589328
+
+注意：数据集纯请求理论对数与运行时记录可因DP同步dummy等框架工作有小量差异；完整保留原计数，不假装全为原始文本token。
+off每层比理论多7470对（1245个token等价），43层共321210对，约0.0029%；不对这部分做无法证实的逐rank扣除。
+全程累计接近均衡不代表每层或每步均衡；逐层范围已另列。未验证16-rank逐步时间对齐，因此不伪造逐步P95峰均比。
+
+Profiling证据与解释（三组各16份、共48份逐rank原始trace，每组独立诊断16请求，非完整503）
+Slot-MTE + Home GEMM1: 捕获长输入MoE调用2021次，2021次预取在dispatch结束前完成，Home实际预取重叠总量0.000000us。
+Slot-UDMA + Home GEMM1: 捕获长输入MoE调用1978次，1978次预取在dispatch结束前完成，Home实际预取重叠总量0.000000us。
+1. 所有捕获长输入调用中，权重预取已由dispatch覆盖；把join推迟到Home之后没有额外剩余搬运可掩盖。
+   全部调用（含短/同步dummy）存在少量非零重叠，不能把“长输入零重叠”推广为所有形状绝不可能重叠。
+2. Home/Slot GEMM1额外拆分的两段合计时间高于原生off GMM1；原生大GMM的性能没有被本实现自动继承。
+   这同时受范围内核tiling与搬移后group尺寸影响，现有三臂对比不能单独隔离Home特性的净开销。
+3. UDMA长输入dispatch耗时显著高于MTE，而预取本身更短；UDMA的额外劣化主要线索位于dispatch及同步路径。
+   内核总时长含跨rank等待，不能把整段当纯网络搬运，也不能把各rank/stream时长相加当墙钟占比。
+补充rank0时间线：dispatch结束到Home开始约447us，其中TensorMove约249us、DynamicMxQuant约188us；主要是已记录的设备复制/量化，不应称为CPU空转或等待预取。
+4. 原生AlltoAll在发送前做MXFP8量化；Slot发送BF16 hidden_state、在接收后量化。H=4096时，每逻辑行主数据+scale约4224B对8192B（约1.94倍）。
+   这只是行载荷理论大小，不等于实测链路总流量倍数；去重、本地传输、布局与padding会影响总流量。两者专家权重均保留FP4/e8m0；off专家权重本地常驻，Slot额外拉取计划指定的远端专家。BF16 carrier是原量化字节的视图，不是把FP4权重转成BF16数值传输。
+   Slot还增加规划和按层专家权重搬运；完整负载累计较均衡时，其收益空间更有限，但不能仅凭累计峰均比断言每一步都均衡。
+
+对齐profiling子集：每rank最先捕获的2个prefill chunk，每chunk43个MoE层（每组1376个MoE调用），均值us：
+off: {"calls": 1376, "means_us": {"gmm1_us": 1179.5137239280523, "gmm2_us": 609.5326531159158}}
+Slot-MTE + Home GEMM1: {"calls": 1376, "means_us": {"planning_us": 1613.6993381177324, "dispatch_us": 2013.8501612917878, "home_us": 1555.7828217659885, "slot_us": 138.54695694040697, "gemm1_total_us": 1694.3297787063952, "gmm2_us": 672.8035452398256, "combine_us": 3578.580220294331, "prefetch_active_us": 361.7103305777616}}
+Slot-UDMA + Home GEMM1: {"calls": 1376, "means_us": {"planning_us": 1611.925878542878, "dispatch_us": 6797.976070812138, "home_us": 1553.9328879905522, "slot_us": 138.91719585755814, "gemm1_total_us": 1692.8500838481107, "gmm2_us": 672.8817705759448, "combine_us": 3059.0317206577038, "prefetch_active_us": 302.7616061500727}}
+上述子集只有少量固定请求；并未精确分摊正式TTFT增加的各项百分比。
+
+完成的优化与正确性验证：见OPTIMIZATIONS.txt、CODE_GUIDE.txt、HOME_GMM_CHANGES.patch。
+35项CPU测试；单卡59条数值记录无mismatch；MTE/UDMA各自2-rank跨机与16-rank完整链路通过，远端权重读回与参考一致。
+FP32路由乘权重并累加、最终一次BF16舍入保持；语义模型精度按用户要求暂不复测。
+库在原仓构建/原子安装，未建立SDK副本。没有终止其他或不明归属进程；有效正式与本轮诊断服务均已正常退出，失败启动独立记录。
+
+局限：单次冷启动快速探索，没有重复置信区间；没有同版PF_STREAM=2对照，不能用旧实验估计Home改动的净收益。
+后续优先研究范围GMM tiling和UDMA dispatch等待；激活量化通信格式/路由策略/大显存缓存变更不在本次已授权优化中。
+
+完整路径：
+/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp16_home_gemm_overlap
+/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp16_home_gemm_overlap/data/formal/home_formal_20261106_after_quiescent_gate
+/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp16_home_gemm_overlap/data/diagnostics/home_profiling_v2_20261106
+/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp16_home_gemm_overlap/data/diagnostics/home_rankload_20261106
+正式原始AIS stdout/stderr、JSONL和SQLite：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp16_home_gemm_overlap/data/aisbench
+原始profiling：/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp16_home_gemm_overlap/diagnostics/profiling/data/profiling_v2
+失败/中止启动与旧profiling v1记录独立保留，不纳入正式三组结果。

@@ -1,0 +1,196 @@
+{
+  "results": [
+    {
+      "mode": "off",
+      "ttft_delta_pct": 0.0,
+      "input_tps_delta_pct": 0.0,
+      "summary": {
+        "mode": "off",
+        "requests": 503,
+        "input_tokens": 43029416,
+        "output_tokens": 503,
+        "ttft_ms": {
+          "mean": 12400.922035789636,
+          "median": 14692.92659999337,
+          "p95": 18199.04404305853,
+          "p99": 19181.558625015896,
+          "max": 22245.66534999758
+        },
+        "input_tps": 108356.0275,
+        "benchmark_duration_ms": 397111.4205,
+        "raw_statistics": {
+          "Benchmark Duration": {
+            "total": "397111.4205 ms"
+          },
+          "Total Requests": {
+            "total": 503
+          },
+          "Failed Requests": {
+            "total": 0
+          },
+          "Success Requests": {
+            "total": 503
+          },
+          "Concurrency": {
+            "total": 15.7076
+          },
+          "Max Concurrency": {
+            "total": 16
+          },
+          "Request Throughput": {
+            "total": "1.2666 req/s"
+          },
+          "Total Input Tokens": {
+            "total": 43029416
+          },
+          "Total Generated Tokens": {
+            "total": 503
+          },
+          "Input Token Throughput": {
+            "total": "108356.0275 token/s"
+          },
+          "Output Token Throughput": {
+            "total": "1.2666 token/s"
+          },
+          "Total Token Throughput": {
+            "total": "108357.2941 token/s"
+          }
+        },
+        "ttft_rule": "unweighted per-request mean of 1000*(time_points[1]-time_points[0]), as AIS default_perf.py",
+        "ttft_definition_source_sha256": "e33857dd2a55030bd594d554d30598030fc4358489dc539ebe50dd54b3a2fd43",
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-off-20261106_205132-3991962/round_1/aisbench/20261106_205134/performances/dsv4flash-dp16-longbench-off/longbenchv2-all503-midcut128k_details.jsonl",
+        "raw_statistics_path": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-off-20261106_205132-3991962/round_1/aisbench/20261106_205134/performances/dsv4flash-dp16-longbench-off/longbenchv2-all503-midcut128k.json"
+      }
+    },
+    {
+      "mode": "slot_mte",
+      "ttft_delta_pct": 15.002700648229194,
+      "input_tps_delta_pct": -13.32231001178037,
+      "summary": {
+        "mode": "slot_mte",
+        "requests": 503,
+        "input_tokens": 43029416,
+        "output_tokens": 503,
+        "ttft_ms": {
+          "mean": 14261.395246439444,
+          "median": 16350.88307003025,
+          "p95": 20497.135081060696,
+          "p99": 23680.251464198816,
+          "max": 34564.01516997721
+        },
+        "input_tps": 93920.5016,
+        "benchmark_duration_ms": 458147.2127,
+        "raw_statistics": {
+          "Benchmark Duration": {
+            "total": "458147.2127 ms"
+          },
+          "Total Requests": {
+            "total": 503
+          },
+          "Failed Requests": {
+            "total": 0
+          },
+          "Success Requests": {
+            "total": 503
+          },
+          "Concurrency": {
+            "total": 15.6577
+          },
+          "Max Concurrency": {
+            "total": 16
+          },
+          "Request Throughput": {
+            "total": "1.0979 req/s"
+          },
+          "Total Input Tokens": {
+            "total": 43029416
+          },
+          "Total Generated Tokens": {
+            "total": 503
+          },
+          "Input Token Throughput": {
+            "total": "93920.5016 token/s"
+          },
+          "Output Token Throughput": {
+            "total": "1.0979 token/s"
+          },
+          "Total Token Throughput": {
+            "total": "93921.5995 token/s"
+          }
+        },
+        "ttft_rule": "unweighted per-request mean of 1000*(time_points[1]-time_points[0]), as AIS default_perf.py",
+        "ttft_definition_source_sha256": "e33857dd2a55030bd594d554d30598030fc4358489dc539ebe50dd54b3a2fd43",
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_mte-20261106_210449-4005766/round_1/aisbench/20261106_210450/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k_details.jsonl",
+        "raw_statistics_path": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_mte-20261106_210449-4005766/round_1/aisbench/20261106_210450/performances/dsv4flash-dp16-longbench-slot_mte/longbenchv2-all503-midcut128k.json"
+      }
+    },
+    {
+      "mode": "slot_udma",
+      "ttft_delta_pct": 41.79889021262269,
+      "input_tps_delta_pct": -29.55048448966071,
+      "summary": {
+        "mode": "slot_udma",
+        "requests": 503,
+        "input_tokens": 43029416,
+        "output_tokens": 503,
+        "ttft_ms": {
+          "mean": 17584.36982288228,
+          "median": 20895.212169969454,
+          "p95": 24782.471847976558,
+          "p99": 28969.526154114887,
+          "max": 44801.19390995242
+        },
+        "input_tps": 76336.2964,
+        "benchmark_duration_ms": 563682.2588,
+        "raw_statistics": {
+          "Benchmark Duration": {
+            "total": "563682.2588 ms"
+          },
+          "Total Requests": {
+            "total": 503
+          },
+          "Failed Requests": {
+            "total": 0
+          },
+          "Success Requests": {
+            "total": 503
+          },
+          "Concurrency": {
+            "total": 15.6914
+          },
+          "Max Concurrency": {
+            "total": 16
+          },
+          "Request Throughput": {
+            "total": "0.8923 req/s"
+          },
+          "Total Input Tokens": {
+            "total": 43029416
+          },
+          "Total Generated Tokens": {
+            "total": 503
+          },
+          "Input Token Throughput": {
+            "total": "76336.2964 token/s"
+          },
+          "Output Token Throughput": {
+            "total": "0.8923 token/s"
+          },
+          "Total Token Throughput": {
+            "total": "76337.1888 token/s"
+          }
+        },
+        "ttft_rule": "unweighted per-request mean of 1000*(time_points[1]-time_points[0]), as AIS default_perf.py",
+        "ttft_definition_source_sha256": "e33857dd2a55030bd594d554d30598030fc4358489dc539ebe50dd54b3a2fd43",
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_udma-20261106_212411-4023837/round_1/aisbench/20261106_212413/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k_details.jsonl",
+        "raw_statistics_path": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_dp16_optimized_retest/data/aisbench/optimized-pair01-slot_udma-20261106_212411-4023837/round_1/aisbench/20261106_212413/performances/dsv4flash-dp16-longbench-slot_udma/longbenchv2-all503-midcut128k.json"
+      }
+    }
+  ],
+  "completed": [
+    "off",
+    "slot_mte",
+    "slot_udma"
+  ],
+  "pending": []
+}
