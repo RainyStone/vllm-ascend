@@ -1,0 +1,307 @@
+{
+  "off": {
+    "phase": "diagnostic",
+    "mode": "off",
+    "aligned_method": "AlltoAllCommImpl",
+    "aligned_steps": 590,
+    "discarded_windows": 0,
+    "num_moe_layers": 43,
+    "prefill_reference_pairs": 4777892196,
+    "observed_route_pairs_fraction_of_reference": 1.0000181975642046,
+    "scope_pad_pairs": 0,
+    "views": {
+      "owner": {
+        "windows": 25370,
+        "mean": 1.2660998253786897,
+        "weighted_mean": 1.2609035246993445,
+        "p50": 1.2408447265625,
+        "p95": 1.5012247721354166,
+        "max": 2.9035664960597938,
+        "aligned_pairs_by_rank": [
+          612791405,
+          600887394,
+          606619442,
+          603111528,
+          569550349,
+          605074378,
+          585096489,
+          594811005
+        ],
+        "aligned_cumulative_ratio": 1.0260340645115282,
+        "busiest_counts_ties_included": [
+          4006,
+          3477,
+          4062,
+          2991,
+          2228,
+          3329,
+          2227,
+          3054
+        ],
+        "observed_pairs_by_rank": [
+          612796089,
+          600892674,
+          606624042,
+          603116084,
+          569554961,
+          605079688,
+          585100031,
+          594815573
+        ],
+        "observed_cumulative_ratio": 1.026033929053096,
+        "aligned_fraction_of_observed": 0.9999922243277135
+      }
+    },
+    "rank_local_bounds_and_methods": [
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MC2CommImpl:local": 774,
+          "AlltoAllCommImpl:local": 25370
+        }
+      }
+    ],
+    "raw_logs": [
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank0.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank1.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank2.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank3.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank4.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank5.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank6.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/off/20261107_195225-802095/moe_par_dp8_4k_off_rank7.log"
+    ],
+    "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/aisbench/pair01-off-20261107_195355-808283/round_1/aisbench_debug.log",
+    "window_csv": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/off_rank_windows.csv"
+  },
+  "slot": {
+    "phase": "diagnostic",
+    "mode": "slot",
+    "aligned_method": "MoonEPCommImpl",
+    "aligned_steps": 608,
+    "discarded_windows": 0,
+    "num_moe_layers": 43,
+    "prefill_reference_pairs": 4777892196,
+    "observed_route_pairs_fraction_of_reference": 1.000018089566791,
+    "scope_pad_pairs": 0,
+    "views": {
+      "owner": {
+        "windows": 26144,
+        "mean": 1.3074551321547119,
+        "weighted_mean": 1.2605584761776623,
+        "p50": 1.2461344401041667,
+        "p95": 1.6066975911458325,
+        "max": 4.666666666666667,
+        "aligned_pairs_by_rank": [
+          612788611,
+          600896702,
+          606628312,
+          603123741,
+          569549947,
+          605079344,
+          585100975,
+          594810994
+        ],
+        "aligned_cumulative_ratio": 1.0260215190841249,
+        "busiest_counts_ties_included": [
+          4212,
+          3687,
+          4291,
+          3103,
+          2272,
+          3354,
+          2288,
+          3171
+        ],
+        "observed_pairs_by_rank": [
+          612788611,
+          600896702,
+          606628312,
+          603123741,
+          569549947,
+          605079344,
+          585100975,
+          594810994
+        ],
+        "observed_cumulative_ratio": 1.0260215190841249,
+        "aligned_fraction_of_observed": 1.0
+      },
+      "compute": {
+        "windows": 26144,
+        "mean": 1.0000353143641485,
+        "weighted_mean": 1.0000148778396816,
+        "p50": 1.0,
+        "p95": 1.0002441321103477,
+        "max": 1.0023640661938533,
+        "aligned_pairs_by_rank": [
+          597247637,
+          597247301,
+          597247501,
+          597247287,
+          597247035,
+          597247380,
+          597247239,
+          597247246
+        ],
+        "aligned_cumulative_ratio": 1.0000005169550124,
+        "busiest_counts_ties_included": [
+          24154,
+          24072,
+          24106,
+          24064,
+          24010,
+          24091,
+          24063,
+          24058
+        ],
+        "observed_pairs_by_rank": [
+          597247637,
+          597247301,
+          597247501,
+          597247287,
+          597247035,
+          597247380,
+          597247239,
+          597247246
+        ],
+        "observed_cumulative_ratio": 1.0000005169550124,
+        "aligned_fraction_of_observed": 1.0
+      }
+    },
+    "rank_local_bounds_and_methods": [
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      },
+      {
+        "start": 48,
+        "end": 655,
+        "methods": {
+          "MoonEPCommImpl:global": 26144,
+          "MoonEPCommImpl:compute": 26144
+        }
+      }
+    ],
+    "raw_logs": [
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank0.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank1.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank2.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank3.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank4.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank5.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank6.log",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/rank_raw/slot/20261107_200059-812901/moe_par_dp8_4k_slot_rank7.log"
+    ],
+    "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/diagnostic/data/diagnostic/aisbench/pair01-slot-20261107_200235-819138/round_1/aisbench_debug.log",
+    "window_csv": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/slot_rank_windows.csv"
+  }
+}

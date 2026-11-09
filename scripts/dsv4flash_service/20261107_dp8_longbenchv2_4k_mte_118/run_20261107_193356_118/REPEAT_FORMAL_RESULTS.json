@@ -1,0 +1,224 @@
+{
+  "pairs": {
+    "pair01": {
+      "off": {
+        "round": 1,
+        "mean_ttft_ms": 15273.9,
+        "median_ttft_ms": 15263.5,
+        "p90_ttft_ms": 25648.3,
+        "p99_ttft_ms": 32588.2,
+        "input_tps": 59536.092,
+        "duration_seconds": 311.0543771,
+        "input_tokens": 18518962,
+        "output_tokens": 316,
+        "requests": 316,
+        "concurrency": 15.5168,
+        "max_concurrency": 16.0,
+        "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-off-20261107_193610-786163/round_1/aisbench/20261107_193627/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k.json",
+        "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-off-20261107_193610-786163/round_1/aisbench/20261107_193627/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k_details.jsonl",
+        "p95_ttft_ms": 29571.264352474827,
+        "request_rps": 1.0159,
+        "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-off-20261107_193610-786163",
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-off-20261107_193610-786163/round_1/aisbench_debug.log"
+      },
+      "slot": {
+        "round": 1,
+        "mean_ttft_ms": 14832.7,
+        "median_ttft_ms": 14756.0,
+        "p90_ttft_ms": 24657.8,
+        "p99_ttft_ms": 30232.1,
+        "input_tps": 60383.3853,
+        "duration_seconds": 306.6896947,
+        "input_tokens": 18518962,
+        "output_tokens": 316,
+        "requests": 316,
+        "concurrency": 15.283,
+        "max_concurrency": 16.0,
+        "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-slot-20261107_194512-797329/round_1/aisbench/20261107_194528/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k.json",
+        "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-slot-20261107_194512-797329/round_1/aisbench/20261107_194528/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k_details.jsonl",
+        "p95_ttft_ms": 27779.417847516015,
+        "request_rps": 1.0304,
+        "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-slot-20261107_194512-797329",
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/formal/data/formal/aisbench/pair01-slot-20261107_194512-797329/round_1/aisbench_debug.log"
+      }
+    },
+    "pair02": {
+      "off": {
+        "round": 1,
+        "mean_ttft_ms": 15279.8,
+        "median_ttft_ms": 15079.7,
+        "p90_ttft_ms": 25608.6,
+        "p99_ttft_ms": 33932.2,
+        "input_tps": 59080.7802,
+        "duration_seconds": 313.4515477,
+        "input_tokens": 18518962,
+        "output_tokens": 316,
+        "requests": 316,
+        "concurrency": 15.4041,
+        "max_concurrency": 16.0,
+        "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-off-20261107_201129-830121/round_1/aisbench/20261107_201146/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k.json",
+        "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-off-20261107_201129-830121/round_1/aisbench/20261107_201146/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k_details.jsonl",
+        "p95_ttft_ms": 29264.69782748609,
+        "request_rps": 1.0081,
+        "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-off-20261107_201129-830121",
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-off-20261107_201129-830121/round_1/aisbench_debug.log"
+      },
+      "slot": {
+        "round": 1,
+        "mean_ttft_ms": 14789.5,
+        "median_ttft_ms": 14349.8,
+        "p90_ttft_ms": 25365.5,
+        "p99_ttft_ms": 31586.3,
+        "input_tps": 61054.404,
+        "duration_seconds": 303.3190202,
+        "input_tokens": 18518962,
+        "output_tokens": 316,
+        "requests": 316,
+        "concurrency": 15.4079,
+        "max_concurrency": 16.0,
+        "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-slot-20261107_202034-840971/round_1/aisbench/20261107_202051/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k.json",
+        "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-slot-20261107_202034-840971/round_1/aisbench/20261107_202051/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k_details.jsonl",
+        "p95_ttft_ms": 29072.805884992704,
+        "request_rps": 1.0418,
+        "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-slot-20261107_202034-840971",
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-slot-20261107_202034-840971/round_1/aisbench_debug.log"
+      }
+    },
+    "pair03": {
+      "off": {
+        "round": 1,
+        "mean_ttft_ms": 15225.5,
+        "median_ttft_ms": 15143.0,
+        "p90_ttft_ms": 26483.9,
+        "p99_ttft_ms": 32538.5,
+        "input_tps": 58955.7128,
+        "duration_seconds": 314.11649719999997,
+        "input_tokens": 18518962,
+        "output_tokens": 316,
+        "requests": 316,
+        "concurrency": 15.3169,
+        "max_concurrency": 16.0,
+        "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-off-20261107_201117-1236288/round_1/aisbench/20261107_201134/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k.json",
+        "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-off-20261107_201117-1236288/round_1/aisbench/20261107_201134/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k_details.jsonl",
+        "p95_ttft_ms": 29114.346724993084,
+        "request_rps": 1.006,
+        "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-off-20261107_201117-1236288",
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-off-20261107_201117-1236288/round_1/aisbench_debug.log"
+      },
+      "slot": {
+        "round": 1,
+        "mean_ttft_ms": 14849.5,
+        "median_ttft_ms": 14855.9,
+        "p90_ttft_ms": 25147.6,
+        "p99_ttft_ms": 32174.4,
+        "input_tps": 60815.3551,
+        "duration_seconds": 304.5112862,
+        "input_tokens": 18518962,
+        "output_tokens": 316,
+        "requests": 316,
+        "concurrency": 15.4098,
+        "max_concurrency": 16.0,
+        "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-slot-20261107_202010-1242438/round_1/aisbench/20261107_202027/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k.json",
+        "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-slot-20261107_202010-1242438/round_1/aisbench/20261107_202027/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k_details.jsonl",
+        "p95_ttft_ms": 28338.837907562265,
+        "request_rps": 1.0377,
+        "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-slot-20261107_202010-1242438",
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/repeat_formal/pair03_124/formal/data/formal/aisbench/pair03-slot-20261107_202010-1242438/round_1/aisbench_debug.log"
+      }
+    }
+  },
+  "complete_pairs": [
+    "pair01",
+    "pair02",
+    "pair03"
+  ],
+  "aggregate": {
+    "新增两对均值": {
+      "pairs": [
+        "pair02",
+        "pair03"
+      ],
+      "metrics": {
+        "off": {
+          "mean_ttft_ms": 15252.65,
+          "median_ttft_ms": 15111.35,
+          "p95_ttft_ms": 29189.522276239586,
+          "input_tps": 59018.2465,
+          "request_rps": 1.00705
+        },
+        "slot": {
+          "mean_ttft_ms": 14819.5,
+          "median_ttft_ms": 14602.849999999999,
+          "p95_ttft_ms": 28705.821896277484,
+          "input_tps": 60934.87955,
+          "request_rps": 1.0397500000000002
+        }
+      },
+      "slot_vs_off_pct": {
+        "mean_ttft_ms": -2.8398343894339595,
+        "median_ttft_ms": -3.365020332399171,
+        "p95_ttft_ms": -1.6571027623697554,
+        "input_tps": 3.247526254444044,
+        "request_rps": 3.2471078893798966
+      },
+      "mean_of_paired_pct": {
+        "mean_ttft_ms": -2.839176431916596,
+        "median_ttft_ms": -3.3681037393054387,
+        "p95_ttft_ms": -1.6596884344043772,
+        "input_tps": 3.2474275837116817,
+        "request_rps": 3.2470078842489203
+      }
+    },
+    "全部三对均值": {
+      "pairs": [
+        "pair01",
+        "pair02",
+        "pair03"
+      ],
+      "metrics": {
+        "off": {
+          "mean_ttft_ms": 15259.733333333334,
+          "median_ttft_ms": 15162.066666666668,
+          "p95_ttft_ms": 29316.769634984666,
+          "input_tps": 59190.861666666664,
+          "request_rps": 1.01
+        },
+        "slot": {
+          "mean_ttft_ms": 14823.9,
+          "median_ttft_ms": 14653.9,
+          "p95_ttft_ms": 28397.020546690328,
+          "input_tps": 60751.04813333334,
+          "request_rps": 1.0366333333333333
+        }
+      },
+      "slot_vs_off_pct": {
+        "mean_ttft_ms": -2.8561005871662326,
+        "median_ttft_ms": -3.3515659694588806,
+        "p95_ttft_ms": -3.137279788141367,
+        "input_tps": 2.635856993352892,
+        "request_rps": 2.636963696369632
+      },
+      "mean_of_paired_pct": {
+        "mean_ttft_ms": -2.85564686179041,
+        "median_ttft_ms": -3.353710984806394,
+        "p95_ttft_ms": -3.126264944949327,
+        "input_tps": 2.6393380829362747,
+        "request_rps": 2.640440535228842
+      }
+    }
+  },
+  "hosts": {
+    "pair01": {
+      "host": "141.61.45.118",
+      "directory": "."
+    },
+    "pair02": {
+      "host": "141.61.45.118",
+      "directory": "repeat_formal/pair02"
+    },
+    "pair03": {
+      "host": "141.61.45.124",
+      "directory": "repeat_formal/pair03_124"
+    }
+  }
+}

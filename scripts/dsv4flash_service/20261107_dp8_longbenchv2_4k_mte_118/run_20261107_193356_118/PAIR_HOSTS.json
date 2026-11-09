@@ -1,0 +1,14 @@
+{
+  "pair01": {
+    "host": "141.61.45.118",
+    "directory": "."
+  },
+  "pair02": {
+    "host": "141.61.45.118",
+    "directory": "repeat_formal/pair02"
+  },
+  "pair03": {
+    "host": "141.61.45.124",
+    "directory": "repeat_formal/pair03_124"
+  }
+}

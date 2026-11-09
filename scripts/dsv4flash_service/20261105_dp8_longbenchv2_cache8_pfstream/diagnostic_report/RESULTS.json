@@ -1,0 +1,155 @@
+{
+  "profiles": {
+    "stream_only": {
+      "status": "passed",
+      "diagnostic_only": true,
+      "requests": 128,
+      "session": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/stream_only/data/executions/run_20261105_140959",
+      "service_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/stream_only/data/services/stream_only-slot-20261105_141000-2409500",
+      "service_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/stream_only/data/services/stream_only-slot-20261105_141000-2409500/service.log",
+      "device_fault_evidence": [],
+      "optimization_audit": true,
+      "real_request_preflight": true,
+      "validated_requests": 128,
+      "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/stream_only/data/aisbench/stream_only-slot-20261105_141149-2416038"
+    },
+    "cache_only": {
+      "status": "failed",
+      "diagnostic_only": true,
+      "error": "RuntimeError('cache_only_slot: service exited during benchmark')",
+      "session": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/cache_only/data/executions/run_20261105_141553",
+      "service_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/cache_only/data/services/cache_only-slot-20261105_141554-2418973",
+      "service_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/isolation_diagnostics/cache_only/data/services/cache_only-slot-20261105_141554-2418973/service.log",
+      "device_fault_evidence": [
+        "[ERROR] RUNTIME(2421050,):2026-11-05-14:18:37.114.017 [task_recycle_cqrpt_base.cc:70]2422649 PrintTaskErrorMsg:Task run failed, stream_id=61, pos=1822, task_sn=88851, sqe_type=0(aic), errType=0x1(task exception), sqSwStatus=0.",
+        "The extend info: errcode:(95) errorStr: The DDR address of the MTE instruction is out of range. subErrType: 0x4.",
+        "[ERROR] RUNTIME(2421050,):2026-11-05-14:18:38.129.008 [davinci_kernel_task.cc:947]2422649 PrintErrorInfoForDavinciTask:[DFX_INFO]AI Core kernel execution failed, device_id=5, stream_id=61, report_stream_id=61, task_id=1822, flip_num=42, fault kernel_name=VllmQuantLightningIndexer_2b6d1df6269f00620ed1b8c1155de695_1124279332, fault kernel info ext=none, program id=104, hash=14296738386078856649.",
+        "[ERROR] RUNTIME(2421050,):2026-11-05-14:18:38.621.744 [stream.cc:1878]2422649 GetError:[DFX_INFO]AI Core kernel execution failed, device_id=5, stream_id=61, report_stream_id=61, task_id=1822, flip_num=42, fault kernel_name=VllmQuantLightningIndexer_2b6d1df6269f00620ed1b8c1155de695_1124279332, fault kernel info ext=none, program id=104, hash=14296738386078856649.",
+        "[ERROR] RUNTIME(2421055,):2026-11-05-14:18:37.116.558 [task_recycle_cqrpt_base.cc:70]2422653 PrintTaskErrorMsg:Task run failed, stream_id=61, pos=455, task_sn=89533, sqe_type=0(aic), errType=0x1(task exception), sqSwStatus=0.",
+        "The extend info: errcode:(95) errorStr: The DDR address of the MTE instruction is out of range. subErrType: 0x4.",
+        "[ERROR] RUNTIME(2421055,):2026-11-05-14:18:38.131.523 [davinci_kernel_task.cc:947]2422653 PrintErrorInfoForDavinciTask:[DFX_INFO]AI Core kernel execution failed, device_id=6, stream_id=61, report_stream_id=61, task_id=455, flip_num=43, fault kernel_name=VllmQuantLightningIndexer_2b6d1df6269f00620ed1b8c1155de695_1124279332, fault kernel info ext=none, program id=104, hash=14296738386078856649.",
+        "[ERROR] RUNTIME(2421055,):2026-11-05-14:18:38.615.591 [stream.cc:1878]2422653 GetError:[DFX_INFO]AI Core kernel execution failed, device_id=6, stream_id=61, report_stream_id=61, task_id=455, flip_num=43, fault kernel_name=VllmQuantLightningIndexer_2b6d1df6269f00620ed1b8c1155de695_1124279332, fault kernel info ext=none, program id=104, hash=14296738386078856649.",
+        "[ERROR] RUNTIME(2421060,):2026-11-05-14:18:37.115.654 [task_recycle_cqrpt_base.cc:70]2422710 PrintTaskErrorMsg:Task run failed, stream_id=61, pos=2018, task_sn=89046, sqe_type=0(aic), errType=0x1(task exception), sqSwStatus=0.",
+        "The extend info: errcode:(95) errorStr: The DDR address of the MTE instruction is out of range. subErrType: 0x4.",
+        "[ERROR] RUNTIME(2421060,):2026-11-05-14:18:38.130.971 [davinci_kernel_task.cc:947]2422710 PrintErrorInfoForDavinciTask:[DFX_INFO]AI Core kernel execution failed, device_id=4, stream_id=61, report_stream_id=61, task_id=2018, flip_num=42, fault kernel_name=VllmQuantLightningIndexer_2b6d1df6269f00620ed1b8c1155de695_1124279332, fault kernel info ext=none, program id=104, hash=14296738386078856649.",
+        "[ERROR] RUNTIME(2421060,):2026-11-05-14:18:38.606.566 [stream.cc:1878]2422710 GetError:[DFX_INFO]AI Core kernel execution failed, device_id=4, stream_id=61, report_stream_id=61, task_id=2018, flip_num=42, fault kernel_name=VllmQuantLightningIndexer_2b6d1df6269f00620ed1b8c1155de695_1124279332, fault kernel info ext=none, program id=104, hash=14296738386078856649."
+      ],
+      "optimization_audit": true,
+      "real_request_preflight": true
+    }
+  },
+  "diagnostic_only": true,
+  "excluded_from_formal_results": true,
+  "eight_npus_released": false,
+  "port_8444_bindable": true,
+  "main_off1_preserved": true,
+  "owned_processes_exited": true,
+  "current_foreign_npu_occupancy": true,
+  "cache_copy_bit_test": {
+    "passed": true,
+    "device": "npu:0",
+    "synthetic": true,
+    "includes_all_bf16_bit_patterns": true,
+    "logical_cache_layers": 64,
+    "cache_experts_per_layer": 8,
+    "tests": [
+      {
+        "payload": "w13",
+        "layer": 0,
+        "cache_slot": 0,
+        "bytes": 8388608,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w13",
+        "layer": 42,
+        "cache_slot": 7,
+        "bytes": 8388608,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w13",
+        "layer": 63,
+        "cache_slot": 3,
+        "bytes": 8388608,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w13_scale",
+        "layer": 0,
+        "cache_slot": 0,
+        "bytes": 524288,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w13_scale",
+        "layer": 42,
+        "cache_slot": 7,
+        "bytes": 524288,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w13_scale",
+        "layer": 63,
+        "cache_slot": 3,
+        "bytes": 524288,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w2",
+        "layer": 0,
+        "cache_slot": 0,
+        "bytes": 4194304,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w2",
+        "layer": 42,
+        "cache_slot": 7,
+        "bytes": 4194304,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w2",
+        "layer": 63,
+        "cache_slot": 3,
+        "bytes": 4194304,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w2_scale",
+        "layer": 0,
+        "cache_slot": 0,
+        "bytes": 262144,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w2_scale",
+        "layer": 42,
+        "cache_slot": 7,
+        "bytes": 262144,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      },
+      {
+        "payload": "w2_scale",
+        "layer": 63,
+        "cache_slot": 3,
+        "bytes": 262144,
+        "cache_byte_mismatches": 0,
+        "roundtrip_byte_mismatches": 0
+      }
+    ],
+    "note": "Tests data-copy bit preservation and VMM slice offsets, not full model scheduling."
+  }
+}

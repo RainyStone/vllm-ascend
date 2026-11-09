@@ -1,0 +1,17 @@
+{
+  "host": "141.61.45.124",
+  "review": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp1tp8_longbenchv2_mte_review",
+  "sha256": {
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ascend_forward_context.py": "56f086a54cce6fc0d0ffd511b469dd71b4088e9a2d703c4f793e018bb8a6aab5",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "09db28a92396361fe75a27a940a6dcebc0dc6b7f05b7b48074d51dcf96049387",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moonep_balance.py": "928aa8927e7aa8cb89d97888180d2bed766f585c61069157834736dd123db8d2",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moe_par_stats.py": "2566e610834d68fadd6662b96acbc12d74026328e328a145c6a13a68d75d77d5",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moe_mlp.py": "821a7873a06f048fe7f161163025c744cd3b46ed5dd2f90e523877e512ca4c56",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_home_gmm.so": "ebc00cac2f3ec8f0bcead6f308f734c8b0802e91ba656895d0852e3da07f9e54",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "626307b356bcc6eadd2a18646ae9870352fbe6e6d30bc539c93856c7efa3b607",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_mxfp8_wire.so": "783272429214bcf790ba2322835302a3dd5073e8be91fa06319f051d6cdfcc23",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_publish.so": "e69aafba0bb53c235fa418409f41eeba7339d9a4e98bb6abe14bbc872856dacc",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/selection_manifest.json": "a2e83ed45ccc91a149fb89b1b107af4dce1fc2a5f5bf3a2653e7919152620a81",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/longbenchv2_full_le128k.json": "fef00721db994b6352c0591705b5818fa1c5c83521867edbbe37ca7042eb9b55"
+  }
+}
