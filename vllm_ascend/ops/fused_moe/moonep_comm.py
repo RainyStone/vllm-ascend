@@ -1015,6 +1015,10 @@ def ensure_runtime_initialized() -> None:
 # time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
 # out of the hot path.
 _ENV_REUSE_OUT = os.environ.get("MOONEP_REUSE_OUT", "1") == "1"
+# Hand the MLP its input as a view of the symmetric shard (dispatch zero_copy),
+# so the library skips its full-shard copy-out into a private buffer.  =0
+# restores upstream behaviour (shard -> reused tensor -> MLP).
+_ENV_DISPATCH_IN_SHARD = os.environ.get("MOONEP_DISPATCH_IN_SHARD", "1") != "0"
 _ENV_SLOT_MODE = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 _ENV_NO_SYNC = os.environ.get("MOONEP_NO_SYNC", "1") != "0"
 _ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
@@ -1325,9 +1329,15 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 hidden_states, route_c, topk_c, tpe, num_tokens=T, wire_storage=hidden_c,
             )
         else:
+            # zero_copy=True returns a view of the symmetric shard the dispatch
+            # kernel already wrote, so the MLP reads it in place and the
+            # library's full-shard copy-out (402 MB/layer) disappears.  The
+            # legacy combine later publishes the MLP output back into that same
+            # shard; both are on the current stream, so the GMM has finished
+            # reading before that copy is enqueued.
             h_nvs, w_nvs, cu, plan = buffer.dispatch(
                 hidden_c, route_c, topk_c, tpe,
-                zero_copy=False, inter_rank_sync=True,
+                zero_copy=_ENV_DISPATCH_IN_SHARD, inter_rank_sync=True,
                 num_tokens=real_t,
                 reuse_outputs=_ENV_REUSE_OUT,
             )
