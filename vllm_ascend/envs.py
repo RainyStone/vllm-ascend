@@ -155,10 +155,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Number of prefetch slots; defaults to E/R (the library plan requires B == E/R,
     # other values are rejected).
     "MOONEP_B": lambda: os.getenv("MOONEP_B", None),
-    # Quantized payloads (W4A8MXFP: uint8 NZ weights + e8m0 scales) in slot mode.
-    # "0" restores the pre-quant POC scope — a quantized model then raises instead
-    # of mirroring 4 payloads. MoonEP/SHMEM always uses the Slot path.
-    "MOONEP_SLOT_QUANT": lambda: bool(int(os.getenv("MOONEP_SLOT_QUANT", "1"))),
     # Synthetic expert-selection profile, for routing-skew performance experiments.
     # Replaces the router's top-k output wholesale in ops/fused_moe/experts_selector.py
     # (see ops/fused_moe/moe_sim_route.py). One share per expert, in percent, summing

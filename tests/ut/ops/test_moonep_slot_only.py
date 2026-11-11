@@ -161,7 +161,7 @@ class NativeSelectionTests(unittest.TestCase):
                 self.assertFalse(envs.MOONEP_KEEP_MC2)
                 self.assertEqual(envs.VLLM_ASCEND_MOONEP_DISPATCH_DTYPE, "bf16")
                 self.assertFalse(envs.VLLM_ASCEND_MOONEP_FUSED_PUBLISH)
-                self.assertTrue(envs.MOONEP_SLOT_QUANT)
+                self.assertFalse(hasattr(envs, "MOONEP_SLOT_QUANT"))
 
     def test_compatibility_mode_query_does_not_read_legacy_environment(self):
         node = function_node(ROOT / "vllm_ascend/ops/fused_moe/moonep_balance.py", "slot_mode_enabled")

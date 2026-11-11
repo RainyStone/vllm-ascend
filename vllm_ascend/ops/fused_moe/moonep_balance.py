@@ -47,8 +47,8 @@ Scope: bf16 (AscendUnquantizedFusedMoEMethod) plus quantized layouts whose
 per-expert block is dense (``stride(0)*element_size == numel/E``) — verified
 on-card for W4A8MXFP (uint8 NZ weights + e8m0 ND scales). Anything else raises.
 Used whenever vLLM selects MoonEP/SHMEM. ``enable_moonep`` still controls
-whether MoonEP is available; ``MOONEP_SLOT_QUANT=0`` restricts its payloads
-to the pre-quant scope.
+whether MoonEP is available. Quantized payloads follow the same layout
+validation unconditionally; this does not quantize BF16 model weights.
 """
 
 from __future__ import annotations
@@ -66,8 +66,6 @@ from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEWeights
-
-_slot_quant = os.environ.get("MOONEP_SLOT_QUANT", "1") == "1"
 
 # prefetch kernel 的 UB 约束（ascend-moonep/kernels/prefetch.cpp:100-105）：
 # ``elements_per_row`` 就是载体的 Hp，且要求 ub_bytes / sizeof(bfloat16) / Hp >= 1
@@ -141,7 +139,8 @@ def slot_mode_enabled() -> bool:
 
 
 def slot_quant_enabled() -> bool:
-    return _slot_quant
+    """Compatibility capability query; does not quantize or enable a model."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -349,11 +348,6 @@ def _payload_specs(layer, H: int, F: int) -> list[_PayloadSpec]:
             _make_spec("w13", w13, is_nz=False, natural=(H, 2 * F)),
             _make_spec("w2", w2, is_nz=False, natural=(F, H)),
         ]
-    if not _slot_quant:
-        raise NotImplementedError(
-            "MoonEP slot mode with quantized MoE weights is disabled "
-            "(MOONEP_SLOT_QUANT=0)."
-        )
     scale13 = getattr(layer, "w13_weight_scale", None)
     scale2 = getattr(layer, "w2_weight_scale", None)
     if scale13 is None or scale2 is None:

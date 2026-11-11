@@ -29,6 +29,8 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 `MOONEP_ALLOW_CAPTURE` 已移除，固定采用原默认值 0 的捕获保护：MoonEP 的 token dispatch 和 Slot forward 在检测到图捕获时继续报错，旧值 1 不再绕过保护。使用 `--enforce-eager` 或关闭相应图模式；本次不自动更改图配置或增加静默回退，也不宣称 MoonEP 已支持图模式。Slot forward 在无执行上下文时的既有处理、AICPU 启动预热的捕获跳过逻辑、原生 Off 的图能力及其他优化保持不变，历史性能实验和捕获研究记录保留原样。
 
+`MOONEP_SLOT_QUANT` 已移除，固定采用原默认值 1 的行为：Slot 始终接受现有代码支持并通过布局校验的量化权重 payload，旧值 0 不再禁止该路径。量化权重及必要 scale 仍按原字节布局镜像、预取并建立计算别名，不增加量化/反量化；BF16 模型继续使用 BF16 分支。缺失 scale、元素大小、shape/stride、逐专家连续性、存储边界和载体容量等校验保持不变，不扩大模型或量化格式支持范围。`slot_quant_enabled()` 保留为恒 True 的兼容能力查询，不表示当前模型一定量化，也不启用 MoonEP。dispatch dtype、其他优化和原生 Off 不变，量化权重继续保留原张量，历史实验脚本和结果保留原样。
+
 ## 已验证（实测）
 
 > 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。
@@ -183,7 +185,6 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
-| `MOONEP_SLOT_QUANT=1` | slot 模式接受量化 payload（默认 1）；置 0 则量化层在 slot 模式显式报错（回滚开关） |
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |

@@ -294,7 +294,7 @@ class AscendFusedMoE(FusedMoE):
             # 量化权重（W4A8MXFP：uint8 NZ 权重 + e8m0 scale）也走 slot。布局校验
             # 需要真实权重张量（此刻还没加载），所以移到权重加载后的
             # moonep_balance._LayerWeightState：逐 payload 查 dtype / 逐专家是否
-            # 无 padding / 是否被 MOONEP_SLOT_QUANT=0 关掉。
+            # 无 padding，并确认必要 scale 均存在。
             register_moonep_layer(
                 E=self.moe_config.num_experts,
                 K=self.top_k,

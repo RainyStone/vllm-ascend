@@ -931,7 +931,6 @@ def ensure_runtime_initialized() -> None:
                 "ASCEND_MOONEP_PREFETCH_RELAXED",
                 "ASCEND_MOONEP_NO_RECONCILE",
                 "ASCEND_MOONEP_SKIP_DUP",
-                "MOONEP_SLOT_QUANT",
                 "MOONEP_MIN_DISPATCH_TOKENS",
             )
         ),
