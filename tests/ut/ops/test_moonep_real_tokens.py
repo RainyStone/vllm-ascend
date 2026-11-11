@@ -1,0 +1,187 @@
+# SPDX-License-Identifier: Apache-2.0
+"""CPU regressions for real token bounds at the SDK dispatch/combine boundary."""
+import ast
+import os
+import sys
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import torch
+
+SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/fused_moe/moonep_comm.py"
+
+
+def load_method(name, namespace):
+    tree = ast.parse(SOURCE.read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+               and node.name == "TokenDispatcherWithMoonEP")
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    method.returns = None
+    for argument in method.args.args:
+        argument.annotation = None
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE), "exec"), namespace)
+    return namespace[name]
+
+
+class DispatchReached(Exception):
+    """Stop after observing the SDK call, before any simulated communication."""
+
+
+class Metadata(SimpleNamespace):
+    pass
+
+
+class RealTokenBoundsTest(unittest.TestCase):
+    def check_dispatch(self, transport, slot):
+        tokens, capacity, hidden, experts, topk = 2, 4, 16, 4, 2
+        calls = []
+        pads = {
+            "hidden": torch.full((capacity, hidden), float("nan"), dtype=torch.bfloat16),
+            "route": torch.full((capacity, topk), float("nan")),
+            "topk": torch.full((capacity, topk), 999, dtype=torch.int32),
+            "combine_route": torch.zeros(capacity, 8),
+        }
+
+        class Buffer:
+            def _require_ctx(self):
+                return {"B": 2}
+
+            def dispatch(self, *args, **kwargs):
+                calls.append(kwargs)
+                raise DispatchReached
+
+            def dispatch_mxfp8(self, *args, **kwargs):
+                calls.append(kwargs)
+                raise DispatchReached
+
+        buffer = Buffer()
+        namespace = {
+            "torch": torch, "time": time, "os": os,
+            "_EXTRA_CTX": SimpleNamespace(capturing=False),
+            "_ENV_SLOT_MODE": slot, "_ENV_REUSE_OUT": True,
+            "_ENV_DISPATCH_IN_SHARD": True,
+            "get_moonep_tokens_capacity": lambda: capacity,
+            "_select_buffer_for_step": lambda *args: (buffer, capacity),
+            "_pads_for": lambda *args: pads,
+            "_scratch_for": lambda *args: {"tpe_compat": torch.zeros(experts, dtype=torch.int32)},
+            "_route_stats_enabled": lambda: False,
+            "_route_histogram": lambda routes, e, t, compat, collect: compat,
+            "_MOONEP_RUNTIME": SimpleNamespace(_buffers={(experts, topk, hidden): {capacity: buffer}}),
+        }
+        dispatch = load_method("token_dispatch", namespace)
+        dispatcher = SimpleNamespace(
+            num_experts=experts, top_k=topk, activation_transport=transport,
+            _tstats=lambda *args: None,
+        )
+        quant_type = SimpleNamespace(W4A8MXFP=object())
+        inputs = SimpleNamespace(
+            hidden_states=torch.ones(tokens, hidden, dtype=torch.bfloat16),
+            topk_weights=torch.full((tokens, topk), 0.5),
+            topk_ids=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+            quant=SimpleNamespace(quant_type=quant_type.W4A8MXFP),
+        )
+        modules = {"vllm_ascend.quantization.quant_type": SimpleNamespace(QuantType=quant_type)}
+        # Old launchers can still export these names. They must not change the
+        # actual token bound or make the dispatcher populate capacity-tail rows.
+        environment = {"MOONEP_REAL_T": "0", "MOONEP_PAD_ROTATE": "1",
+                       "MOONEP_PAD_EXPERT0": "1", "MOONEP_PAD_CUT": "1"}
+        with patch.dict(os.environ, environment), patch.dict(sys.modules, modules):
+            with self.assertRaises(DispatchReached):
+                dispatch(dispatcher, inputs)
+        self.assertEqual(calls[0]["num_tokens"], tokens)
+        self.assertTrue(torch.equal(pads["topk"][:tokens], inputs.topk_ids))
+        self.assertTrue(torch.all(pads["topk"][tokens:] == 999))
+        self.assertTrue(torch.isnan(pads["hidden"][tokens:]).all())
+
+    def test_bf16_owner_dispatch_uses_real_tokens(self):
+        self.check_dispatch("bf16", False)
+
+    def test_bf16_slot_dispatch_uses_real_tokens(self):
+        self.check_dispatch("bf16", True)
+
+    def test_mxfp8_slot_dispatch_uses_real_tokens(self):
+        self.check_dispatch("mxfp8", True)
+
+    def test_owner_combine_uses_real_tokens_and_clears_nan_tail(self):
+        tokens, capacity, hidden, rows = 2, 4, 16, 8
+        calls = []
+
+        class Buffer:
+            def _require_ctx(self):
+                return {"NvS": rows, "S": capacity, "H": hidden}
+
+            def combine(self, **kwargs):
+                calls.append(kwargs)
+                return torch.ones(capacity, hidden, dtype=torch.bfloat16), None, None
+
+        namespace = {
+            "torch": torch, "time": time, "MoonEPCombineMetadata": Metadata,
+            "_combine_row_ids": lambda n, device: torch.arange(n, device=device),
+            "_zero_bf16_scalar": lambda device: torch.zeros((), dtype=torch.bfloat16, device=device),
+        }
+        combine = load_method("token_combine", namespace)
+        metadata = Metadata(
+            num_tokens=tokens, hidden_shape=(tokens, hidden), source_topk_weights_sk=None,
+            w_trim=torch.ones(rows), buffer=Buffer(), tail_masked=True,
+            group_list=torch.tensor([2, 1], dtype=torch.int64), plan=object(),
+        )
+        activations = torch.ones(rows, hidden, dtype=torch.bfloat16)
+        activations[3:].fill_(float("nan"))
+        with patch.dict(os.environ, {"MOONEP_REAL_T": "0"}):
+            result = combine(SimpleNamespace(_tstats=lambda *args: None), activations, metadata)
+        self.assertEqual(calls[0]["num_tokens"], tokens)
+        self.assertEqual(tuple(result.shape), (tokens, hidden))
+        self.assertTrue(torch.equal(calls[0]["hidden_nvsh"][3:],
+                                    torch.zeros(rows - 3, hidden, dtype=torch.bfloat16)))
+
+
+class EarlyPlanRealTokensTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.plan = SimpleNamespace(dst=torch.empty(8, dtype=torch.int32))
+
+        def compute(ctx, topk, histogram, cu, plan, **kwargs):
+            self.calls.append((ctx["num_valid_tokens"], histogram.clone()))
+
+        self.ctx = {"num_valid_tokens": 4,
+                    "kernels": {"planning": SimpleNamespace(compute=compute)}}
+        self.buffer = SimpleNamespace(_require_ctx=lambda: self.ctx)
+        self.namespace = {
+            "torch": torch,
+            "_PRED_PLAN_BUF": {4: (self.plan, torch.empty(6, dtype=torch.int32))},
+            "_early_route": lambda *args: (
+                None, torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)),
+            "_select_buffer_for_step": lambda *args: (self.buffer, 4),
+            "get_ep_group": lambda: SimpleNamespace(world_size=2, rank_in_group=0),
+        }
+        tree = ast.parse(SOURCE.read_text())
+        names = {"early_predicted_plan_ctx", "early_plan_fallback", "_plan_on_predicted_routing"}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"), self.namespace)
+
+    def test_prediction_resets_reused_buffer_bound_and_excludes_tail(self):
+        result = self.namespace["early_predicted_plan_ctx"](None, None, 2, 4, 16, 2)
+        self.assertIs(result[0], self.buffer)
+        self.assertIsNone(result[2])
+        self.assertEqual(self.calls[0][0], 2)
+        self.assertEqual(self.calls[0][1].tolist(), [1, 1, 1, 1])
+
+    def test_fallback_uses_real_count_instead_of_capacity(self):
+        self.namespace["early_plan_fallback"](SimpleNamespace(E=4), 2, 1, 16)
+        self.assertEqual(self.calls[0][0], 1)
+        self.assertEqual(self.calls[0][1].tolist(), [1, 1, 0, 0])
+
+    def test_prediction_probe_histogram_ignores_unused_capacity(self):
+        self.ctx["num_valid_tokens"] = 1
+        routes = torch.tensor([[0, 1], [3, 3], [3, 3], [3, 3]], dtype=torch.int32)
+        planning = SimpleNamespace(allocate_planning_outputs=lambda ctx: (self.plan, None))
+        with patch.dict(sys.modules, {"ascend_moonep.planning": planning}):
+            self.namespace["_plan_on_predicted_routing"](self.ctx, routes, 4, 2)
+        self.assertEqual(self.calls[0][1].tolist(), [1, 1, 0, 0])
+
+
+if __name__ == "__main__":
+    unittest.main()

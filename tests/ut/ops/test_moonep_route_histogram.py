@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU checks for omitted planning histograms and REAL_T diagnostic accounting."""
+"""CPU checks for omitted planning histograms and real-token accounting."""
 import ast
 from pathlib import Path
 import unittest
@@ -19,31 +19,25 @@ class HistogramTests(unittest.TestCase):
         self.compat=torch.zeros(4,dtype=torch.int32)
     def test_disabled_does_no_histogram_work(self):
         with patch.object(torch,"histc",side_effect=AssertionError("unneeded kernel")):
-            result,pads=histogram(self.routes,4,2,2,3,self.compat,False)
+            result=histogram(self.routes,4,2,self.compat,False)
         self.assertIs(result,self.compat)
-        self.assertEqual(pads,0)
         self.assertTrue(torch.equal(self.compat,torch.zeros_like(self.compat)))
     def test_disabled_reuses_same_buffer(self):
         for valid in (1,2,4):
-            result,_=histogram(self.routes,4,valid,valid,3,self.compat,False)
+            result=histogram(self.routes,4,valid,self.compat,False)
             self.assertEqual(result.data_ptr(),self.compat.data_ptr())
-    def test_real_t_diagnostics_exclude_capacity_pads(self):
-        result,pads=histogram(self.routes,4,2,2,3,self.compat,True)
+    def test_diagnostics_exclude_capacity_tail(self):
+        result=histogram(self.routes,4,2,self.compat,True)
         self.assertEqual(result.tolist(),[1,2,1,0])
-        self.assertEqual(pads,0)  # Do not subtract those pads a second time.
-    def test_legacy_padded_histogram_has_exact_pad_debt(self):
-        result,pads=histogram(self.routes,4,2,None,3,self.compat,True)
-        self.assertEqual(result.tolist(),[1,2,1,4])
-        self.assertEqual(pads,4)
-        result[3]-=pads
+    def test_invalid_tail_experts_are_not_counted(self):
+        self.routes[2:].fill_(999)
+        result=histogram(self.routes,4,2,self.compat,True)
         self.assertEqual(result.tolist(),[1,2,1,0])
-    def test_no_padding_has_no_debt(self):
-        result,pads=histogram(self.routes,4,4,None,None,self.compat,True)
+    def test_full_capacity_counts_every_route(self):
+        result=histogram(self.routes,4,4,self.compat,True)
         self.assertEqual(result.sum().item(),8)
-        self.assertEqual(pads,0)
-    def test_real_t_zero_tokens(self):
-        result,pads=histogram(self.routes,4,0,0,3,self.compat,True)
+    def test_zero_tokens(self):
+        result=histogram(self.routes,4,0,self.compat,True)
         self.assertEqual(result.tolist(),[0,0,0,0])
-        self.assertEqual(pads,0)
 
 if __name__=="__main__":unittest.main()
