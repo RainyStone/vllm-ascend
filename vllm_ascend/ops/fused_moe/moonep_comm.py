@@ -455,13 +455,11 @@ def _dump_slot_stats():
 # group_list exclude unused rows from expert load and GEMM work; smaller
 # rungs still reduce capacity-sized copies and tail-processing overhead.
 # MOONEP_MIN_DISPATCH_TOKENS is the per-step selection floor (default 128),
-# not the first allocated rung. MOONEP_MIN_CAP remains its fallback alias.
+# not the first allocated rung.
 def _min_dispatch_tokens() -> int:
-    value = int(os.environ.get(
-        "MOONEP_MIN_DISPATCH_TOKENS",
-        os.environ.get("MOONEP_MIN_CAP", "128")))
+    value = int(os.environ.get("MOONEP_MIN_DISPATCH_TOKENS", "128"))
     if value < 1:
-        # The ladder doubles from the floor, so 0 would never reach s_max.
+        # The capacity selection floor must be positive.
         raise ValueError(f"MOONEP_MIN_DISPATCH_TOKENS must be >= 1, got {value}")
     return value
 

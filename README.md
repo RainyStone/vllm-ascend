@@ -179,7 +179,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
 | `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
-| `MOONEP_MIN_DISPATCH_TOKENS=16` | 每步选档的最小 token 下限（代码默认 128；实验脚本可显式设 16）。dev 线旧名 `MOONEP_MIN_CAP` 仍识别（回退别名） |
+| `MOONEP_MIN_DISPATCH_TOKENS=16` | 每步选档的最小 token 下限，必须 ≥1；仅识别此变量，未设置时默认 128，实验脚本可显式设 16 |
 | `MOONEP_POOL_BUDGET_MB=2048` | 档位表的估算预算，单位 MiB，影响档位密度；不是包含全部工作区的总显存硬限制 |
 | `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
 | `MOONEP_RELEASE_WEIGHTS=0` | 关闭"释放 vllm 原权重"（默认开：home chunk 接管后释放原张量，省 13.8 GB/卡；仅 bf16 路径，量化 payload 走字节载体、跳过释放） |

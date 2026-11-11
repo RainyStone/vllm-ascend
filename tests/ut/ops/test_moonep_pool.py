@@ -68,16 +68,31 @@ class AdaptivePoolTests(unittest.TestCase):
             self.namespace["MOONEP_MIN_DISPATCH_TOKENS"] = self.namespace["_min_dispatch_tokens"]()
         self.assertEqual(self.select(1), 16)
 
-    def test_legacy_minimum_alias_and_primary_precedence_are_preserved(self):
-        with patch.dict(os.environ, {"MOONEP_MIN_CAP": "16"}, clear=True):
-            self.assertEqual(self.namespace["_min_dispatch_tokens"](), 16)
-            with patch.dict(os.environ, {"MOONEP_MIN_DISPATCH_TOKENS": "32"}):
-                self.assertEqual(self.namespace["_min_dispatch_tokens"](), 32)
+    def test_removed_minimum_alias_does_not_override_default(self):
+        for old_value in ("16", "0", "not-an-integer"):
+            with self.subTest(old_value=old_value), patch.dict(
+                os.environ, {"MOONEP_MIN_CAP": old_value}, clear=True
+            ):
+                minimum = self.namespace["_min_dispatch_tokens"]()
+            self.assertEqual(minimum, 128)
+            self.namespace["MOONEP_MIN_DISPATCH_TOKENS"] = minimum
+            self.assertEqual(self.select(1), 128)
+
+    def test_primary_minimum_still_applies_with_removed_alias_present(self):
+        for new_value, old_value in (("16", "32"), ("32", "16"), ("16", "not-an-integer")):
+            with self.subTest(new_value=new_value, old_value=old_value), patch.dict(
+                os.environ, {"MOONEP_MIN_DISPATCH_TOKENS": new_value, "MOONEP_MIN_CAP": old_value},
+                clear=True,
+            ):
+                minimum = self.namespace["_min_dispatch_tokens"]()
+            self.assertEqual(minimum, int(new_value))
+            self.namespace["MOONEP_MIN_DISPATCH_TOKENS"] = minimum
+            self.assertEqual(self.select(1), int(new_value))
 
     def test_invalid_minimum_is_still_rejected(self):
         for value in ("0", "-1"):
             with self.subTest(value=value), patch.dict(
-                os.environ, {"MOONEP_MIN_DISPATCH_TOKENS": value}, clear=True
+                os.environ, {"MOONEP_MIN_DISPATCH_TOKENS": value, "MOONEP_MIN_CAP": "16"}, clear=True
             ):
                 with self.assertRaisesRegex(ValueError, "must be >= 1"):
                     self.namespace["_min_dispatch_tokens"]()
