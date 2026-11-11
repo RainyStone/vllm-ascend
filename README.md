@@ -2,10 +2,10 @@
 
 将 [MoonEP](https://gitcode.com/cann/moonep)（对称内存 MoE 专家并行通信）集成到
 vllm-ascend：用 CANN SHMEM 对称内存的单边搬运，替换 MoE EP 中基于 HCCL 的
-token dispatch/combine（MC2/all-to-all）。模型权重、路由、专家 GEMM、调度均保持
-vllm-ascend 原样，只更换 MoE 的 token 通信层。
+token dispatch/combine（MC2/all-to-all）。选中 MoonEP/SHMEM 时统一使用 Slot 负载均衡，
+按计划预取远端专家权重，并通过现有专家 GEMM 和融合加权归并完成计算。
 
-> 分支说明：`moonep` = 最新功能（owner + slot/平衡模式）；
+> 分支说明：`moonep` = 最新功能（MoonEP 固定 Slot/平衡路径）；
 > `checkpoint/mte-working` = MTE 路径在引擎内验证通过的稳定快照。
 
 ---
@@ -14,10 +14,12 @@ vllm-ascend 原样，只更换 MoE 的 token 通信层。
 
 | 模式 | 说明 | 启用 |
 |---|---|---|
-| **owner**（默认） | token 行按“专家属主”经 SHMEM 对称内存分发/归约，替换 HCCL MC2/all2all | `MOONEP=1`（引擎侧 additional config `enable_moonep`） |
-| **slot / 平衡**（MindSpeed 风格） | 额外启用“冗余专家”预取槽：过热专家的行留在本地算，权重行 RDMA 预取进 B=epn 槽，负载均衡 | `MOONEP_SLOT_MODE=1`（bf16；W4A8MXFP 量化需 EP≥8） |
+| **原生 Off** | 保留原生 MC2/all2all 等通信选择，不启用 MoonEP | additional config `enable_moonep=false` |
+| **MoonEP Slot / 平衡**（MindSpeed 风格） | 冗余专家预取槽接收计划中的远端权重，本地计算被重分配的行并进行融合加权归并 | additional config `enable_moonep=true` 且选中 SHMEM；保留现有 Slot 模型/布局及 eager 限制 |
 
-两种模式共用同一通信内核；slot 模式增加对称权重镜像（home）+ 槽 + `[epn+B]` 别名 GEMM。
+MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 + `[epn+B]` 别名 GEMM。SDK 独立算子接口保留；`MOONEP_KEEP_MC2` 的原生小步通信选择不变。
+
+迁移说明：`MOONEP_SLOT_MODE` 已移除。以前 MoonEP 开启时未设置或设为 0 会选择 owner-only，现在实际选中 SHMEM 时统一走 Slot，不再回退 owner-only。原生 Off 继续使用 `enable_moonep=false`；dispatch dtype、副流、持久缓存及融合 publish 等独立参数和默认值不变。历史实验脚本、结果及 owner 验证记录保留原样，不代表当前仍提供 owner-only 服务模式。
 
 ## 已验证（实测）
 
@@ -173,7 +175,6 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
-| `MOONEP_SLOT_MODE=1` | slot/冗余专家平衡模式（bf16；W4A8MXFP 需 EP≥8） |
 | `MOONEP_SLOT_QUANT=1` | slot 模式接受量化 payload（默认 1）；置 0 则量化层在 slot 模式显式报错（回滚开关） |
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |

@@ -3,6 +3,7 @@
 import ast
 import io
 import os
+import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -136,12 +137,13 @@ class WeightHandoffTests(unittest.TestCase):
 
 
 class SlotPublicationCleanupTests(unittest.TestCase):
-    def invoke(self, slot, old_switch, fail_cleanup=False):
+    def invoke(self, old_switch, fail_cleanup=False):
         tree = ast.parse(COMM.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_MoonEPRuntime")
         method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_initialize_locked")
-        tail = method.body[-1]
-        self.assertIsInstance(tail, ast.If)
+        tail = method.body[-2:]
+        self.assertIsInstance(tail[0], ast.For)
+        self.assertIsInstance(tail[1], ast.Try)
         events = []
 
         def empty_cache():
@@ -155,28 +157,36 @@ class SlotPublicationCleanupTests(unittest.TestCase):
 
         npu = SimpleNamespace(current_device=lambda: 0, empty_cache=empty_cache, mem_get_info=memory_info)
         states = [SimpleNamespace(publish=lambda i=i: events.append(f"publish{i}")) for i in range(2)]
-        namespace = {"torch": SimpleNamespace(npu=npu), "_ENV_SLOT_MODE": slot,
+        namespace = {"torch": SimpleNamespace(npu=npu),
                      "get_ep_group": lambda: SimpleNamespace(rank_in_group=0),
                      "self": SimpleNamespace(_states=states)}
         output = io.StringIO()
-        with patch.dict(os.environ, {"MOONEP_RELEASE_WEIGHTS": old_switch}), redirect_stdout(output):
-            exec(compile(ast.Module(body=[tail], type_ignores=[]), str(COMM), "exec"), namespace)
+        with patch.dict(os.environ, {"MOONEP_RELEASE_WEIGHTS": old_switch,
+                                     "MOONEP_SLOT_MODE": old_switch}), redirect_stdout(output):
+            exec(compile(ast.Module(body=tail, type_ignores=[]), str(COMM), "exec"), namespace)
         return events, output.getvalue()
 
     def test_slot_cleans_cache_after_all_publications_even_with_old_switch_zero(self):
         for old_switch in ("0", "1"):
-            events, output = self.invoke(True, old_switch)
+            events, output = self.invoke(old_switch)
             self.assertEqual(events, ["publish0", "publish1", "empty_cache", "memory_info"])
             self.assertIn("weight publication complete", output)
             self.assertNotIn("home chunks now back", output)
 
     def test_off_does_not_publish_or_clean_slot_weights(self):
-        events, output = self.invoke(False, "1")
-        self.assertEqual(events, [])
-        self.assertEqual(output, "")
+        tree = ast.parse(COMM.read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                        and n.name == "ensure_runtime_initialized")
+        initialize = Mock(side_effect=AssertionError("Off must not initialize Slot weights"))
+        namespace = {"_MOONEP_RUNTIME": SimpleNamespace(_ensure_initialized=initialize)}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(COMM), "exec"), namespace)
+        config = SimpleNamespace(get_ascend_config=lambda: SimpleNamespace(enable_moonep=False))
+        with patch.dict(sys.modules, {"vllm_ascend.ascend_config": config}):
+            namespace["ensure_runtime_initialized"]()
+        initialize.assert_not_called()
 
     def test_cleanup_failure_keeps_existing_nonfatal_report(self):
-        events, output = self.invoke(True, "0", fail_cleanup=True)
+        events, output = self.invoke("0", fail_cleanup=True)
         self.assertEqual(events, ["publish0", "publish1", "empty_cache"])
         self.assertIn("empty_cache/report failed", output)
 

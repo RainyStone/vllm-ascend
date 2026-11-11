@@ -145,11 +145,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Steps buffered on device between host copies. Larger means fewer CPU-NPU
     # syncs and coarser durability. Must be >= 1.
     "VLLM_ASCEND_MOE_PAR_FLUSH_EVERY": lambda: int(os.getenv("VLLM_ASCEND_MOE_PAR_FLUSH_EVERY", "16")),
-    # MoonEP slot/balance mode: keep hot experts' rows local and prefetch the
-    # remote weight rows into B SHMEM slots (see ops/fused_moe/moonep_balance.py).
-    # Default off — MoonEP then runs owner-only dispatch. Requires MOONEP_B ==
-    # E/R and --enforce-eager (the MoonEP collective kernels cannot be captured).
-    "MOONEP_SLOT_MODE": lambda: bool(int(os.getenv("MOONEP_SLOT_MODE", "0"))),
     # MoonEP small-step policy: when enable_moonep is on, keep the steps whose
     # SoC-default selection is MC2 (num_tokens <= mc2_tokens_capacity) on MC2 and
     # replace only the all-gather / all-to-all selections with SHMEM. Default
@@ -162,8 +157,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     "MOONEP_B": lambda: os.getenv("MOONEP_B", None),
     # Quantized payloads (W4A8MXFP: uint8 NZ weights + e8m0 scales) in slot mode.
     # "0" restores the pre-quant POC scope — a quantized model then raises instead
-    # of mirroring 4 payloads, so a launch config can be bisected without touching
-    # MOONEP_SLOT_MODE.
+    # of mirroring 4 payloads. MoonEP/SHMEM always uses the Slot path.
     "MOONEP_SLOT_QUANT": lambda: bool(int(os.getenv("MOONEP_SLOT_QUANT", "1"))),
     # Synthetic expert-selection profile, for routing-skew performance experiments.
     # Replaces the router's top-k output wholesale in ops/fused_moe/experts_selector.py

@@ -15,14 +15,13 @@ from test_moonep_real_tokens import Metadata, load_method
 
 
 class NoHostCountSyncTests(unittest.TestCase):
-    def make_dispatch(self, transport, slot):
+    def make_dispatch(self, transport):
         tokens, capacity, hidden, experts, topk, rows = 2, 4, 16, 4, 2, 8
         hidden_dtype = torch.float8_e4m3fn if transport == "mxfp8" else torch.bfloat16
         shard = torch.zeros(rows, hidden, dtype=hidden_dtype)
         weights = torch.arange(rows, dtype=torch.float32)
         scales = torch.zeros(rows, 1, dtype=torch.uint8)
-        cu = torch.tensor([2, 3, 3, 3, 4, 4] if slot else [2, 3, 3, 3, 3, 3],
-                          dtype=torch.int32)
+        cu = torch.tensor([2, 3, 3, 3, 4, 4], dtype=torch.int32)
         calls = []
 
         class Buffer:
@@ -54,11 +53,10 @@ class NoHostCountSyncTests(unittest.TestCase):
         namespace = {
             "torch": torch, "time": time, "os": os,
             "_EXTRA_CTX": SimpleNamespace(capturing=False),
-            "_ENV_SLOT_MODE": slot,
             "_ENV_PACE_SYNC": False,
             "_DUMP_PLAN_DIR": None, "_PLAN_STATS_ON": False,
             "_EARLY_PLAN_ON": False, "_BALANCE_STATS_ON": False,
-            "_SLOT_TLS": SimpleNamespace(),
+            "_SLOT_TLS": SimpleNamespace(state=object()),
             "get_ep_group": lambda: SimpleNamespace(world_size=2, rank_in_group=0),
             "get_moonep_tokens_capacity": lambda: capacity,
             "_select_buffer_for_step": lambda *args: (buffer, capacity),
@@ -89,6 +87,7 @@ class NoHostCountSyncTests(unittest.TestCase):
         dispatch, dispatcher, inputs, _, _, _, _, modules = case
         environment = {"MOONEP_NO_SYNC": old_switch, "MOONEP_REUSE_OUT": old_switch,
                        "MOONEP_DISPATCH_IN_SHARD": old_switch,
+                       "MOONEP_SLOT_MODE": old_switch,
                        "MOONEP_EARLY_PREFETCH": "0", "MOONEP_SLOT_STATS": "0"}
         with patch.dict(os.environ, environment), patch.dict(sys.modules, modules), patch.object(
             torch.Tensor, "item", side_effect=AssertionError("Dispatch must not read device counts to host")
@@ -96,20 +95,22 @@ class NoHostCountSyncTests(unittest.TestCase):
             return dispatch(dispatcher, inputs)
 
     def test_all_dispatch_paths_keep_full_shard_and_device_counts(self):
-        for transport, slot in (("bf16", False), ("bf16", True), ("mxfp8", True)):
+        for transport in ("bf16", "mxfp8"):
             for old_switch in ("0", "1"):
-                with self.subTest(transport=transport, slot=slot, old_switch=old_switch):
-                    case = self.make_dispatch(transport, slot)
+                with self.subTest(transport=transport, old_switch=old_switch):
+                    case = self.make_dispatch(transport)
                     result = self.invoke(case, old_switch)
                     _, _, inputs, shard, weights, scales, calls, _ = case
                     self.assertEqual(tuple(result.hidden_states.shape), tuple(shard.shape))
                     self.assertEqual(result.hidden_states.data_ptr(), shard.data_ptr())
                     self.assertIsNot(result.hidden_states, shard)
-                    self.assertEqual(result.group_list.tolist(), [2, 1, 1, 0] if slot else [2, 1])
+                    self.assertEqual(result.group_list.tolist(), [2, 1, 1, 0])
                     self.assertEqual(result.group_list_type, 1)
                     metadata = result.combine_metadata
                     self.assertTrue(metadata.tail_masked)
                     self.assertIs(metadata.group_list, result.group_list)
+                    self.assertIsNotNone(metadata.state)
+                    self.assertIsNotNone(metadata.source_topk_weights_sk)
                     self.assertEqual(metadata.num_tokens, inputs.hidden_states.shape[0])
                     self.assertEqual(calls[0]["num_tokens"], metadata.num_tokens)
                     if transport == "bf16":
@@ -125,9 +126,9 @@ class NoHostCountSyncTests(unittest.TestCase):
                     self.assertTrue(torch.equal(metadata.w_trim, expected_weights))
 
     def test_disposing_view_does_not_damage_reused_sdk_output(self):
-        for transport, slot in (("bf16", False), ("bf16", True), ("mxfp8", True)):
-            with self.subTest(transport=transport, slot=slot):
-                case = self.make_dispatch(transport, slot)
+        for transport in ("bf16", "mxfp8"):
+            with self.subTest(transport=transport):
+                case = self.make_dispatch(transport)
                 first = self.invoke(case, "0")
                 shard = case[3]
                 first.hidden_states.set_(torch.empty(0, dtype=shard.dtype))

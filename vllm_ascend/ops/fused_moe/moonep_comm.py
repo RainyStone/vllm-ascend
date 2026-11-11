@@ -17,27 +17,22 @@
 Routes expert-parallel MoE steps through the ``ascend-moonep`` Buffer instead
 of HCCL all-to-all / MC2 token exchange:
 
-  * ``buffer.dispatch`` scatters each token's top-K hidden rows to the rank
-    that owns the selected expert (CANN VMM symmetric memory + SHMEM RMA).
-  * The owner rank computes the per-expert GEMMs with its *local* expert
-    weight tables (the standard vLLM-Ascend grouped-matmul MLP, untouched).
-  * ``buffer.combine`` gathers the K per-token rows back and sums them.
+  * Planning assigns rows to home experts or redundant local slots, then
+    ``buffer.dispatch`` scatters their activations through SHMEM.
+  * Slot prefetch loads the planned remote experts into redundant weight slots;
+    the grouped MLP computes against the packed home/slot weight aliases.
+  * ``buffer.combine_weighted`` applies source-rank FP32 route weights and
+    gathers the K per-token rows before the final BF16 cast.
 
-Forward-only subset of the MindSpeed-MM shmem EP dispatcher
-(``shmem_ep_dispatcher.py``): inference never touches prefetch_weight or
-reduce_grad (those serve remote-expert weight preloading / training
-gradients), so no symmetric weight mirrors are created at all.
+MoonEP/SHMEM always uses this Slot path. The overall ``enable_moonep`` switch
+and the independent MC2 selection policy still control which steps use it.
 
 Integration contract
 --------------------
-The MoonEP planning kernel distributes rows deterministically: rank ``r``
-receives the rows of global experts ``[r*epn, (r+1)*epn)`` from *all* ranks,
-prefix-packed in ascending owned-expert order. ``cu_seqlens`` (per rank) is a
-cumulative count over global groups, so per-local-expert counts are the diff
-over the owned range. This matches the MLP contract of the all-to-all token
-dispatcher (rows grouped by local expert, count-mode group list), which is why
-this comm method reuses ``PrepareAndFinalizeWithAll2All`` and the standard
-``unified_apply_mlp``.
+Rows are prefix-packed by this rank's home expert groups followed by its
+redundant Slot groups. Differences of ``cu_seqlens`` produce the count-mode
+group list for both sets. The standard prepare/finalize and MLP entry points
+are reused with the packed home/slot aliases.
 
 Limitations (POC scope, all fail fast):
   * no dynamic EPLB / expert maps / mix-placement (plain contiguous expert
@@ -97,7 +92,7 @@ class MoonEPCombineMetadata:
     w_trim: torch.Tensor  # [rows_total] fp32, row-aligned with dispatched rows
     num_tokens: int  # actual (pre-pad) token count of this MoE call
     hidden_shape: torch.Size  # original hidden_states shape (for restore)
-    state: object | None = None  # _LayerWeightState when slot mode active
+    state: object | None = None  # _LayerWeightState for the selected Slot layer
     group_list: torch.Tensor | None = None  # [epn+B] int64 counts (slot mode)
     tail_masked: bool = False  # dispatch used the no-sync full-shard path
     source_topk_weights_sk: torch.Tensor | None = None
@@ -767,34 +762,33 @@ class _MoonEPRuntime:
                 "combine_route": torch.zeros(
                     capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
             }
-        if _ENV_SLOT_MODE:
-            from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
+        from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
 
-            dev = int(torch.npu.current_device())
-            ep_grp = get_ep_group()
-            rank = ep_grp.rank_in_group
-            states = []
-            seen = set()
-            with _registry_lock:
-                entries = list(_moonep_layer_registry)
-            for e in entries:
-                layer = e.get("layer")
-                if layer is None or id(layer) in seen:
-                    continue
-                seen.add(id(layer))
-                # F（每分区的 ffn 维）改由 _LayerWeightState 按权重布局自己推并做校验，
-                # 布局知识只留一处：量化后 w13 是 [epn, H/2, 2F]、w2 是 [epn, F/2, H]
-                # （process_weights_after_loading 的 npu_format_cast + transpose(1,2)），
-                # 两边的 scale 又各自不同，散落推导迟早会错。
-                st = _LayerWeightState(layer, int(e["E"]), int(e["H"]), rank, dev)
-                st.layer_index = len(states)      # registration order == layer order
-                states.append(st)
-            self._states = states
-            self._state_by_w13 = {id(st._w13_src): st for st in states}
+        dev = int(torch.npu.current_device())
+        ep_grp = get_ep_group()
+        rank = ep_grp.rank_in_group
+        states = []
+        seen = set()
+        with _registry_lock:
+            entries = list(_moonep_layer_registry)
+        for e in entries:
+            layer = e.get("layer")
+            if layer is None or id(layer) in seen:
+                continue
+            seen.add(id(layer))
+            # F（每分区的 ffn 维）改由 _LayerWeightState 按权重布局自己推并做校验，
+            # 布局知识只留一处：量化后 w13 是 [epn, H/2, 2F]、w2 是 [epn, F/2, H]
+            # （process_weights_after_loading 的 npu_format_cast + transpose(1,2)），
+            # 两边的 scale 又各自不同，散落推导迟早会错。
+            st = _LayerWeightState(layer, int(e["E"]), int(e["H"]), rank, dev)
+            st.layer_index = len(states)      # registration order == layer order
+            states.append(st)
+        self._states = states
+        self._state_by_w13 = {id(st._w13_src): st for st in states}
 
         from vllm_ascend.ops.fused_moe.moonep_balance import udma_prefetch_overlap_requested
 
-        prefetch_overlap = udma_prefetch_overlap_requested(use_udma, _ENV_SLOT_MODE)
+        prefetch_overlap = udma_prefetch_overlap_requested(use_udma, True)
         if prefetch_overlap:
             ShmemRuntime.validate_udma_prefetch_overlap()
         if not ShmemRuntime.is_initialized():
@@ -886,22 +880,21 @@ class _MoonEPRuntime:
                     f"E={experts} K={topk} H={hidden} S={cap} {backends}",
                     flush=True,
                 )
-        if _ENV_SLOT_MODE:
-            for st in self._states:
-                st.publish()
-            # Return cached allocator blocks before KV-cache sizing. Quantized
-            # payloads still skip source-storage handoff inside publish().
-            try:
-                dev = torch.npu.current_device()
-                torch.npu.empty_cache()
-                free_b, total_b = torch.npu.mem_get_info(dev)
-                print(
-                    f"[moonep-release r{get_ep_group().rank_in_group}] weight publication complete; "
-                    f"free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
-                    flush=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
+        for st in self._states:
+            st.publish()
+        # Return cached allocator blocks before KV-cache sizing. Quantized
+        # payloads still skip source-storage handoff inside publish().
+        try:
+            dev = torch.npu.current_device()
+            torch.npu.empty_cache()
+            free_b, total_b = torch.npu.mem_get_info(dev)
+            print(
+                f"[moonep-release r{get_ep_group().rank_in_group}] weight publication complete; "
+                f"free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
@@ -942,7 +935,6 @@ def ensure_runtime_initialized() -> None:
                 "ASCEND_MOONEP_PREFETCH_RELAXED",
                 "ASCEND_MOONEP_NO_RECONCILE",
                 "ASCEND_MOONEP_SKIP_DUP",
-                "MOONEP_SLOT_MODE",
                 "MOONEP_SLOT_QUANT",
                 "MOONEP_MIN_DISPATCH_TOKENS",
             )
@@ -957,7 +949,6 @@ def ensure_runtime_initialized() -> None:
 # lookups. At 48 layers/step each microsecond-class cost shows up in the step
 # time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
 # out of the hot path.
-_ENV_SLOT_MODE = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 _ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
 _ENV_CAP_TRACE = os.environ.get("MOONEP_CAP_TRACE", "0") == "1"
 _GEO_CACHE: dict = {}
@@ -1092,13 +1083,7 @@ def _pads_for(E: int, K: int, H: int):
 # Token dispatcher
 # ---------------------------------------------------------------------------
 class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
-    """EP token dispatch over MoonEP SHMEM symmetric memory (owner semantics).
-
-    Rows are scattered to the ranks that own their experts; every rank then
-    computes its owned experts' rows locally with its own weight tables, and
-    ``token_combine`` gathers + K-sums each token's rows (route weights are
-    applied per row before the unweighted combine, mirroring MindSpeed-MM).
-    """
+    """Dispatch home/Slot rows and combine using source-rank FP32 route weights."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1143,8 +1128,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         if use_mxfp8:
             from vllm_ascend.quantization.quant_type import QuantType
 
-            if not _ENV_SLOT_MODE:
-                raise ValueError("MXFP8 transport requires Slot mode")
             if token_dispatch_input.quant.quant_type != QuantType.W4A8MXFP:
                 raise NotImplementedError("MXFP8 Slot transport currently supports W4A8MXFP")
             if hidden_states.dtype != torch.bfloat16:
@@ -1174,10 +1157,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             hidden_c[:T].copy_(hidden_states)
         route_c[:T].copy_(topk_weights)
         topk_c[:T].copy_(topk_ids)
-        source_topk_weights_sk = None
-        if _ENV_SLOT_MODE:
-            source_topk_weights_sk = pads["combine_route"][:capacity]
-            source_topk_weights_sk[:T, :K].copy_(topk_weights)
+        source_topk_weights_sk = pads["combine_route"][:capacity]
+        source_topk_weights_sk[:T, :K].copy_(topk_weights)
         _tp0 = time.perf_counter()
         # histc has a fixed-size output and avoids a dynamic sizing round trip.
         # Only the copied prefix contributes to the diagnostic counts.
@@ -1219,8 +1200,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Per-local-expert row counts = cu diff over this rank's owned global
         # expert range [rank*epn, (rank+1)*epn). Shard rows are prefix-packed
         # in ascending owned-expert order, which is exactly the row/group order
-        # the grouped-matmul MLP expects (same contract as the all-to-all
-        # dispatcher). Slot groups (cu beyond E) are unused (owner semantics).
+        # the grouped-matmul MLP expects. Slot groups follow the home groups.
         ep_group = get_ep_group()
         epn = E // ep_group.world_size
         rank = ep_group.rank_in_group
@@ -1239,13 +1219,9 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Sending-side counts describe the real logical routing before Slot
         # relocation. Planning independently rebuilds its histogram from topk_c.
         _note_route_counts(tpe, pad_pairs=0, pad_index=-1)
-        slot_counts = None
-        if _ENV_SLOT_MODE:
-            # load-balance path: rows for prefetched (slot) experts stay local
-            slot_counts = counts[E:].contiguous()
-        local_counts = (
-            torch.cat((own_counts, slot_counts)) if slot_counts is not None else own_counts
-        )
+        # Rows for prefetched Slot experts stay local and follow home rows.
+        slot_counts = counts[E:].contiguous()
+        local_counts = torch.cat((own_counts, slot_counts))
         # The other half of the load accounting: the rows this rank is about to
         # *compute*, i.e. the receive side -- ``local_counts`` is what the grouped
         # matmul below will walk -- folded back onto global expert ids by the
@@ -1255,7 +1231,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             local_counts,
             home_first=rank * epn,
             epn=epn,
-            slot_experts=plan.experts_to_copy[rank] if slot_counts is not None else None,
+            slot_experts=plan.experts_to_copy[rank],
         )
         if os.environ.get("MOONEP_EARLY_PREFETCH", "0") == "1":
             # remember this layer's real slot->expert row: the next step's
@@ -1300,7 +1276,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             stat["all_rows"] += int(counts[:E].sum().item())
             if _BALANCE_EVERY and stat["calls"] % _BALANCE_EVERY == 0:
                 _dump_balance_stats()
-        if os.environ.get("MOONEP_SLOT_STATS", "0") == "1" and slot_counts is not None:
+        if os.environ.get("MOONEP_SLOT_STATS", "0") == "1":
             # debug only: this host read re-introduces the per-layer sync
             s = _SLOT_STATS
             s["calls"] += 1
@@ -1332,11 +1308,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self._tstats("disp_post", _t2, _t3)  # device counts + row-weight snapshot
         self._tstats("disp_buf", _t1)
         self._tstats("dispatch", _t0)
-        state = (
-            getattr(_SLOT_TLS, "state", None)
-            if _ENV_SLOT_MODE
-            else None
-        )
+        state = getattr(_SLOT_TLS, "state", None)
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
             dynamic_scale=dispatch_scale[:hidden_trim.shape[0]] if dispatch_scale is not None else None,
@@ -1363,84 +1335,36 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Slot applies source-rank FP32 route weights inside combine, retaining
         # FP32 products until the final BF16 output cast. Grouped matmul keeps
         # the MLP output rows in the dispatched shard order.
-        if combine_metadata.source_topk_weights_sk is not None:
-            buffer = combine_metadata.buffer
-            nvs = int(buffer._require_ctx()["NvS"])
-            row_counts = None
-            if self.fused_publish:
-                if combine_metadata.tail_masked:
-                    row_counts = combine_metadata.group_list
-                    if row_counts is None:
-                        raise ValueError("Fused publish requires counts for a masked tail")
-                # Native publication writes valid rows and zeros the SHMEM tail.
-                # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
-                combine_input = hidden_states
-            elif combine_metadata.tail_masked:
-                rows_total = combine_metadata.group_list.sum().to(torch.int64)
-                mask = (_combine_row_ids(nvs, hidden_states.device) < rows_total).unsqueeze(-1)
-                # Keep the existing tail safety without materializing an FP32 shard.
-                combine_input = torch.where(mask, hidden_states,
-                    _zero_bf16_scalar(hidden_states.device))
-            else:
-                combine_input = torch.zeros(nvs, hidden_states.shape[-1],
-                    dtype=torch.bfloat16, device=hidden_states.device)
-                combine_input[:hidden_states.shape[0]].copy_(hidden_states)
-            self._tstats("comb_pre", _t0c)
-            _t1c = time.perf_counter()
-            out, _, _ = buffer.combine_weighted(
-                plan=combine_metadata.plan, hidden_nvsh=combine_input,
-                source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
-                num_tokens=T, inter_rank_sync=True,
-                fused_publish=self.fused_publish, row_counts=row_counts)
-            self._tstats("comb_buf", _t1c)
-            self._tstats("combine", _t0c)
-            return out[:T].view(combine_metadata.hidden_shape)
-        w = combine_metadata.w_trim
-        assert hidden_states.shape[0] == w.shape[0], (
-            f"MoonEP combine: MLP produced {hidden_states.shape[0]} rows but dispatch "
-            f"captured {w.shape[0]} row weights."
-        )
+        if combine_metadata.source_topk_weights_sk is None:
+            raise ValueError("MoonEP Slot combine requires source-rank route weights")
         buffer = combine_metadata.buffer
         nvs = int(buffer._require_ctx()["NvS"])
-        S = int(buffer._require_ctx()["S"])
-        H = int(buffer._require_ctx()["H"])
-        # w_trim is fp32, so bf16 * fp32 promotes to fp32 on its own.
-        if combine_metadata.tail_masked:
-            # No-sync dispatch: the MLP ran over the full [NvS, H] shard with a
-            # count-mode group_list, so only rows [0, sum(group_list)) hold
-            # results -- the grouped matmul never writes the rest, and that tail
-            # is *uninitialized* memory (the combine kernel reads the whole
-            # tensor it is handed). Zero it on the device rather than reading
-            # the count back to the host; `where` (not a multiply) is required
-            # so a NaN in the tail cannot leak through 0 * NaN.
-            group_list = combine_metadata.group_list
-            assert group_list is not None, "MoonEP combine requires the dispatch group_list."
-            rows_total = group_list.sum().to(torch.int64)
-            row_mask = (_combine_row_ids(
-                nvs, hidden_states.device) < rows_total).unsqueeze(-1)
-            combine_input = torch.where(
-                row_mask,
-                (hidden_states * w.unsqueeze(-1)).to(torch.bfloat16),
-                _zero_bf16_scalar(hidden_states.device),
-            )
+        row_counts = None
+        if self.fused_publish:
+            if combine_metadata.tail_masked:
+                row_counts = combine_metadata.group_list
+                if row_counts is None:
+                    raise ValueError("Fused publish requires counts for a masked tail")
+            # Native publication writes valid rows and zeros the SHMEM tail.
+            # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
+            combine_input = hidden_states
+        elif combine_metadata.tail_masked:
+            rows_total = combine_metadata.group_list.sum().to(torch.int64)
+            mask = (_combine_row_ids(nvs, hidden_states.device) < rows_total).unsqueeze(-1)
+            # Keep the existing tail safety without materializing an FP32 shard.
+            combine_input = torch.where(mask, hidden_states,
+                _zero_bf16_scalar(hidden_states.device))
         else:
-            weighted = (hidden_states * w.unsqueeze(-1)).to(torch.bfloat16)
-            # Zero fill is load-bearing: reusing a scratch and only overwriting
-            # the [0, rows_total) prefix leaves stale rows that the combine
-            # kernel reads (measured: first tokens diverge from MC2).
-            combine_input = torch.zeros(nvs, H, dtype=torch.bfloat16,
-                                        device=weighted.device)
-            combine_input[:weighted.shape[0]].copy_(weighted)
+            combine_input = torch.zeros(nvs, hidden_states.shape[-1],
+                dtype=torch.bfloat16, device=hidden_states.device)
+            combine_input[:hidden_states.shape[0]].copy_(hidden_states)
         self._tstats("comb_pre", _t0c)
         _t1c = time.perf_counter()
-        out, _, _ = buffer.combine(
-            plan=combine_metadata.plan,
-            hidden_nvsh=combine_input,
-            route_weights_nvs=None,
-            inter_rank_sync=True,
-            num_tokens=combine_metadata.num_tokens,
-        )
-        assert out.shape == (S, H), f"MoonEP combine returned {tuple(out.shape)}"
+        out, _, _ = buffer.combine_weighted(
+            plan=combine_metadata.plan, hidden_nvsh=combine_input,
+            source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
+            num_tokens=T, inter_rank_sync=True,
+            fused_publish=self.fused_publish, row_counts=row_counts)
         self._tstats("comb_buf", _t1c)
         self._tstats("combine", _t0c)
         return out[:T].view(combine_metadata.hidden_shape)
@@ -1464,8 +1388,6 @@ class MoonEPCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
     def fused_experts(self, fused_experts_input):
-        if not _ENV_SLOT_MODE:
-            return super().fused_experts(fused_experts_input)
         from vllm_ascend.ops.fused_moe.moonep_balance import run_slot_forward
         from vllm_ascend.ops.fused_moe.moe_runtime_args import build_token_dispatch_input
 

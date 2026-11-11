@@ -35,7 +35,7 @@ class Metadata(SimpleNamespace):
 
 
 class RealTokenBoundsTest(unittest.TestCase):
-    def check_dispatch(self, transport, slot):
+    def check_dispatch(self, transport, old_slot="0"):
         tokens, capacity, hidden, experts, topk = 2, 4, 16, 4, 2
         calls = []
         pads = {
@@ -61,7 +61,6 @@ class RealTokenBoundsTest(unittest.TestCase):
         namespace = {
             "torch": torch, "time": time, "os": os,
             "_EXTRA_CTX": SimpleNamespace(capturing=False),
-            "_ENV_SLOT_MODE": slot,
             "get_moonep_tokens_capacity": lambda: capacity,
             "_select_buffer_for_step": lambda *args: (buffer, capacity),
             "_pads_for": lambda *args: pads,
@@ -86,7 +85,8 @@ class RealTokenBoundsTest(unittest.TestCase):
         # Old launchers can still export these names. They must not change the
         # actual token bound or make the dispatcher populate capacity-tail rows.
         environment = {"MOONEP_REAL_T": "0", "MOONEP_PAD_ROTATE": "1",
-                       "MOONEP_PAD_EXPERT0": "1", "MOONEP_PAD_CUT": "1"}
+                       "MOONEP_PAD_EXPERT0": "1", "MOONEP_PAD_CUT": "1",
+                       "MOONEP_SLOT_MODE": old_slot}
         with patch.dict(os.environ, environment), patch.dict(sys.modules, modules):
             with self.assertRaises(DispatchReached):
                 dispatch(dispatcher, inputs)
@@ -95,16 +95,16 @@ class RealTokenBoundsTest(unittest.TestCase):
         self.assertTrue(torch.all(pads["topk"][tokens:] == 999))
         self.assertTrue(torch.isnan(pads["hidden"][tokens:]).all())
 
-    def test_bf16_owner_dispatch_uses_real_tokens(self):
-        self.check_dispatch("bf16", False)
+    def test_bf16_dispatch_uses_real_tokens_with_legacy_slot_zero(self):
+        self.check_dispatch("bf16", "0")
 
     def test_bf16_slot_dispatch_uses_real_tokens(self):
-        self.check_dispatch("bf16", True)
+        self.check_dispatch("bf16", "1")
 
     def test_mxfp8_slot_dispatch_uses_real_tokens(self):
-        self.check_dispatch("mxfp8", True)
+        self.check_dispatch("mxfp8", "0")
 
-    def test_owner_combine_uses_real_tokens_and_clears_nan_tail(self):
+    def test_slot_combine_uses_real_tokens_and_clears_nan_tail(self):
         tokens, capacity, hidden, rows = 2, 4, 16, 8
         calls = []
 
@@ -112,7 +112,7 @@ class RealTokenBoundsTest(unittest.TestCase):
             def _require_ctx(self):
                 return {"NvS": rows, "S": capacity, "H": hidden}
 
-            def combine(self, **kwargs):
+            def combine_weighted(self, **kwargs):
                 calls.append(kwargs)
                 return torch.ones(capacity, hidden, dtype=torch.bfloat16), None, None
 
@@ -123,14 +123,14 @@ class RealTokenBoundsTest(unittest.TestCase):
         }
         combine = load_method("token_combine", namespace)
         metadata = Metadata(
-            num_tokens=tokens, hidden_shape=(tokens, hidden), source_topk_weights_sk=None,
+            num_tokens=tokens, hidden_shape=(tokens, hidden), source_topk_weights_sk=torch.ones(capacity, 8),
             w_trim=torch.ones(rows), buffer=Buffer(), tail_masked=True,
             group_list=torch.tensor([2, 1], dtype=torch.int64), plan=object(),
         )
         activations = torch.ones(rows, hidden, dtype=torch.bfloat16)
         activations[3:].fill_(float("nan"))
         with patch.dict(os.environ, {"MOONEP_REAL_T": "0"}):
-            result = combine(SimpleNamespace(_tstats=lambda *args: None), activations, metadata)
+            result = combine(SimpleNamespace(fused_publish=False, _tstats=lambda *args: None), activations, metadata)
         self.assertEqual(calls[0]["num_tokens"], tokens)
         self.assertEqual(tuple(result.shape), (tokens, hidden))
         self.assertTrue(torch.equal(calls[0]["hidden_nvsh"][3:],

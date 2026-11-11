@@ -14,7 +14,7 @@
 # This file is a part of the vllm-ascend project.
 """MoonEP load-balance path (MindSpeed-MM style): per-rank prefetch slots.
 
-Owner-only dispatch (the default MoonEP comm path) sends every row to the rank
+Conventional owner-only dispatch sends every row to the rank
 that owns its expert. Under skewed routing that concentrates rows on the hot
 expert's rank. The MoonEP planning kernel can instead keep some rows *local*
 and mark their (remote) expert in ``plan.experts_to_copy``; the rank then
@@ -46,9 +46,9 @@ for quantized payloads — no library, csrc or kernel change is involved.
 Scope: bf16 (AscendUnquantizedFusedMoEMethod) plus quantized layouts whose
 per-expert block is dense (``stride(0)*element_size == numel/E``) — verified
 on-card for W4A8MXFP (uint8 NZ weights + e8m0 ND scales). Anything else raises.
-Activated with ``MOONEP_SLOT_MODE=1`` (default off: owner-only mode);
-``MOONEP_SLOT_QUANT=0`` additionally forces the pre-quant scope even when the
-mode is on.
+Used whenever vLLM selects MoonEP/SHMEM. ``enable_moonep`` still controls
+whether MoonEP is available; ``MOONEP_SLOT_QUANT=0`` restricts its payloads
+to the pre-quant scope.
 """
 
 from __future__ import annotations
@@ -67,7 +67,6 @@ from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEWeights
 
-_slot_mode = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 _slot_quant = os.environ.get("MOONEP_SLOT_QUANT", "1") == "1"
 
 # prefetch kernel 的 UB 约束（ascend-moonep/kernels/prefetch.cpp:100-105）：
@@ -163,7 +162,8 @@ _RELEASE_CARRIER_NOTICE = [False]  # one-shot notice for the quantized (carrier)
 
 
 def slot_mode_enabled() -> bool:
-    return _slot_mode
+    """Compatibility query for MoonEP's sole mode; does not enable MoonEP itself."""
+    return True
 
 
 def slot_quant_enabled() -> bool:
