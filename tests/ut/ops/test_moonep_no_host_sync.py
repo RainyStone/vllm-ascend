@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU regressions for device-resident dispatch counts and reusable outputs."""
+import ast
 import os
 import sys
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,7 +15,7 @@ from test_moonep_real_tokens import Metadata, load_method
 
 
 class NoHostCountSyncTests(unittest.TestCase):
-    def make_dispatch(self, transport, slot):
+    def make_dispatch(self, transport, slot, in_shard=True):
         tokens, capacity, hidden, experts, topk, rows = 2, 4, 16, 4, 2, 8
         hidden_dtype = torch.float8_e4m3fn if transport == "mxfp8" else torch.bfloat16
         shard = torch.zeros(rows, hidden, dtype=hidden_dtype)
@@ -52,8 +54,8 @@ class NoHostCountSyncTests(unittest.TestCase):
         namespace = {
             "torch": torch, "time": time, "os": os,
             "_EXTRA_CTX": SimpleNamespace(capturing=False),
-            "_ENV_SLOT_MODE": slot, "_ENV_REUSE_OUT": True,
-            "_ENV_DISPATCH_IN_SHARD": True, "_ENV_PACE_SYNC": False,
+            "_ENV_SLOT_MODE": slot,
+            "_ENV_DISPATCH_IN_SHARD": in_shard, "_ENV_PACE_SYNC": False,
             "_DUMP_PLAN_DIR": None, "_PLAN_STATS_ON": False,
             "_EARLY_PLAN_ON": False, "_BALANCE_STATS_ON": False,
             "_SLOT_TLS": SimpleNamespace(),
@@ -85,8 +87,8 @@ class NoHostCountSyncTests(unittest.TestCase):
 
     def invoke(self, case, old_switch):
         dispatch, dispatcher, inputs, _, _, _, _, modules = case
-        environment = {"MOONEP_NO_SYNC": old_switch, "MOONEP_EARLY_PREFETCH": "0",
-                       "MOONEP_SLOT_STATS": "0"}
+        environment = {"MOONEP_NO_SYNC": old_switch, "MOONEP_REUSE_OUT": old_switch,
+                       "MOONEP_EARLY_PREFETCH": "0", "MOONEP_SLOT_STATS": "0"}
         with patch.dict(os.environ, environment), patch.dict(sys.modules, modules), patch.object(
             torch.Tensor, "item", side_effect=AssertionError("Dispatch must not read device counts to host")
         ):
@@ -122,14 +124,83 @@ class NoHostCountSyncTests(unittest.TestCase):
                     self.assertTrue(torch.equal(metadata.w_trim, expected_weights))
 
     def test_disposing_view_does_not_damage_reused_sdk_output(self):
-        case = self.make_dispatch("bf16", True)
-        first = self.invoke(case, "0")
-        shard = case[3]
-        first.hidden_states.set_(torch.empty(0, dtype=shard.dtype))
-        self.assertEqual(tuple(shard.shape), (8, 16))
-        second = self.invoke(case, "0")
-        self.assertEqual(tuple(second.hidden_states.shape), (8, 16))
-        self.assertEqual(second.hidden_states.data_ptr(), shard.data_ptr())
+        for transport, slot in (("bf16", False), ("bf16", True), ("mxfp8", True)):
+            with self.subTest(transport=transport, slot=slot):
+                case = self.make_dispatch(transport, slot)
+                first = self.invoke(case, "0")
+                shard = case[3]
+                first.hidden_states.set_(torch.empty(0, dtype=shard.dtype))
+                self.assertEqual(tuple(shard.shape), (8, 16))
+                second = self.invoke(case, "0")
+                self.assertEqual(tuple(second.hidden_states.shape), (8, 16))
+                self.assertEqual(second.hidden_states.data_ptr(), shard.data_ptr())
+                if transport == "mxfp8":
+                    self.assertEqual(first.dynamic_scale.data_ptr(), second.dynamic_scale.data_ptr())
+
+    def test_bf16_copy_path_also_requests_cached_outputs(self):
+        for slot in (False, True):
+            with self.subTest(slot=slot):
+                case = self.make_dispatch("bf16", slot, in_shard=False)
+                result = self.invoke(case, "0")
+                call = case[6][0]
+                self.assertTrue(call["reuse_outputs"])
+                self.assertFalse(call["zero_copy"])
+                self.assertEqual(tuple(result.hidden_states.shape), (8, 16))
+
+
+class BufferOutputReuseTests(unittest.TestCase):
+    """Exercise SDK cache methods without importing or initializing the NPU SDK."""
+
+    def setUp(self):
+        source = Path(__file__).resolve().parents[4] / "ascend-moonep/ascend_moonep/api.py"
+        tree = ast.parse(source.read_text())
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Buffer")
+        names = {"_reused_cache", "_reused_output", "_reused_plan_outputs"}
+        methods = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.planning_allocations = []
+
+        def allocate_planning_outputs(ctx):
+            self.planning_allocations.append(ctx)
+            return SimpleNamespace(dst=torch.empty(ctx["NvS"], 2, dtype=torch.int32)), torch.empty(6, dtype=torch.int32)
+
+        namespace = {"torch": torch, "allocate_planning_outputs": allocate_planning_outputs}
+        exec(compile(ast.Module(body=methods, type_ignores=[]), str(source), "exec"), namespace)
+        self.buffer_type = type("BufferReuseHarness", (), {name: namespace[name] for name in names})
+
+    def test_consecutive_outputs_keep_storage_and_avoid_reallocation(self):
+        buffer = self.buffer_type()
+        template = torch.empty(8, 16, dtype=torch.bfloat16)
+        with patch.object(torch, "empty_like", wraps=torch.empty_like) as allocate:
+            first = buffer._reused_output("hidden", template)
+            first.fill_(3)
+            second = buffer._reused_output("hidden", template)
+        self.assertIs(first, second)
+        self.assertEqual(allocate.call_count, 1)
+        self.assertEqual(first.data_ptr(), second.data_ptr())
+        self.assertTrue(torch.all(second == 3))
+        first_weights = buffer._reused_output("weights", shape=(8,), dtype=torch.float32, device="cpu")
+        self.assertIs(first_weights, buffer._reused_output("weights", shape=(8,), dtype=torch.float32, device="cpu"))
+
+    def test_distinct_capacity_buffers_have_independent_outputs(self):
+        small, large = self.buffer_type(), self.buffer_type()
+        a = small._reused_output("hidden", torch.empty(8, 16))
+        b = large._reused_output("hidden", torch.empty(16, 16))
+        a.zero_()
+        b.fill_(1)
+        self.assertNotEqual(a.data_ptr(), b.data_ptr())
+        self.assertEqual(tuple(a.shape), (8, 16))
+        self.assertEqual(tuple(b.shape), (16, 16))
+        self.assertTrue(torch.all(a == 0))
+
+    def test_planning_tables_reuse_per_buffer_without_cross_capacity_alias(self):
+        small, large = self.buffer_type(), self.buffer_type()
+        small_ctx, large_ctx = {"NvS": 8}, {"NvS": 16}
+        first = small._reused_plan_outputs(small_ctx)
+        self.assertIs(first, small._reused_plan_outputs(small_ctx))
+        other = large._reused_plan_outputs(large_ctx)
+        self.assertEqual(len(self.planning_allocations), 2)
+        self.assertNotEqual(first[0].dst.data_ptr(), other[0].dst.data_ptr())
+        self.assertNotEqual(first[1].data_ptr(), other[1].data_ptr())
 
 
 if __name__ == "__main__":

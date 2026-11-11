@@ -965,7 +965,6 @@ def ensure_runtime_initialized() -> None:
                 "ASCEND_MOONEP_NO_RECONCILE",
                 "ASCEND_MOONEP_SKIP_DUP",
                 "MOONEP_SLOT_MODE",
-                "MOONEP_REUSE_OUT",
                 "MOONEP_SLOT_QUANT",
                 "MOONEP_MIN_DISPATCH_TOKENS",
             )
@@ -980,7 +979,6 @@ def ensure_runtime_initialized() -> None:
 # lookups. At 48 layers/step each microsecond-class cost shows up in the step
 # time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
 # out of the hot path.
-_ENV_REUSE_OUT = os.environ.get("MOONEP_REUSE_OUT", "1") == "1"
 # Hand the MLP its input as a view of the symmetric shard (dispatch zero_copy),
 # so the library skips its full-shard copy-out into a private buffer.  =0
 # restores upstream behaviour (shard -> reused tensor -> MLP).
@@ -1239,7 +1237,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 hidden_c, route_c, topk_c, tpe,
                 zero_copy=_ENV_DISPATCH_IN_SHARD, inter_rank_sync=True,
                 num_tokens=T,
-                reuse_outputs=_ENV_REUSE_OUT,
+                reuse_outputs=True,
             )
         _t2 = time.perf_counter()
         if _DUMP_PLAN_DIR is not None and _DUMP_PLAN_I[0] < _DUMP_PLAN_N:

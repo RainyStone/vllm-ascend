@@ -61,7 +61,7 @@ class RealTokenBoundsTest(unittest.TestCase):
         namespace = {
             "torch": torch, "time": time, "os": os,
             "_EXTRA_CTX": SimpleNamespace(capturing=False),
-            "_ENV_SLOT_MODE": slot, "_ENV_REUSE_OUT": True,
+            "_ENV_SLOT_MODE": slot,
             "_ENV_DISPATCH_IN_SHARD": True,
             "get_moonep_tokens_capacity": lambda: capacity,
             "_select_buffer_for_step": lambda *args: (buffer, capacity),
