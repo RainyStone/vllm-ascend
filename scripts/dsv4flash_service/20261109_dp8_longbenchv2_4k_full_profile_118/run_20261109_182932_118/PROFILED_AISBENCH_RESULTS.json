@@ -1,0 +1,44 @@
+{
+  "off": {
+    "round": 1,
+    "mean_ttft_ms": 15583.0,
+    "median_ttft_ms": 15519.1,
+    "p90_ttft_ms": 25874.2,
+    "p99_ttft_ms": 31093.3,
+    "input_tps": 57809.0295,
+    "duration_seconds": 320.3472219,
+    "input_tokens": 18518962,
+    "output_tokens": 316,
+    "requests": 316,
+    "concurrency": 15.3716,
+    "max_concurrency": 16.0,
+    "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/formal/aisbench/pair01-off-20261109_183118-2497164/round_1/aisbench/20261109_183156/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k.json",
+    "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/formal/aisbench/pair01-off-20261109_183118-2497164/round_1/aisbench/20261109_183156/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k_details.jsonl",
+    "p95_ttft_ms": 29423.00922499271,
+    "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/formal/aisbench/pair01-off-20261109_183118-2497164/round_1/aisbench_debug.log"
+  },
+  "slot": {
+    "round": 1,
+    "mean_ttft_ms": 14822.4,
+    "median_ttft_ms": 15237.1,
+    "p90_ttft_ms": 24429.9,
+    "p99_ttft_ms": 31359.3,
+    "input_tps": 60696.8948,
+    "duration_seconds": 305.1055918,
+    "input_tokens": 18518962,
+    "output_tokens": 316,
+    "requests": 316,
+    "concurrency": 15.3517,
+    "max_concurrency": 16.0,
+    "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/formal/aisbench/pair01-slot-20261109_184057-415740/round_1/aisbench/20261109_184142/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k.json",
+    "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/formal/aisbench/pair01-slot-20261109_184057-415740/round_1/aisbench/20261109_184142/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k_details.jsonl",
+    "p95_ttft_ms": 27511.347627441864,
+    "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/formal/aisbench/pair01-slot-20261109_184057-415740/round_1/aisbench_debug.log"
+  },
+  "slot_vs_off_pct": {
+    "mean_ttft_ms": -4.880960020535197,
+    "p95_ttft_ms": -6.497165476626465,
+    "input_tps": 4.995526347661672,
+    "duration_seconds": -4.757846816838596
+  }
+}

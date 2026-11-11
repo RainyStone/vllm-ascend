@@ -1,0 +1,129 @@
+{
+  "off": {
+    "warmup_requests": 16,
+    "capture_status": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/off-20261109_204450-zPylPlMv/round_1/MANUAL_CAPTURE_STATUS.json",
+    "raw_trace_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/services/pair01-off-20261109_204253-2538333/profiling",
+    "trace_ranks": 8,
+    "capture_start": "2026-11-09T20:49:02.490148+08:00",
+    "capture_stop_requested": "2026-11-09T20:49:32.490409+08:00",
+    "controller_window_seconds": 30.00023300992325,
+    "stop_api_seconds": 33.61799338995479,
+    "rank_duration_seconds": [
+      54.80010949,
+      60.68300503,
+      58.70399995,
+      58.47871221,
+      63.39551094,
+      63.72128125,
+      57.39818041,
+      59.2102144
+    ],
+    "window_metrics_samples": 30,
+    "in_service_histogram": {
+      "13": 2,
+      "14": 10,
+      "15": 11,
+      "16": 7
+    },
+    "running_range": [
+      8,
+      10
+    ],
+    "waiting_range": [
+      4,
+      8
+    ],
+    "input_token_delta_between_first_last_window_sample": 1792844,
+    "metrics_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/off-20261109_204450-zPylPlMv/round_1/metrics_samples.jsonl",
+    "aisbench_debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/off-20261109_204450-zPylPlMv/round_1/aisbench_debug.log",
+    "aisbench": {
+      "round": 1,
+      "mean_ttft_ms": 16896.0,
+      "median_ttft_ms": 16092.6,
+      "p90_ttft_ms": 30092.3,
+      "p99_ttft_ms": 51425.7,
+      "input_tps": 53425.5204,
+      "duration_seconds": 346.6313824,
+      "input_tokens": 18518962,
+      "output_tokens": 316,
+      "requests": 316,
+      "concurrency": 15.403,
+      "max_concurrency": 16.0,
+      "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/off-20261109_204450-zPylPlMv/round_1/aisbench/20261109_204529/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k.json",
+      "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/off-20261109_204450-zPylPlMv/round_1/aisbench/20261109_204529/performances/dsv4flash-longbench-dp8-4k-off/longbenchv2-full-le128k_details.jsonl",
+      "p95_ttft_ms": 37138.03507486591
+    },
+    "trigger": {
+      "trigger": "manual_user_override",
+      "requests_completed_from_client_timestamps": 159
+    }
+  },
+  "slot": {
+    "warmup_requests": 16,
+    "capture_status": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/slot-20261109_205631-kcFEf82I/round_1/CAPTURE_STATUS.json",
+    "raw_trace_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/services/pair01-slot-20261109_205458-2721620/profiling",
+    "trace_ranks": 8,
+    "capture_start": "2026-11-09T21:00:40.145653+08:00",
+    "capture_stop_requested": "2026-11-09T21:01:10.145915+08:00",
+    "controller_window_seconds": 30.000251580029726,
+    "stop_api_seconds": 32.1726830098778,
+    "rank_duration_seconds": [
+      60.21410276,
+      54.1050725,
+      53.69247929,
+      60.40461572,
+      58.91288309,
+      56.51545912,
+      62.2793885,
+      59.03380141
+    ],
+    "window_metrics_samples": 30,
+    "in_service_histogram": {
+      "13": 3,
+      "14": 10,
+      "15": 9,
+      "16": 8
+    },
+    "running_range": [
+      8,
+      10
+    ],
+    "waiting_range": [
+      4,
+      8
+    ],
+    "input_token_delta_between_first_last_window_sample": 1866464,
+    "metrics_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/slot-20261109_205631-kcFEf82I/round_1/metrics_samples.jsonl",
+    "aisbench_debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/slot-20261109_205631-kcFEf82I/round_1/aisbench_debug.log",
+    "aisbench": {
+      "round": 1,
+      "mean_ttft_ms": 16378.8,
+      "median_ttft_ms": 15257.2,
+      "p90_ttft_ms": 28725.0,
+      "p99_ttft_ms": 51507.4,
+      "input_tps": 54462.5508,
+      "duration_seconds": 340.03111739999997,
+      "input_tokens": 18518962,
+      "output_tokens": 316,
+      "requests": 316,
+      "concurrency": 15.2213,
+      "max_concurrency": 16.0,
+      "summary_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/slot-20261109_205631-kcFEf82I/round_1/aisbench/20261109_205710/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k.json",
+      "raw_file": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_30s_profile_118/data/formal/aisbench/slot-20261109_205631-kcFEf82I/round_1/aisbench/20261109_205710/performances/dsv4flash-longbench-dp8-4k-slot/longbenchv2-full-le128k_details.jsonl",
+      "p95_ttft_ms": 33589.4990399247
+    },
+    "trigger": {
+      "trigger": "match_off_progress",
+      "generated_requests": 159,
+      "in_service": 15,
+      "running": 8,
+      "waiting": 7
+    }
+  },
+  "slot_vs_off_pct": {
+    "mean_ttft_ms": -3.061079545454548,
+    "p95_ttft_ms": -9.554991339169606,
+    "input_tps": 1.9410768341341145,
+    "duration_seconds": -1.9041164000504596
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "host": "141.61.45.118",
+  "devices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "modes": [
+    "off",
+    "slot"
+  ],
+  "profiling_only": true,
+  "formal_reference": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_longbenchv2_4k_mte_118/run_20261107_193356_118/REPEAT_FORMAL_RESULTS.md",
+  "samples": 316,
+  "warmup": 16,
+  "max_num_batched_tokens": 4096,
+  "max_model_len": 131073,
+  "delay_iterations": 0,
+  "max_iterations": 0,
+  "slot": {
+    "transport": "MTE",
+    "prefetch_stream": 2,
+    "dispatch": "mxfp8",
+    "fused_publish": true,
+    "persistent_cache": 0
+  }
+}

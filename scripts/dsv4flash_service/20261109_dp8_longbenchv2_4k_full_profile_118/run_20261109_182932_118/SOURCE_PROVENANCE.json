@@ -1,0 +1,10 @@
+{
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_home_gmm.so": "ebc00cac2f3ec8f0bcead6f308f734c8b0802e91ba656895d0852e3da07f9e54",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "626307b356bcc6eadd2a18646ae9870352fbe6e6d30bc539c93856c7efa3b607",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_mxfp8_wire.so": "783272429214bcf790ba2322835302a3dd5073e8be91fa06319f051d6cdfcc23",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libascend_moonep_publish.so": "e69aafba0bb53c235fa418409f41eeba7339d9a4e98bb6abe14bbc872856dacc",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/longbenchv2_full_le128k.json": "fef00721db994b6352c0591705b5818fa1c5c83521867edbbe37ca7042eb9b55",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261109_dp8_longbenchv2_4k_full_profile_118/run_20261109_182932_118/formal/data/selection_manifest.json": "a2e83ed45ccc91a149fb89b1b107af4dce1fc2a5f5bf3a2653e7919152620a81",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "09db28a92396361fe75a27a940a6dcebc0dc6b7f05b7b48074d51dcf96049387",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/profiler/torch_npu_profiler.py": "0c9ffcaf695a9b1fcb44a51bdd92e69f763a7c5be64a8efbd498d6536b9e09e5"
+}
