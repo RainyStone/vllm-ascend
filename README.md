@@ -21,6 +21,8 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 迁移说明：`MOONEP_SLOT_MODE` 已移除。以前 MoonEP 开启时未设置或设为 0 会选择 owner-only，现在实际选中 SHMEM 时统一走 Slot，不再回退 owner-only。原生 Off 继续使用 `enable_moonep=false`；dispatch dtype、副流、持久缓存及融合 publish 等独立参数和默认值不变。历史实验脚本、结果及 owner 验证记录保留原样，不代表当前仍提供 owner-only 服务模式。
 
+`MOONEP_FORCE_ALLGATHER` 已移除，固定采用原默认值 0 的正常选路：A5 小步满足条件时走 MC2，其余按并行规模与 top-k 选择 AllGather 或 All-to-All，必要的原生 AllGather 分支继续保留。MoonEP 的 SHMEM/Slot 覆盖、`MOONEP_KEEP_MC2` 和容量/EP 校验不变。旧值 1 不再强制 AllGather，原有 MC2 建链问题的手动规避入口不再提供，本次不新增自动回退；历史实验记录保留原样。
+
 ## 已验证（实测）
 
 > 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。

@@ -1,5 +1,4 @@
 import math
-import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -327,16 +326,6 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    # MOONEP_FORCE_ALLGATHER=1: opt-in escape hatch for fabrics where MC2 cannot
-    # establish its links. Measured on Ascend950 at EP8: the MC2 context build
-    # asks HCCL for a UB_MEM link on a single-layer rank graph, while the links
-    # that graph hands out are UB_CTP, so aclnnMoeDistributeDispatch fails with
-    # errno 561000 ("No matching communication protocol found in HCCL links,
-    # protocol is 6", mc2_context.cpp). EP4 works because its links carry
-    # UB_MEM. Forcing all-gather trades performance for being able to run at
-    # all, mirroring vllm-ascend issue #5674 ("switch to MoECommType.ALLGATHER").
-    if os.environ.get("MOONEP_FORCE_ALLGATHER", "0") == "1":
-        return MoECommType.ALLGATHER
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
