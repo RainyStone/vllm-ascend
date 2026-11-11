@@ -157,10 +157,8 @@ import atexit as _atexit_pf
 
 _atexit_pf.register(_dump_pf_timing)
 
-# Release the vllm weight tensors once the home mirror holds them (slot mode
-# computes against the [epn+B] alias, never against the vllm tensor). ~14.5 GB
-# for Qwen3-30B-A3B at EP=4. See _LayerWeightState.publish.
-_RELEASE_WEIGHTS = os.environ.get("MOONEP_RELEASE_WEIGHTS", "1") == "1"
+# Published home mirrors take over supported BF16 source storage. Quantized
+# byte carriers keep their original weight tensors; see _release_sources.
 _RELEASE_CARRIER_NOTICE = [False]  # one-shot notice for the quantized (carrier) skip
 
 
@@ -517,16 +515,14 @@ class _LayerWeightState:
         Quantized payloads are NZ / 4-D non-contiguous views, so every mirror is
         a raw byte copy of the payload range (``_flat_bytes``).
 
-        With MOONEP_RELEASE_WEIGHTS=1 the originals are then dropped: the home
-        chunks become the layer's weights (in place -- ``.data`` of the same
-        Parameter objects, because the runtime looks layer states up by
-        ``id(w13_weight)``), so the rank keeps *one* copy of its expert weights
-        instead of two. That is ~14.5 GB for Qwen3-30B-A3B at EP=4 (302 MB per
-        layer of w13+w2 x 48 layers).
+        For supported BF16 payloads, home chunks then become the layer's
+        weights (in place -- ``.data`` of the same Parameter objects, because
+        the runtime looks layer states up by ``id(w13_weight)``). The rank
+        keeps one copy of those expert weights instead of two.
 
         Only safe because slot mode computes against the [epn+B] alias, never
-        against the vllm tensor. Do not enable it where the weights are written
-        again after init (weight reload / sleep mode / RL rollouts). It applies
+        against the vllm tensor. This static-inference path does not support
+        weights written again after init (weight reload / sleep / RL). It applies
         to the bf16 path only: quantized payloads mirror into byte carriers that
         are not weight-shaped, and those layers are left alone.
         """
@@ -538,8 +534,7 @@ class _LayerWeightState:
                 src = _flat_bytes(spec.ref, spec.nbytes)
                 dst.copy_(src)
         self._published = True
-        if _RELEASE_WEIGHTS:
-            self._release_sources()
+        self._release_sources()
 
     def _release_sources(self) -> None:
         """Point the layer's weight Parameters at the home chunks (drop the copies)."""
@@ -608,7 +603,7 @@ class _LayerWeightState:
             # them would leave the layer pointing at unmapped memory
             raise RuntimeError(
                 "MoonEP: refusing to destroy weight state whose home chunks back "
-                "the layer (MOONEP_RELEASE_WEIGHTS=1).")
+                "the layer after source-storage handoff.")
         for tensor in self._vmm_tensors:
             alloc = getattr(tensor, "_vmm_allocation", None)
             if alloc is not None:

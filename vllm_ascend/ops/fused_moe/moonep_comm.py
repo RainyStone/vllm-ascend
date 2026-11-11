@@ -892,21 +892,19 @@ class _MoonEPRuntime:
         if _ENV_SLOT_MODE:
             for st in self._states:
                 st.publish()
-            if os.environ.get("MOONEP_RELEASE_WEIGHTS", "1") == "1":
-                # The freed vllm weight blocks sit in torch's cache otherwise, and
-                # the engine sizes its KV cache from driver-level free memory
-                # (torch.npu.mem_get_info), so hand them back before that runs.
-                try:
-                    dev = torch.npu.current_device()
-                    torch.npu.empty_cache()
-                    free_b, total_b = torch.npu.mem_get_info(dev)
-                    print(
-                        f"[moonep-release r{get_ep_group().rank_in_group}] home chunks now back "
-                        f"the layers; free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
-                        flush=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
+            # Return cached allocator blocks before KV-cache sizing. Quantized
+            # payloads still skip source-storage handoff inside publish().
+            try:
+                dev = torch.npu.current_device()
+                torch.npu.empty_cache()
+                free_b, total_b = torch.npu.mem_get_info(dev)
+                print(
+                    f"[moonep-release r{get_ep_group().rank_in_group}] weight publication complete; "
+                    f"free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
