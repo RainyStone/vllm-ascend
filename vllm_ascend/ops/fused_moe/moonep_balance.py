@@ -674,8 +674,8 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
 
 # ---------------------------------------------------------------------------
 # Same-layer prefetch uses the real plan after planning and before dispatch.
-# Side-stream transfers require ASCEND_MOONEP_PREFETCH_RELAXED=1 to avoid
-# cross-rank barrier generations racing across streams.
+# SDK prefetch never inserts cross-rank barriers. Event dependencies below
+# order side-stream transfers, consumers, and slot reuse.
 # MOONEP_PF_STREAM:
 #   0 = off (default)
 #   1 = event-pipeline diagnostic; prefetch stays on the main stream

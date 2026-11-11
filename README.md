@@ -42,6 +42,12 @@ install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so `a
 
 无需因删除环境变量重复编译已有匹配库。仅修改 vLLM 接入路径，不改变模型量化、MXFP8 dispatch、有效行解包、dispatch zero-copy、副流、Home GEMM1、缓存或原生 Off。
 
+`ASCEND_MOONEP_NO_RECONCILE` 与 `ASCEND_MOONEP_PREFETCH_RELAXED` 已成对移除，固定采用原实验值 1/1，而非旧默认 0/0。SDK 的 `async_finish=True` 分支继续在当前流排队并返回完成事件，不再附加全设备 synchronize 和 dist.barrier；prefetch 的 C++ 入口始终不插入前后跨 rank barrier。planning/dispatch/combine 及初始化、权重发布的必要同步、预取内核内部完成机制和 UDMA 独立 QP 保护保留。
+
+该约定要求 home 权重已发布且在使用期间不变，各 rank 的 collective 顺序一致；跨流消费和槽位复用由调用者建立事件依赖。它不提供权重热更新或任意跨流并发的自动同步。旧值 0 不再恢复保守同步，历史实验脚本和结果保留原样。vLLM 的普通非 async_finish 调用不会因此额外少掉“三次同步”；原生 Off 与其他优化不变。
+
+这是 Python 与 C++ 配套变更：必须重编译并安装匹配的 `ascend_moonep._C` 后再启动新进程，不能只更新 Python。已有进程保留已加载版本，更新后须按原计划重启才能采用新行为；设备 kernel 库无需因这次主机侧清理而重编译。
+
 ## 已验证（实测）
 
 > 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。
