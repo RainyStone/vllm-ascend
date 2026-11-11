@@ -1,0 +1,6 @@
+{
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/weighted_udma_20261104/device/lib/libascend_moonep_kernels.so": "6c7a041672fffba48244b3fd5e0c228593a6f8cc56e6b0aa32d2f14ce0d936ce",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_udma_weighted_multinode/tests/test_cross_node_weighted.py": "b3ac6c87624f29c2a77b02461486169c65e7df795874f0ef970868b9edb08633",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_udma_weighted_multinode/tests/load_staged.py": "4cb8a4a86ef8e1599230dead42c6fb3d805499a6af805f34548235bbceb54af4",
+  "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/weighted_udma_20261104/host-lib/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "bed9ffd1372041fdc0015455d9df86e65a86198469e7405ec27a5992f266b57b"
+}

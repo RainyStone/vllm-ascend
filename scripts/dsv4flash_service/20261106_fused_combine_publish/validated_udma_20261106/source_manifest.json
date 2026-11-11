@@ -1,0 +1,9 @@
+{
+  "ascend-moonep/kernels/moonep_combine_udma.cpp": "a628e0912f57d1739a89c0a34fe3240aae4d5ab6557775b4f2ca57aee2a76e1b",
+  "ascend-moonep/kernels/combine_publish.cpp": "4f0c6e190c052251c294e24533004232a1dbf3b848811430338587115a6a4e1b",
+  "ascend-moonep/ascend_moonep/api.py": "e59c62b555357956965191f26806c1ad14b33b5108d6569f6d252fdad115b172",
+  "ascend-moonep/ascend_moonep/combine_publish.py": "f79136f122eaf7b675f7ac8019fc3ca2e32f7c2e7c3f81523eff1ff3e8c349cf",
+  "ascend-moonep/CMakeLists.txt": "2eb24b6d8a7390200c3bfffe361d48e2bb1436211bbe3571f00ef6bf044f4342",
+  "installed_kernel_library_unchanged": "ded73ef0860ef4d1f1d946e27e4fffbba54015296b2120b0d1655595b1ec371e",
+  "validated_final_library": "49008deff48dd883982f4ee3518b0a919f98fed6ec994d063dab33627b64ae90"
+}

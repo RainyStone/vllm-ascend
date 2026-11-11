@@ -1,0 +1,8 @@
+{
+  "cpu_unit_tests": 8,
+  "passed": true,
+  "syntax": "passed",
+  "benchmark_config_parity": "passed",
+  "whitespace": "passed",
+  "npu_integration_gate": "longest actual prompt before formal traffic"
+}

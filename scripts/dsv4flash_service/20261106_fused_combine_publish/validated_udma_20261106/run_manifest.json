@@ -1,0 +1,62 @@
+{
+  "reuse": {
+    "run": "udma_reuse_fence_124_20261106T112935Z",
+    "root_exit": 1,
+    "cleanup_completed": true,
+    "cards": [
+      1,
+      2
+    ],
+    "foreign_processes": []
+  },
+  "sv": {
+    "run": "udma_scalar_fence_124_20261106T113230Z",
+    "root_exit": 0,
+    "cleanup_completed": true,
+    "cards": [
+      1,
+      2
+    ],
+    "foreign_processes": []
+  },
+  "capture": {
+    "run": "udma_capture_control_124_20261106T113608Z",
+    "root_exit": 1,
+    "cleanup_completed": true,
+    "cards": [
+      1,
+      2
+    ],
+    "foreign_processes": []
+  },
+  "extended": {
+    "run": "udma_extended_124_20261106T113659Z",
+    "root_exit": 0,
+    "cleanup_completed": true,
+    "cards": [
+      1,
+      2
+    ],
+    "foreign_processes": []
+  },
+  "unfixed_timing": {
+    "run": "udma_constant_unfixed_124_20261106T113909Z",
+    "root_exit": 0,
+    "cleanup_completed": true,
+    "cards": [
+      1,
+      2
+    ],
+    "foreign_processes": []
+  },
+  "fixed_timing": {
+    "run": "udma_constant_fixed_124_20261106T113909Z",
+    "root_exit": 0,
+    "cleanup_completed": true,
+    "cards": [
+      1,
+      2
+    ],
+    "foreign_processes": []
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "valid": true,
+  "backend": "udma",
+  "world_size": 2,
+  "valid_ranks": 2,
+  "cross_node_weighted_combine_validated": true,
+  "precision_passed": true,
+  "model_loaded": false,
+  "planning_dispatch_validated": false,
+  "expert_prefetch_validated": false,
+  "evidence_sha256": {
+    "rank1.json": "640f3540af2580bd23dae5b04918688390e3b48cc074f82cc19b714a0941c532",
+    "rank0.json": "b4ede7af3c2f3cc6df558bc1f8f2a94d233e648de9a03127f13c814d207d18c2"
+  },
+  "limit": "Only weighted/unweighted combine transfer and arithmetic; not an end-to-end Slot certificate."
+}

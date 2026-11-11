@@ -1,0 +1,11 @@
+诊断方案（待用户确认，尚未执行）
+
+正式交叉矩阵暂停，保留Off1；未完成Slot1数据不计入有效性能比较。
+首个设备错误：VllmQuantLightningIndexer，MTE DDR地址越界(code95)，不是OOM。Python读plan时收到507015属于异步报错，不能视为根因定位。
+建议对前128条原始全文样本做两次独立诊断：
+A. Slot仅缓存：MOONEP_SLOT_CACHE=8, MOONEP_PF_STREAM=0。
+B. Slot仅副流：MOONEP_SLOT_CACHE=0, MOONEP_PF_STREAM=2。
+均继续MTE、并发16、max_out_len=1、128K、8192 token预算、24 GiB KV、原权重及prompt，不变更其他性能参数。
+每项先最长样本校验、16条预热，再对128条跑一次；保留debug和设备日志，不纳入316条正式矩阵。
+若只一项失败，定位该路径；若两项均通过，进一步检查联合路径与跨流资源生命周期，再决定最小修复与续跑。
+预计两项约8至12分钟，实际依起服与故障复现情况。

@@ -1,0 +1,5 @@
+{
+  "valid": true,
+  "scope": "Final library constant-coefficient numerical checks and 10-sample GPU-event timing; no model",
+  "candidate_sha256": "49008deff48dd883982f4ee3518b0a919f98fed6ec994d063dab33627b64ae90"
+}

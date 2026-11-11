@@ -1,0 +1,25 @@
+{
+  "observed_at": "2026-11-05T14:28:17.434778+08:00",
+  "owned_pids": [
+    2402158,
+    2409500,
+    2418973,
+    2421050,
+    2421055,
+    2421060
+  ],
+  "owned_processes_exited": true,
+  "other_workers": [
+    {
+      "host_pid": 2101631,
+      "name": "VLLM::Worker_DP14_EP14",
+      "started": "2026-11-05T14:22:28+08:00"
+    },
+    {
+      "host_pid": 2101641,
+      "name": "VLLM::Worker_DP8_EP8",
+      "started": "2026-11-05T14:22:28+08:00"
+    }
+  ],
+  "note": "Owned diagnostic jobs exited; subsequent all-8-card occupancy belongs to a different process namespace. No other service stopped."
+}

@@ -1,0 +1,32 @@
+{
+  "changes": {
+    "slot_cache": 0,
+    "prefetch_stream": 2,
+    "udma": false,
+    "formal_rounds": 3,
+    "aggregation": "arithmetic mean of all 3 formal rounds",
+    "schedule": "off-slot-off-slot-off-slot",
+    "rounds_per_service": 1,
+    "independent_service_starts": 6
+  },
+  "source_sha256": {
+    "vllm-ascend/vllm_ascend/ops/fused_moe/moonep_balance.py": "c86e54c3fd3322c733f1dc56f4723641df75627b0d442d53e94c207c0f95572a",
+    "vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "3cfc1a48156f1a9f90fbc045bce5029bf30ed21d417f3c4e86749a311d975b3d",
+    "ascend-moonep/ascend_moonep/api.py": "7f3c0a175122bcd5803cef7d27d87fadc4813dfdae2532dd2603f8847afbd5e5",
+    "ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so": "ded73ef0860ef4d1f1d946e27e4fffbba54015296b2120b0d1655595b1ec371e",
+    "ascend-moonep/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so": "090386bab139be95cad3867a246e37cc8923b91ae393ee096488603cc31d70dd",
+    "ascend-moonep/ascend_moonep/lib/libshmem.so": "11a331976a0066be849f1d759bd44048ea3eb89269ae971a3d3ddfc95638e734",
+    "ascend-moonep/ascend_moonep/buffer_c.py": "4479c437a6c490f29d1469a09f2cddcc7ccc7c54ff8cf0988004cd263a9f7737",
+    "ascend-moonep/ascend_moonep/shmem_runtime.py": "58cdb2c83522862fd73bb284bfbbb56024f453c4d59d36515bec9c75a2ac4d16",
+    "ascend-moonep/ascend_moonep/launchers.py": "24f8e61e6ebc2e4b25796604c8eeb7fc891c61077fc6f80c4f7e13afed9a1e8c",
+    "ascend-moonep/ascend_moonep/ops.py": "7de06f2ab1eaa98782257b15a0e001c8c4533a79b55114fa4697005d4395f615",
+    "vllm-ascend/vllm_ascend/ops/fused_moe/moe_comm_method.py": "55ce71f842ef20f819bd665bad7317efb4b40f99058dc267cc4759d5f40cdacc",
+    "vllm-ascend/vllm_ascend/ascend_forward_context.py": "56f086a54cce6fc0d0ffd511b469dd71b4088e9a2d703c4f793e018bb8a6aab5"
+  },
+  "baseline_experiment": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench",
+  "source_head": "a528b1279f17b7e6e1c9275cb93474b9c3dc5ef4",
+  "dataset_sha256": "fef00721db994b6352c0591705b5818fa1c5c83521867edbbe37ca7042eb9b55",
+  "resumed_at": "20261105_190404",
+  "resume_backup": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/data/executions/run_20261105_132106/resume_20261105_190404",
+  "version_note": "Current installed extension/kernel match QP-fix validation build; transport remains forced MTE; preserved Off1 has its original mode audit. No library replaced by this resume."
+}

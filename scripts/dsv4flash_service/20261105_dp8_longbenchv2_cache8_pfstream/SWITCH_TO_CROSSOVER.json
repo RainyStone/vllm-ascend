@@ -1,0 +1,8 @@
+{
+  "reason": "User requested Off1-Slot1-Off2-Slot2-Off3-Slot3; stop original three-round Off batch after valid round1",
+  "client_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/data/aisbench/rerun01-off-20261105_132357-2364295",
+  "service_dir": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/data/services/rerun01-off-20261105_132123-2357263",
+  "service_pid": 2357263,
+  "client_pid": 2364295,
+  "round1_validated": true
+}

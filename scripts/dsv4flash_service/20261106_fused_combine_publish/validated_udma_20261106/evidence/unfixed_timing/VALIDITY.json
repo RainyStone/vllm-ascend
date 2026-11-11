@@ -1,0 +1,5 @@
+{
+  "valid": true,
+  "scope": "Constant coefficients only; unfixed random-weight correctness is invalid",
+  "timing_samples_per_rank_per_mode": 10
+}

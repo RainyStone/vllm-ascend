@@ -1,0 +1,51 @@
+{
+  "status": "passed",
+  "scope": "host-only; no device work",
+  "loaded": {
+    "source": "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep",
+    "extension": "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/weighted_udma_20261104/host-lib/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so",
+    "kernel": "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/weighted_udma_20261104/device/lib/libascend_moonep_kernels.so",
+    "libraries": [
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_config_store.so",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/aclshmem_bootstrap_uid.so",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libshmem.so",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/lib/libshmem_utils.so",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/weighted_udma_20261104/device/lib/libascend_moonep_kernels.so",
+      "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/weighted_udma_20261104/host-lib/ascend_moonep/_C.cpython-311-aarch64-linux-gnu.so"
+    ]
+  },
+  "native_and_udma_weighted_bindings": true,
+  "dispatcher_abi_and_sync_buffer": true,
+  "api_rejections": [
+    {
+      "backend": "MTE",
+      "test": "zero_T",
+      "passed": true
+    },
+    {
+      "backend": "MTE",
+      "test": "invalid_weight_dtype",
+      "passed": true
+    },
+    {
+      "backend": "MTE",
+      "test": "missing_padding",
+      "passed": true
+    },
+    {
+      "backend": "UDMA",
+      "test": "zero_T",
+      "passed": true
+    },
+    {
+      "backend": "UDMA",
+      "test": "invalid_weight_dtype",
+      "passed": true
+    },
+    {
+      "backend": "UDMA",
+      "test": "missing_padding",
+      "passed": true
+    }
+  ]
+}

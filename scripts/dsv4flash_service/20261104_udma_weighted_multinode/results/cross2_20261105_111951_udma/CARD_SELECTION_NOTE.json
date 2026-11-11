@@ -1,0 +1,5 @@
+{
+  "physical_card": 0,
+  "status": "cancelled_before_two_node_validation",
+  "reason": "user clarified physical card1; only owned job stopped"
+}

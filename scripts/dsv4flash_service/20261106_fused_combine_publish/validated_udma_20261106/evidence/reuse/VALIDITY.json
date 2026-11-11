@@ -1,0 +1,5 @@
+{
+  "valid": false,
+  "reason": "S_MTE2-only candidate did not resolve random-weight numerical mismatch",
+  "candidate_sha256": "71c3a1c1f1a7463500fcae318207c25f5c23af87efeefb771b5198fada6637f0"
+}

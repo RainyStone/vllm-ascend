@@ -1,0 +1,52 @@
+{
+  "mode": "slot",
+  "formal_measurement": false,
+  "tokenize_audit": [
+    {
+      "id": "66ec356a821e116aacb1c22b",
+      "expected": 10785,
+      "service_tokens": 10785
+    },
+    {
+      "id": "672464aebb02136c067d73e6",
+      "expected": 129898,
+      "service_tokens": 129898
+    }
+  ],
+  "longest_id": "672464aebb02136c067d73e6",
+  "usage": {
+    "prompt_tokens": 129898,
+    "total_tokens": 129899,
+    "completion_tokens": 1,
+    "prompt_tokens_details": null
+  },
+  "elapsed_seconds": 13.748568949988112,
+  "response": {
+    "id": "cmpl-8e958f5b36fce26d",
+    "object": "text_completion",
+    "created": 1793859451,
+    "model": "dsv4flash_longbench_slot",
+    "choices": [
+      {
+        "index": 0,
+        "text": "\"\"",
+        "logprobs": null,
+        "finish_reason": "length",
+        "stop_reason": null,
+        "token_ids": null,
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.23.0-dp8-ep-a01b5a9a",
+    "usage": {
+      "prompt_tokens": 129898,
+      "total_tokens": 129899,
+      "completion_tokens": 1,
+      "prompt_tokens_details": null
+    },
+    "kv_transfer_params": null
+  }
+}

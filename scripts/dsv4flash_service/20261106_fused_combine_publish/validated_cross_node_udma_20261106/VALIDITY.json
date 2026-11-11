@@ -1,0 +1,130 @@
+{
+  "valid": true,
+  "summary": {
+    "status": "passed",
+    "scope": "2-rank cross-node weighted UDMA combine and fused BF16 publication only",
+    "run_id": "cross_udma_sync_audited_20261106T115850Z",
+    "nodes": {
+      "rank0": "141.61.45.118/card1",
+      "rank1": "141.61.45.124/card1"
+    },
+    "model_loaded": false,
+    "planning_executed": false,
+    "dispatch_executed": false,
+    "prefetch_executed": false,
+    "rank16_executed": false,
+    "full_slot_certificate": false,
+    "runtime_library_replaced": false,
+    "per_rank": [
+      {
+        "rank": 0,
+        "cases": 17,
+        "comparisons": 130,
+        "weighted_calls": 68,
+        "value_mismatches": 0,
+        "nonzero_bit_mismatches": 0,
+        "max_abs": 0,
+        "signed_zero_differences": 398412,
+        "valid_routes_all_remote": true,
+        "window_boundary_cases": 3,
+        "cleanup": {
+          "node": "118",
+          "own_processes_exited": true,
+          "card1_idle": true,
+          "idle_cards": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "monitor_samples": 4,
+          "verified_host_pid": {
+            "host_pid": 4166122,
+            "container_pid": 3952175,
+            "start_ticks": 87233686,
+            "nspid": [
+              4166122,
+              3952175
+            ],
+            "node": "118",
+            "source": "host_namespace_proc_audit",
+            "argv": [
+              "/usr/local/python3.11.10/bin/python",
+              "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_fused_combine_publish/test_cross_node_udma_sync.py",
+              "--output",
+              "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_fused_combine_publish/data/cross_udma_sync_audited_20261106T115850Z",
+              "--shmem-port",
+              "29983",
+              "--library",
+              "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/combine_publish_20261106/lib/libascend_moonep_publish.so"
+            ],
+            "at": 1793966419.9485745
+          },
+          "teardown_rows_recognized": 0,
+          "installed_library_sha256": "ded73ef0860ef4d1f1d946e27e4fffbba54015296b2120b0d1655595b1ec371e"
+        }
+      },
+      {
+        "rank": 1,
+        "cases": 17,
+        "comparisons": 130,
+        "weighted_calls": 68,
+        "value_mismatches": 0,
+        "nonzero_bit_mismatches": 0,
+        "max_abs": 0,
+        "signed_zero_differences": 398069,
+        "valid_routes_all_remote": true,
+        "window_boundary_cases": 3,
+        "cleanup": {
+          "node": "124",
+          "own_processes_exited": true,
+          "card1_idle": true,
+          "idle_cards": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "monitor_samples": 3,
+          "verified_host_pid": {
+            "host_pid": 2277996,
+            "container_pid": 971054,
+            "start_ticks": 61045730,
+            "nspid": [
+              2277996,
+              971054
+            ],
+            "node": "124",
+            "source": "host_namespace_proc_audit",
+            "argv": [
+              "/usr/local/python3.11.10/bin/python",
+              "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_fused_combine_publish/test_cross_node_udma_sync.py",
+              "--output",
+              "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261106_fused_combine_publish/data/cross_udma_sync_audited_20261106T115850Z",
+              "--shmem-port",
+              "29983",
+              "--library",
+              "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/build/combine_publish_20261106/lib/libascend_moonep_publish.so"
+            ],
+            "at": 1793966412.5033088
+          },
+          "teardown_rows_recognized": 0,
+          "installed_library_sha256": "ded73ef0860ef4d1f1d946e27e4fffbba54015296b2120b0d1655595b1ec371e"
+        }
+      }
+    ],
+    "total_comparisons": 260,
+    "candidate_sha256": "49008deff48dd883982f4ee3518b0a919f98fed6ec994d063dab33627b64ae90",
+    "publisher_sha256": "e69aafba0bb53c235fa418409f41eeba7339d9a4e98bb6abe14bbc872856dacc",
+    "prior_unaccepted_run": "cross_udma_sync_20261106T1154",
+    "signed_zero_policy": "Exact BF16 nonzero bits and numeric equality; +0/-0 differences are recorded separately, not counted as numerical errors."
+  }
+}

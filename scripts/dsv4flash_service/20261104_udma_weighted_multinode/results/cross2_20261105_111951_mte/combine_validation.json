@@ -1,0 +1,16 @@
+{
+  "valid": true,
+  "backend": "mte",
+  "world_size": 2,
+  "valid_ranks": 2,
+  "cross_node_weighted_combine_validated": true,
+  "precision_passed": true,
+  "model_loaded": false,
+  "planning_dispatch_validated": false,
+  "expert_prefetch_validated": false,
+  "evidence_sha256": {
+    "rank1.json": "9a6f2f4bc62217f8a346561f3a46097312d2be13606a0329872406d2baf64fd5",
+    "rank0.json": "840a0c497682aa3dfa1d3e16e7c376978d2f765199c2cb16f9b4999feedb7b9d"
+  },
+  "limit": "Only weighted/unweighted combine transfer and arithmetic; not an end-to-end Slot certificate."
+}

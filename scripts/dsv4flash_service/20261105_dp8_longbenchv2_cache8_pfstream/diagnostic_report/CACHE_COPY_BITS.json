@@ -1,0 +1,107 @@
+{
+  "passed": true,
+  "device": "npu:0",
+  "synthetic": true,
+  "includes_all_bf16_bit_patterns": true,
+  "logical_cache_layers": 64,
+  "cache_experts_per_layer": 8,
+  "tests": [
+    {
+      "payload": "w13",
+      "layer": 0,
+      "cache_slot": 0,
+      "bytes": 8388608,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w13",
+      "layer": 42,
+      "cache_slot": 7,
+      "bytes": 8388608,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w13",
+      "layer": 63,
+      "cache_slot": 3,
+      "bytes": 8388608,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w13_scale",
+      "layer": 0,
+      "cache_slot": 0,
+      "bytes": 524288,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w13_scale",
+      "layer": 42,
+      "cache_slot": 7,
+      "bytes": 524288,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w13_scale",
+      "layer": 63,
+      "cache_slot": 3,
+      "bytes": 524288,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w2",
+      "layer": 0,
+      "cache_slot": 0,
+      "bytes": 4194304,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w2",
+      "layer": 42,
+      "cache_slot": 7,
+      "bytes": 4194304,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w2",
+      "layer": 63,
+      "cache_slot": 3,
+      "bytes": 4194304,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w2_scale",
+      "layer": 0,
+      "cache_slot": 0,
+      "bytes": 262144,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w2_scale",
+      "layer": 42,
+      "cache_slot": 7,
+      "bytes": 262144,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    },
+    {
+      "payload": "w2_scale",
+      "layer": 63,
+      "cache_slot": 3,
+      "bytes": 262144,
+      "cache_byte_mismatches": 0,
+      "roundtrip_byte_mismatches": 0
+    }
+  ],
+  "note": "Tests data-copy bit preservation and VMM slice offsets, not full model scheduling."
+}

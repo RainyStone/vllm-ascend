@@ -1,0 +1,5 @@
+{
+  "valid": false,
+  "reason": "Local scalar variable without S_V still reproduces random-weight mismatch; negative control confirmed",
+  "candidate_abi": 4
+}

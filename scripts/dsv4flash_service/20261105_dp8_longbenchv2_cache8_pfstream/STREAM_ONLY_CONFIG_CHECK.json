@@ -1,0 +1,16 @@
+{
+  "slot_cache": 0,
+  "prefetch_stream": 2,
+  "early_prefetch": 0,
+  "transport": "MTE",
+  "service_only_expected_delta": true,
+  "off_and_benchmark_unchanged": true,
+  "syntax_passed": true,
+  "stream_only_record_audit_passed": true,
+  "cache8_rejected": true,
+  "service_started": false,
+  "requests_sent": false,
+  "npu_operations_executed": false,
+  "waiting_for_user_start_notice": true,
+  "backup": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261105_dp8_longbenchv2_cache8_pfstream/data/config_revisions/before_stream_only_20261105_143305"
+}

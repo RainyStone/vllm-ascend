@@ -1,0 +1,9 @@
+{
+  "status": "prepared_not_executed",
+  "cache": 0,
+  "pf_stream": 2,
+  "udma": false,
+  "samples": 128,
+  "warmups": 16,
+  "purpose": "isolate the indexer DDR-address fault; exclude from formal comparison"
+}
