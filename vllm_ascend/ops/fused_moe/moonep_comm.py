@@ -598,12 +598,9 @@ _AICPU_WARMUP_OP = "npu_vllm_quant_lightning_indexer_metadata"
 def _warmup_aicpu_custom_scheduler() -> bool:
     """在建立跨设备映射之前，先把本进程的 AICPU custom 调度器拉起来。
 
-    返回是否成功（失败原因见上）。可用 ``MOONEP_AICPU_WARMUP=0`` 关掉。
+    固定在 MoonEP 初始化时尝试预热，返回是否成功；原有跳过和失败策略保持不变。
     """
     rank = get_ep_group().rank_in_group
-    if os.environ.get("MOONEP_AICPU_WARMUP", "1") == "0":
-        print(f"[moonep-init r{rank}] stage=aicpu-warmup skipped (MOONEP_AICPU_WARMUP=0)", flush=True)
-        return False
     try:
         # 本函数在 load_model 末尾被调，此时通常**没有** forward context
         # （vllm 的 get_forward_context() 会直接 assert），所以只能防御性读取。
