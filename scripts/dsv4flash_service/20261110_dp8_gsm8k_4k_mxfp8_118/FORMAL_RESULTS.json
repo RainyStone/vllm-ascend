@@ -1,0 +1,42 @@
+{
+  "host": "141.61.45.118",
+  "formal": {
+    "off": {
+      "valid": true,
+      "requests": 1319,
+      "input_tokens": 77756,
+      "output_tokens": 1319,
+      "max_concurrency": 16,
+      "mean_ttft_ms": 369.2811752169607,
+      "p95_ttft_ms": 393.61211804207414,
+      "input_tps": 2531.9766,
+      "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-off-20261110_210419-3805688/round_1/aisbench/20261110_210422/performances/dsv4flash-gsm8k-4k-off/gsm8k-test_details.jsonl",
+      "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "p50_ttft_ms": 369.4,
+      "request_rps": 42.9507,
+      "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-off-20261110_210419-3805688/round_1/aisbench_debug.log"
+    },
+    "slot": {
+      "valid": true,
+      "requests": 1319,
+      "input_tokens": 77756,
+      "output_tokens": 1319,
+      "max_concurrency": 16,
+      "mean_ttft_ms": 329.4958667460705,
+      "p95_ttft_ms": 354.980190936476,
+      "input_tps": 2831.4353,
+      "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-slot-20261110_210742-3813914/round_1/aisbench/20261110_210745/performances/dsv4flash-gsm8k-4k-slot/gsm8k-test_details.jsonl",
+      "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "p50_ttft_ms": 331.0,
+      "request_rps": 48.0305,
+      "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-slot-20261110_210742-3813914/round_1/aisbench_debug.log"
+    }
+  },
+  "slot_vs_off_pct": {
+    "mean_ttft_ms": -10.77371692383602,
+    "p50_ttft_ms": -10.39523551705468,
+    "p95_ttft_ms": -9.81471995775005,
+    "input_tps": 11.827072177523279,
+    "request_rps": 11.827048220401547
+  }
+}

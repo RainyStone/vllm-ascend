@@ -1,0 +1,14 @@
+{
+  "host": "141.61.45.118",
+  "commits": {
+    "vllm": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+    "vllm-ascend": "8cdd295e21c8e8633a45658830ce22a701ed9ab7",
+    "ascend-moonep": "4d681d01e28f24845f6159a324820def47a0235e",
+    "benchmark": "6fa4f7d8ed53c74c32aca1c57c7dcb2515e6bd50"
+  },
+  "inputs": {
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/benchmark/ais_bench/datasets/gsm8k/test.jsonl": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+    "/mnt/share/weight/DeepSeek-V4-Flash/tokenizer.json": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261107_dp8_gsm8k_mxfp8_publish/data/selection_manifest.json": "7fd28b64f061bb2542dd1167adff651ae517b2e1ed988bbb7f7cfa48f190a16d"
+  }
+}

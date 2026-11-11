@@ -1,0 +1,147 @@
+{
+  "host": "141.61.45.118",
+  "pairs": {
+    "pair01": {
+      "off": {
+        "valid": true,
+        "requests": 1319,
+        "input_tokens": 77756,
+        "output_tokens": 1319,
+        "max_concurrency": 16,
+        "mean_ttft_ms": 369.2811752169607,
+        "p95_ttft_ms": 393.61211804207414,
+        "input_tps": 2531.9766,
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-off-20261110_210419-3805688/round_1/aisbench/20261110_210422/performances/dsv4flash-gsm8k-4k-off/gsm8k-test_details.jsonl",
+        "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "p50_ttft_ms": 369.4,
+        "request_rps": 42.9507,
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-off-20261110_210419-3805688/round_1/aisbench_debug.log"
+      },
+      "slot": {
+        "valid": true,
+        "requests": 1319,
+        "input_tokens": 77756,
+        "output_tokens": 1319,
+        "max_concurrency": 16,
+        "mean_ttft_ms": 329.4958667460705,
+        "p95_ttft_ms": 354.980190936476,
+        "input_tps": 2831.4353,
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-slot-20261110_210742-3813914/round_1/aisbench/20261110_210745/performances/dsv4flash-gsm8k-4k-slot/gsm8k-test_details.jsonl",
+        "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "p50_ttft_ms": 331.0,
+        "request_rps": 48.0305,
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-slot-20261110_210742-3813914/round_1/aisbench_debug.log"
+      }
+    },
+    "pair02": {
+      "off": {
+        "valid": true,
+        "requests": 1319,
+        "input_tokens": 77756,
+        "output_tokens": 1319,
+        "max_concurrency": 16,
+        "mean_ttft_ms": 357.3083559549297,
+        "p95_ttft_ms": 381.1241160146892,
+        "input_tps": 2621.7722,
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-off-20261110_212112-3839055/round_1/aisbench/20261110_212114/performances/dsv4flash-gsm8k-4k-off/gsm8k-test_details.jsonl",
+        "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "p50_ttft_ms": 358.3,
+        "request_rps": 44.474,
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-off-20261110_212112-3839055/round_1/aisbench_debug.log"
+      },
+      "slot": {
+        "valid": true,
+        "requests": 1319,
+        "input_tokens": 77756,
+        "output_tokens": 1319,
+        "max_concurrency": 16,
+        "mean_ttft_ms": 343.40961743199136,
+        "p95_ttft_ms": 373.86078792624176,
+        "input_tps": 2720.1642,
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-slot-20261110_212424-3846517/round_1/aisbench/20261110_212426/performances/dsv4flash-gsm8k-4k-slot/gsm8k-test_details.jsonl",
+        "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "p50_ttft_ms": 343.9,
+        "request_rps": 46.143,
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair02/formal/data/formal/aisbench/pair02-slot-20261110_212424-3846517/round_1/aisbench_debug.log"
+      }
+    },
+    "pair03": {
+      "off": {
+        "valid": true,
+        "requests": 1319,
+        "input_tokens": 77756,
+        "output_tokens": 1319,
+        "max_concurrency": 16,
+        "mean_ttft_ms": 361.5344137417956,
+        "p95_ttft_ms": 394.4960430031642,
+        "input_tps": 2590.5491,
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair03/formal/data/formal/aisbench/pair03-off-20261110_212730-3853934/round_1/aisbench/20261110_212737/performances/dsv4flash-gsm8k-4k-off/gsm8k-test_details.jsonl",
+        "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "p50_ttft_ms": 361.3,
+        "request_rps": 43.9443,
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair03/formal/data/formal/aisbench/pair03-off-20261110_212730-3853934/round_1/aisbench_debug.log"
+      },
+      "slot": {
+        "valid": true,
+        "requests": 1319,
+        "input_tokens": 77756,
+        "output_tokens": 1319,
+        "max_concurrency": 16,
+        "mean_ttft_ms": 327.0650618676791,
+        "p95_ttft_ms": 347.82347104046494,
+        "input_tps": 2851.1171,
+        "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair03/formal/data/formal/aisbench/pair03-slot-20261110_213047-3861447/round_1/aisbench/20261110_213050/performances/dsv4flash-gsm8k-4k-slot/gsm8k-test_details.jsonl",
+        "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "p50_ttft_ms": 327.4,
+        "request_rps": 48.3644,
+        "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/repeat_formal/pair03/formal/data/formal/aisbench/pair03-slot-20261110_213047-3861447/round_1/aisbench_debug.log"
+      }
+    }
+  },
+  "mean_by_mode": {
+    "off": {
+      "mean_ttft_ms": 362.70798163789533,
+      "p50_ttft_ms": 363.0,
+      "p95_ttft_ms": 389.74409235330916,
+      "input_tps": 2581.4326333333333,
+      "request_rps": 43.78966666666666
+    },
+    "slot": {
+      "mean_ttft_ms": 333.3235153485803,
+      "p50_ttft_ms": 334.09999999999997,
+      "p95_ttft_ms": 358.88814996772754,
+      "input_tps": 2800.9055333333336,
+      "request_rps": 47.51263333333333
+    }
+  },
+  "slot_vs_off_pct": {
+    "mean_ttft_ms": -8.101411542316317,
+    "p50_ttft_ms": -7.961432506887068,
+    "p95_ttft_ms": -7.916975007695615,
+    "input_tps": 8.50198053460729,
+    "request_rps": 8.501929678995811
+  },
+  "per_pair_slot_vs_off_pct": {
+    "pair01": {
+      "mean_ttft_ms": -10.77371692383602,
+      "p50_ttft_ms": -10.39523551705468,
+      "p95_ttft_ms": -9.81471995775005,
+      "input_tps": 11.827072177523279,
+      "request_rps": 11.827048220401547
+    },
+    "pair02": {
+      "mean_ttft_ms": -3.8898442455377436,
+      "p50_ttft_ms": -4.018978509628813,
+      "p95_ttft_ms": -1.9057644959332598,
+      "input_tps": 3.752881352544679,
+      "request_rps": 3.752754418311821
+    },
+    "pair03": {
+      "mean_ttft_ms": -9.534182795315903,
+      "p50_ttft_ms": -9.382784389703858,
+      "p95_ttft_ms": -11.830935389718189,
+      "input_tps": 10.058408080356385,
+      "request_rps": 10.058414856989417
+    }
+  }
+}

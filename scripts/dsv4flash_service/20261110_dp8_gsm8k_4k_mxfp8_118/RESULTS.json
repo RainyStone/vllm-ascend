@@ -1,0 +1,280 @@
+{
+  "host": "141.61.45.118",
+  "formal": {
+    "off": {
+      "valid": true,
+      "requests": 1319,
+      "input_tokens": 77756,
+      "output_tokens": 1319,
+      "max_concurrency": 16,
+      "mean_ttft_ms": 369.2811752169607,
+      "p95_ttft_ms": 393.61211804207414,
+      "input_tps": 2531.9766,
+      "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-off-20261110_210419-3805688/round_1/aisbench/20261110_210422/performances/dsv4flash-gsm8k-4k-off/gsm8k-test_details.jsonl",
+      "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "p50_ttft_ms": 369.4,
+      "request_rps": 42.9507,
+      "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-off-20261110_210419-3805688/round_1/aisbench_debug.log"
+    },
+    "slot": {
+      "valid": true,
+      "requests": 1319,
+      "input_tokens": 77756,
+      "output_tokens": 1319,
+      "max_concurrency": 16,
+      "mean_ttft_ms": 329.4958667460705,
+      "p95_ttft_ms": 354.980190936476,
+      "input_tps": 2831.4353,
+      "raw_details": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-slot-20261110_210742-3813914/round_1/aisbench/20261110_210745/performances/dsv4flash-gsm8k-4k-slot/gsm8k-test_details.jsonl",
+      "dataset_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "p50_ttft_ms": 331.0,
+      "request_rps": 48.0305,
+      "debug_log": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/formal/data/formal/aisbench/mxfp8-slot-20261110_210742-3813914/round_1/aisbench_debug.log"
+    }
+  },
+  "slot_vs_off_pct": {
+    "mean_ttft_ms": -10.77371692383602,
+    "p50_ttft_ms": -10.39523551705468,
+    "p95_ttft_ms": -9.81471995775005,
+    "input_tps": 11.827072177523279,
+    "request_rps": 11.827048220401547
+  },
+  "rank_diagnostic": {
+    "off": {
+      "views": {
+        "compute": {
+          "windows": 9503,
+          "mean": 1.9452295807883102,
+          "weighted_mean": 1.8098738524302092,
+          "p50": 1.8333333333333333,
+          "p95": 2.8333333333333335,
+          "max": 4.666666666666667,
+          "aligned_pairs_by_rank": [
+            2580536,
+            2351208,
+            2574894,
+            2497692,
+            2648459,
+            2768091,
+            2403519,
+            2502905
+          ],
+          "aligned_cumulative_ratio": 1.0894080198731715,
+          "busiest_counts_ties_included": [
+            1349,
+            1201,
+            1295,
+            977,
+            1428,
+            1611,
+            916,
+            1396
+          ],
+          "observed_pairs_by_rank": [
+            2580536,
+            2351208,
+            2574894,
+            2497692,
+            2648459,
+            2768091,
+            2403519,
+            2502905
+          ],
+          "observed_cumulative_ratio": 1.0894080198731715,
+          "observed_pairs": 20327304
+        }
+      },
+      "methods": {
+        "MC2CommImpl": 3483,
+        "AlltoAllCommImpl": 6020
+      },
+      "discarded_windows": 0,
+      "moe_layers": 43,
+      "rank_bounds": [
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ],
+        [
+          2,
+          222
+        ]
+      ],
+      "reference_prefill_pairs": 20061048,
+      "pad_pairs_subtracted": 0,
+      "raw_rank_logs": [
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank0.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank1.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank2.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank3.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank4.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank5.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank6.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/off/20261110_210932-3815470/moe_par_dp8_4k_off_rank7.log"
+      ],
+      "window_csv": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/off_rank_windows.csv"
+    },
+    "slot": {
+      "views": {
+        "owner": {
+          "windows": 9460,
+          "mean": 1.9394424027938673,
+          "weighted_mean": 1.8070066629804193,
+          "p50": 1.8333333333333333,
+          "p95": 2.6799929503378856,
+          "max": 4.666666666666667,
+          "aligned_pairs_by_rank": [
+            2581436,
+            2352410,
+            2576189,
+            2499041,
+            2649494,
+            2768387,
+            2404780,
+            2503307
+          ],
+          "aligned_cumulative_ratio": 1.0891098145644533,
+          "busiest_counts_ties_included": [
+            1356,
+            1322,
+            1275,
+            1045,
+            1476,
+            1533,
+            963,
+            1402
+          ],
+          "observed_pairs_by_rank": [
+            2581436,
+            2352410,
+            2576189,
+            2499041,
+            2649494,
+            2768387,
+            2404780,
+            2503307
+          ],
+          "observed_cumulative_ratio": 1.0891098145644533,
+          "observed_pairs": 20335044
+        },
+        "compute": {
+          "windows": 9460,
+          "mean": 1.0040383483440303,
+          "weighted_mean": 1.0048926375571157,
+          "p50": 1.0,
+          "p95": 1.0193905817174516,
+          "max": 1.0598290598290598,
+          "aligned_pairs_by_rank": [
+            2541864,
+            2541762,
+            2541855,
+            2541702,
+            2541746,
+            2542289,
+            2541772,
+            2542054
+          ],
+          "aligned_cumulative_ratio": 1.0001607077909445,
+          "busiest_counts_ties_included": [
+            6064,
+            6034,
+            6051,
+            6010,
+            6016,
+            6160,
+            6029,
+            6103
+          ],
+          "observed_pairs_by_rank": [
+            2541864,
+            2541762,
+            2541855,
+            2541702,
+            2541746,
+            2542289,
+            2541772,
+            2542054
+          ],
+          "observed_cumulative_ratio": 1.0001607077909445,
+          "observed_pairs": 20335044
+        }
+      },
+      "methods": {
+        "MoonEPCommImpl": 9460
+      },
+      "discarded_windows": 0,
+      "moe_layers": 43,
+      "rank_bounds": [
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ],
+        [
+          3,
+          222
+        ]
+      ],
+      "reference_prefill_pairs": 20061048,
+      "pad_pairs_subtracted": 0,
+      "raw_rank_logs": [
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank0.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank1.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank2.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank3.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank4.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank5.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank6.log",
+        "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/diagnostic/data/diagnostic/rank_raw/slot/20261110_211252-3823020/moe_par_dp8_4k_slot_rank7.log"
+      ],
+      "window_csv": "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261110_dp8_gsm8k_4k_mxfp8_118/slot_rank_windows.csv"
+    }
+  }
+}
