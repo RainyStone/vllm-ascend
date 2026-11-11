@@ -196,6 +196,10 @@ MoonEP dispatch 固定将有效行数保留在设备端，通过 count-mode `gro
 
 MoonEP dispatch 固定按 Buffer 复用 planning 输出表和通信输出缓冲；MXFP8 路径同样复用激活、scale 和权重缓冲。返回数据仅在该 Buffer 下一次 dispatch 前有效，消费方须按 `group_list` 使用有效行。可释放的输出 view、权重快照、尾部清理及副流等待继续保留。
 
+普通 BF16 分发固定 `zero_copy=True`，直接读取 SHMEM 接收分片，省去分片拷出。MXFP8 仍共享 SHMEM 字节载体，按有效行解包到复用的 FP8/scale 缓冲；必要解包、融合 publish 和 combine 路径保持不变。SDK 公共 `zero_copy` 参数及默认值保持不变，独立调用仍可选择 copy 路径。
+
+迁移说明：`MOONEP_DISPATCH_IN_SHARD` 已移除，旧脚本设为 0 不再关闭 BF16 zero-copy。历史实验脚本、结果和审计记录保留原样；旧 BF16-copy 草稿及仅检查环境变量的审计不能直接用于新代码的 copy 对照。历史 MXFP8 路径不依赖此开关，其有效行解包行为不受影响。
+
 Slot 的 home 权重发布后，符合条件的 BF16 权重固定由 home 存储接管，保留 Parameter 对象身份、shape/dtype 校验及接管后的销毁保护。量化权重及 scale 继续保留原张量，不以 BF16 字节载体接管原始量化权重存储；DSV4 Flash 属于此跳过释放的路径。Slot 发布后仍执行 `empty_cache()` 和显存统计，Off 路径不变。该静态推理路径不支持初始化后的权重热更新、sleep/RL 场景。
 
 MoonEP 固定启用自适应容量选档，使用跨 DP 一致的 step token 数选取足够大的最小档；上下文或必要元数据缺失时，仍安全回退到最大容量。`MOONEP_POOL_CAPS`、档数上限默认 32、估算预算默认 2048 MiB 和最小选档下限默认 128 保持不变，历史实验显式设置的下限 16 继续生效。容量尾部不参与真实专家负载及 GEMM 工作量。
