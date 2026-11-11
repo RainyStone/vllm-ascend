@@ -32,20 +32,9 @@ def _moonep_dispatch_dtype() -> str:
     return value
 
 
-def _moonep_fused_publish() -> bool:
-    value = os.getenv("VLLM_ASCEND_MOONEP_FUSED_PUBLISH", "0")
-    if value not in ("0", "1"):
-        raise ValueError("VLLM_ASCEND_MOONEP_FUSED_PUBLISH must be 0 or 1")
-    return value == "1"
-
-
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
-    # Fuse BF16 tail zeroing and SHMEM publication for MoonEP Slot weighted
-    # combine (MTE/UDMA, A5). 0 (default) keeps the legacy path; 1 requires
-    # libascend_moonep_publish.so. Non-sensitive. No quantization/math change.
-    "VLLM_ASCEND_MOONEP_FUSED_PUBLISH": _moonep_fused_publish,
     # MoonEP activation transport: bf16 (default) or mxfp8 (Slot W4A8MXFP,
     # REAL_T only). Non-sensitive; no change to model weights or combine dtype.
     "VLLM_ASCEND_MOONEP_DISPATCH_DTYPE": _moonep_dispatch_dtype,

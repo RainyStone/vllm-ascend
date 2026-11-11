@@ -1048,27 +1048,6 @@ def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
     return pool[capacity], capacity
 
 
-_COMBINE_ROW_IDS: dict = {}
-_ZERO_BF16_SCALAR = None
-
-
-def _zero_bf16_scalar(device) -> torch.Tensor:
-    global _ZERO_BF16_SCALAR
-    if _ZERO_BF16_SCALAR is None or _ZERO_BF16_SCALAR.device != torch.device(device):
-        _ZERO_BF16_SCALAR = torch.zeros((), dtype=torch.bfloat16, device=device)
-    return _ZERO_BF16_SCALAR
-
-
-def _combine_row_ids(nvs: int, device) -> torch.Tensor:
-    """Cached ``arange(nvs)`` for masking the combine input's unused tail."""
-    key = (int(nvs), str(device))
-    row_ids = _COMBINE_ROW_IDS.get(key)
-    if row_ids is None:
-        row_ids = torch.arange(int(nvs), dtype=torch.int64, device=device)
-        _COMBINE_ROW_IDS[key] = row_ids
-    return row_ids
-
-
 def _pads_for(E: int, K: int, H: int):
     _MOONEP_RUNTIME._ensure_initialized()
     return _MOONEP_RUNTIME._pads[(E, K, H)]
@@ -1086,7 +1065,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self.num_experts = int(kwargs.get("num_experts", 0))
         self.num_local_experts = int(kwargs.get("num_local_experts", 0))
         self.activation_transport = envs.VLLM_ASCEND_MOONEP_DISPATCH_DTYPE
-        self.fused_publish = envs.VLLM_ASCEND_MOONEP_FUSED_PUBLISH
 
     def _tstats(self, name: str, t0: float, t1: float | None = None) -> None:
         """MOONEP_TIME_STATS=1: per-phase wall accumulation (host, incl. syncs)."""
@@ -1325,33 +1303,21 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         if combine_metadata.source_topk_weights_sk is None:
             raise ValueError("MoonEP Slot combine requires source-rank route weights")
         buffer = combine_metadata.buffer
-        nvs = int(buffer._require_ctx()["NvS"])
         row_counts = None
-        if self.fused_publish:
-            if combine_metadata.tail_masked:
-                row_counts = combine_metadata.group_list
-                if row_counts is None:
-                    raise ValueError("Fused publish requires counts for a masked tail")
-            # Native publication writes valid rows and zeros the SHMEM tail.
-            # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
-            combine_input = hidden_states
-        elif combine_metadata.tail_masked:
-            rows_total = combine_metadata.group_list.sum().to(torch.int64)
-            mask = (_combine_row_ids(nvs, hidden_states.device) < rows_total).unsqueeze(-1)
-            # Keep the existing tail safety without materializing an FP32 shard.
-            combine_input = torch.where(mask, hidden_states,
-                _zero_bf16_scalar(hidden_states.device))
-        else:
-            combine_input = torch.zeros(nvs, hidden_states.shape[-1],
-                dtype=torch.bfloat16, device=hidden_states.device)
-            combine_input[:hidden_states.shape[0]].copy_(hidden_states)
+        if combine_metadata.tail_masked:
+            row_counts = combine_metadata.group_list
+            if row_counts is None:
+                raise ValueError("Fused publish requires counts for a masked tail")
+        # Native publication writes valid rows and zeros the SHMEM tail.
+        # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
+        combine_input = hidden_states
         self._tstats("comb_pre", _t0c)
         _t1c = time.perf_counter()
         out, _, _ = buffer.combine_weighted(
             plan=combine_metadata.plan, hidden_nvsh=combine_input,
             source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
             num_tokens=T, inter_rank_sync=True,
-            fused_publish=self.fused_publish, row_counts=row_counts)
+            fused_publish=True, row_counts=row_counts)
         self._tstats("comb_buf", _t1c)
         self._tstats("combine", _t0c)
         return out[:T].view(combine_metadata.hidden_shape)

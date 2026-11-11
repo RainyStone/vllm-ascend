@@ -31,6 +31,17 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 `MOONEP_SLOT_QUANT` 已移除，固定采用原默认值 1 的行为：Slot 始终接受现有代码支持并通过布局校验的量化权重 payload，旧值 0 不再禁止该路径。量化权重及必要 scale 仍按原字节布局镜像、预取并建立计算别名，不增加量化/反量化；BF16 模型继续使用 BF16 分支。缺失 scale、元素大小、shape/stride、逐专家连续性、存储边界和载体容量等校验保持不变，不扩大模型或量化格式支持范围。`slot_quant_enabled()` 保留为恒 True 的兼容能力查询，不表示当前模型一定量化，也不启用 MoonEP。dispatch dtype、其他优化和原生 Off 不变，量化权重继续保留原张量，历史实验脚本和结果保留原样。
 
+`VLLM_ASCEND_MOONEP_FUSED_PUBLISH` 已移除，vLLM Slot 固定使用融合 publish：与旧默认值 0 不同，未设置或旧值为 0 时也采用此前显式值 1 的优化路径。将原始 BF16 专家输出与设备端有效行 counts 交给本地融合内核，一次完成有效行写入 SHMEM 和尾部清零，保留 NaN 尾部安全处理；FP32 路由权重乘加及最终 BF16 舍入不变。SDK 公共 `fused_publish/zero_copy` 参数和默认值不变，独立调用仍可选择旧路径；历史非融合实验脚本和结果保留原样，旧变量不能再用于新代码的非融合对照。
+
+该路径要求 A5 专用 libascend_moonep_publish.so，未合入主通信库；当前构建不支持其他设备。缺库、ABI 不匹配或输入布局不合法时明确报错，不静默回退。源码位于 `ascend-moonep/kernels/combine_publish.cpp`，Python 通过 ctypes 加载 `ascend_moonep/lib/libascend_moonep_publish.so`。普通 pip install 不会自动编译此库；构建脚本只生成产物，不负责安装。需要更新时，在停止使用该库的相关服务后，于 ascend-moonep 仓根目录执行（需要匹配的 CANN/A5 工具链）：
+
+```bash
+bash scripts/build_combine_publish.sh
+install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so `ascend_moonep/lib/libascend_moonep_publish.so`
+```
+
+无需因删除环境变量重复编译已有匹配库。仅修改 vLLM 接入路径，不改变模型量化、MXFP8 dispatch、有效行解包、dispatch zero-copy、副流、Home GEMM1、缓存或原生 Off。
+
 ## 已验证（实测）
 
 > 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。

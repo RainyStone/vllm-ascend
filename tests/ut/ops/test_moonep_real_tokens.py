@@ -104,7 +104,7 @@ class RealTokenBoundsTest(unittest.TestCase):
     def test_mxfp8_slot_dispatch_uses_real_tokens(self):
         self.check_dispatch("mxfp8", "0")
 
-    def test_slot_combine_uses_real_tokens_and_clears_nan_tail(self):
+    def test_slot_combine_uses_real_tokens_and_delegates_nan_tail(self):
         tokens, capacity, hidden, rows = 2, 4, 16, 8
         calls = []
 
@@ -118,8 +118,6 @@ class RealTokenBoundsTest(unittest.TestCase):
 
         namespace = {
             "torch": torch, "time": time, "MoonEPCombineMetadata": Metadata,
-            "_combine_row_ids": lambda n, device: torch.arange(n, device=device),
-            "_zero_bf16_scalar": lambda device: torch.zeros((), dtype=torch.bfloat16, device=device),
         }
         combine = load_method("token_combine", namespace)
         metadata = Metadata(
@@ -130,11 +128,13 @@ class RealTokenBoundsTest(unittest.TestCase):
         activations = torch.ones(rows, hidden, dtype=torch.bfloat16)
         activations[3:].fill_(float("nan"))
         with patch.dict(os.environ, {"MOONEP_REAL_T": "0"}):
-            result = combine(SimpleNamespace(fused_publish=False, _tstats=lambda *args: None), activations, metadata)
+            result = combine(SimpleNamespace(_tstats=lambda *args: None), activations, metadata)
         self.assertEqual(calls[0]["num_tokens"], tokens)
         self.assertEqual(tuple(result.shape), (tokens, hidden))
-        self.assertTrue(torch.equal(calls[0]["hidden_nvsh"][3:],
-                                    torch.zeros(rows - 3, hidden, dtype=torch.bfloat16)))
+        self.assertIs(calls[0]["hidden_nvsh"], activations)
+        self.assertIs(calls[0]["row_counts"], metadata.group_list)
+        self.assertTrue(calls[0]["fused_publish"])
+        self.assertTrue(torch.isnan(activations[3:]).all())
 
 
 class EarlyPlanRealTokensTest(unittest.TestCase):

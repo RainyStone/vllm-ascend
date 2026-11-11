@@ -160,7 +160,7 @@ class NativeSelectionTests(unittest.TestCase):
                 self.assertFalse(hasattr(envs, "MOONEP_SLOT_MODE"))
                 self.assertFalse(envs.MOONEP_KEEP_MC2)
                 self.assertEqual(envs.VLLM_ASCEND_MOONEP_DISPATCH_DTYPE, "bf16")
-                self.assertFalse(envs.VLLM_ASCEND_MOONEP_FUSED_PUBLISH)
+                self.assertFalse(hasattr(envs, "VLLM_ASCEND_MOONEP_FUSED_PUBLISH"))
                 self.assertFalse(hasattr(envs, "MOONEP_SLOT_QUANT"))
 
     def test_compatibility_mode_query_does_not_read_legacy_environment(self):
