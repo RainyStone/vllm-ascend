@@ -243,7 +243,7 @@ class HomeSlotIntegrationTests(unittest.TestCase):
         from test_moonep_slot_cache_stream import Plan
 
         self.case.ns["MOONEP_SLOT_CACHE"] = 2
-        with self.assertRaisesRegex(RuntimeError, "cache and early prefetch disabled"):
+        with self.assertRaisesRegex(RuntimeError, "cache disabled"):
             self.case.forward(Plan(torch.tensor([[2, 4]], dtype=torch.int32)))
         self.assertEqual(self.case.events, [])
 

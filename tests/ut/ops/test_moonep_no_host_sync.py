@@ -88,7 +88,7 @@ class NoHostCountSyncTests(unittest.TestCase):
         environment = {"MOONEP_NO_SYNC": old_switch, "MOONEP_REUSE_OUT": old_switch,
                        "MOONEP_DISPATCH_IN_SHARD": old_switch,
                        "MOONEP_SLOT_MODE": old_switch,
-                       "MOONEP_EARLY_PREFETCH": "0", "MOONEP_SLOT_STATS": "0"}
+                       "MOONEP_SLOT_STATS": "0"}
         with patch.dict(os.environ, environment), patch.dict(sys.modules, modules), patch.object(
             torch.Tensor, "item", side_effect=AssertionError("Dispatch must not read device counts to host")
         ):

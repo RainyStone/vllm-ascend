@@ -3839,16 +3839,12 @@ class NPUModelRunner(GPUModelRunner):
         ensure_runtime_initialized()
         # MOONEP_EARLY_PLAN=1 (no-op otherwise): the early-plan speculation probe
         maybe_install_early_router_probe(self.model)
-        # MOONEP_EARLY_PREFETCH=1 (no-op otherwise): predict the plan during
-        # attention and prefetch the mirrored experts on a side stream
         from vllm_ascend.ops.fused_moe.moonep_balance import (
-            maybe_install_early_prefetch,
             maybe_install_pf_stream,
         )
 
-        maybe_install_early_prefetch(self.model)
-        # MOONEP_PF_STREAM=1 (no-op otherwise): prefetch 发到 side stream，
-        # 与同层的 dispatch 并行，GEMM 前才 join
+        # MOONEP_PF_STREAM: 1 为事件诊断，2 与同层 dispatch 重叠，
+        # 3 进一步与 Home GEMM1 重叠；0 不安装钩子。
         maybe_install_pf_stream(self.model)
 
     def _start_dump_data(self) -> None:

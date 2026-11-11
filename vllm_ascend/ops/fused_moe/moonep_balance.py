@@ -87,8 +87,7 @@ _MAX_CARRIER_ROW_ELEMS = 32768
 MOONEP_SLOT_CACHE = int(os.environ.get("MOONEP_SLOT_CACHE", "0"))
 
 # MOONEP_PF_TIMING=1: device-synchronised timing of prefetch_projections (and of
-# the grouped GEMM that follows), so the speculative-prefetch work has a number
-# to beat. Measurement only: it serialises the step.
+# the grouped GEMM that follows). Measurement only: it serialises the step.
 _PF_TIMING: dict = {}
 
 
@@ -96,31 +95,6 @@ def _pf_time(name: str, dt: float) -> None:
     acc = _PF_TIMING.setdefault(name, [0.0, 0])
     acc[0] += dt
     acc[1] += 1
-
-
-def _pf_stats_init(dev):
-    if _PF.get("cnt") is None:
-        _PF["cnt"] = {k: torch.zeros((), dtype=torch.int64, device=dev)
-                      for k in ("layers", "spec_layers", "slots", "matched")}
-
-
-def _dump_early_pf_stats() -> None:
-    cnt = _PF.get("cnt")
-    if cnt is None:
-        return
-    try:
-        v = {k: int(t.item()) for k, t in cnt.items()}
-    except Exception:  # noqa: BLE001
-        return
-    slots = max(v["slots"], 1)
-    print(f"[early-pf-stats] layers={v['layers']} spec_layers={v['spec_layers']} "
-          f"slots={v['slots']} matched={v['matched']} "
-          f"match_rate={v['matched'] / slots:.3f}", flush=True)
-
-
-import atexit as _atexit_epf
-
-_atexit_epf.register(_dump_early_pf_stats)
 
 
 _SLOT_CACHE_STATS: dict = {}
@@ -705,117 +679,21 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
 
 
 # ---------------------------------------------------------------------------
-# Early (speculative) prefetch: predict layer i's plan before its attention
-# ---------------------------------------------------------------------------
-# Measured (2026-09-16, GSM8K 256x64, EP4): `prefetch_projections` costs
-# 0.49 ms per layer of *device* time -- more than the grouped GEMM that follows
-# it (0.22 ms) -- because the MTE GET blocks its stream. Since a stream executes
-# in order, moving the prefetch earlier on the same stream saves nothing; the
-# transfer only overlaps the attention if it is issued on a *side* stream.
-#
-# The plan, however, is only known after this layer's dispatch... unless we
-# predict it: running this layer's own router on the *pre-attention* residual
-# (the previous layer's output) reproduces the planner's input histogram with
-# cosine 0.986, and feeding that predicted routing through the planning kernel
-# yields a plan whose slot->expert assignment matches the real one 80.5% of the
-# time (vs 69% for simply reusing the previous step's plan). See
-# docs/early_plan_prediction.html.
-#
-# So: in the decoder-layer pre-hook (i.e. while the attention is about to run)
-# we predict the routing, run the planning kernel on it, and issue the prefetch
-# on a side stream. When the real plan arrives after the dispatch, we re-prefetch
-# only the slots that differ (usually none) and the grouped GEMM waits on the
-# side stream's event.
-#
-# MOONEP_EARLY_PREFETCH=1 enables it; MOONEP_EARLY_PF_DEV=0 keeps the
-# speculative issue on the main stream (no overlap, for A/B).
-_EARLY_PF = os.environ.get("MOONEP_EARLY_PREFETCH", "0") == "1"
-_EARLY_PF_DEV = os.environ.get("MOONEP_EARLY_PF_DEV", "1") == "1"
-
-# MOONEP_PF_STREAM=1: 把 prefetch 发到 side stream，与同层的 dispatch 并行。
-# 与 EARLY_PREFETCH 的区别：那个用「上一层的 plan 行」当预测、在 attention 前
-# 发；这个用本层的**真实 plan**，在 planning 之后、dispatch 之前发 —— 不需要
-# 预测，也不改变搬的东西。
-#
-# 必须配套 ASCEND_MOONEP_PREFETCH_RELAXED=1：prefetch 的两个跨卡 barrier 要
-# 摘掉。不摘的话它们会跟着跑到 side stream 上，各 rank 的栅栏代际错开 → 死锁
-# （prefetch.cpp:101 的注释写明了 RELAXED 就是为 side-stream 发射准备的）。
+# Same-layer prefetch uses the real plan after planning and before dispatch.
+# Side-stream transfers require ASCEND_MOONEP_PREFETCH_RELAXED=1 to avoid
+# cross-rank barrier generations racing across streams.
 # MOONEP_PF_STREAM:
-#   0 = 关（默认）
-#   1 = 只走事件管道：钩子里 record_event + wait_event + 进出 stream 上下文都做，
-#       但 prefetch 仍留在主 stream —— 输出正确，用来单独量「事件管道的开销」
-#   2 = dispatch 与 side-stream prefetch 重叠，统一 GEMM 前等待
-#   3 = 在档 2 上提前执行 Home GEMM1，只在 Slot GEMM1 前等待；统一激活和 GEMM2
+#   0 = off (default)
+#   1 = event-pipeline diagnostic; prefetch stays on the main stream
+#   2 = overlap prefetch with dispatch; wait before unified GEMM
+#   3 = also run Home GEMM1 before waiting; Slot GEMM1 waits for prefetch
 _PF_STREAM = int(os.environ.get("MOONEP_PF_STREAM", "0"))
 _PF_STREAMED = [0]
 
 # 与 moonep_comm._ALLOW_CAPTURE 同义（各自定义以避免模块级循环 import）。
 # MOONEP_ALLOW_CAPTURE=1 放开 run_slot_forward 的捕获守卫，供可行性实验用。
 _ALLOW_CAPTURE = os.environ.get("MOONEP_ALLOW_CAPTURE", "0") == "1"
-_PF: dict = {"pred": {}, "stream": None, "ev_spec": None, "ev_main": None, "main": None,
-             "done": False, "fail": 0, "spec": 0, "install_logged": False,
-             # predictor state: the *previous step's* real plan row per layer.
-             # It needs no collective and no router re-run -- measured to match
-             # the current plan 69% of the time (vs 80.5% for the router-based
-             # prediction, which required an extra planning-kernel call and that
-             # call desynchronised the library's cross-rank pacing => hang).
-             "cur_key": None, "last_rows": {}, "shell": {}, "pending": {},
-             "shell_idx": 0, "spec_plan": None,
-             # stats (device-side accumulation, read once at exit)
-             "cnt": None}
-
-
-def note_current_layer(key) -> None:
-    """Tell the runtime which layer is executing (set by the pre-hook)."""
-    if _EARLY_PF:
-        _PF["cur_key"] = key
-
-
-def stash_plan_row(row) -> None:
-    """Remember this layer's real slot->expert row (called from the dispatcher)."""
-    if not _EARLY_PF:
-        return
-    key = _PF.get("cur_key")
-    if key is not None:
-        _PF["last_rows"][key] = row.detach().clone()
-
-
-def _pf_shell_plan(buffer):
-    """A plan-shaped shell whose only meaningful field is experts_to_copy."""
-    cap = int(buffer._require_ctx()["S"])
-    shell = _PF["shell"].get(cap)
-    if shell is not None:
-        return shell
-    from ascend_moonep.planning import allocate_planning_outputs
-
-    plan, _cu = allocate_planning_outputs(buffer._require_ctx())
-    plans = [plan]
-    plan2, _cu2 = allocate_planning_outputs(buffer._require_ctx())
-    plans.append(plan2)
-    _PF["shell"][cap] = plans
-    return plans
-
-
-def take_predicted_plan(key):
-    """Pop the speculative plan stashed for this layer (or None)."""
-    if not _EARLY_PF:
-        return None
-    return _PF["pred"].pop(key, None)
-
-
-def finish_speculative_prefetch():
-    """Make the current stream wait for an in-flight speculative prefetch.
-
-    Must run before anything that touches the slot chunks (the repair prefetch
-    and the grouped GEMM).
-    """
-    if _PF.get("ev_spec") is None:
-        return False
-    import torch_npu
-
-    torch_npu.npu.current_stream().wait_event(_PF["ev_spec"])
-    _PF["ev_spec"] = None
-    return True
+_PF: dict = {"stream": None, "done": False, "fail": 0, "cur_key": None}
 
 
 def _pf_prefetch(buffer, state, plan):
@@ -828,90 +706,12 @@ def _pf_state_for(key):
     return getattr(_MOONEP_RUNTIME, "_state_by_w13", {}).get(key)
 
 
-def maybe_install_early_prefetch(model) -> None:
-    """MOONEP_EARLY_PREFETCH=1: predict the plan in the pre-attention hook and
-    issue the expert-weight prefetch on a side stream, so the 0.49 ms MTE
-    transfer overlaps this layer's attention instead of stalling the stream."""
-    if not _EARLY_PF or _PF["done"]:
-        return
-    try:
-        import torch_npu
-
-        from vllm_ascend.ops.fused_moe import moonep_comm as mc
-
-        layers = mc._early_layers(model)
-        if not layers:
-            print("[early-pf] no decoder layers found; disabled", flush=True)
-            return
-
-        def _hook(blk, args, kwargs):
-            try:
-                h = kwargs.get("hidden_states", args[1] if len(args) > 1 else None)
-                res = kwargs.get("residual", args[2] if len(args) > 2 else None)
-                if h is None:
-                    return None
-                if res is not None:
-                    h = h + res                      # pre-attention residual stream
-                experts = getattr(getattr(blk, "mlp", None), "experts", None)
-                if experts is None:
-                    return None
-                key = id(experts.w13_weight)
-                note_current_layer(key)              # the dispatcher stashes the real row
-                state = _pf_state_for(key)
-                if state is None:
-                    return None
-                row = _PF["last_rows"].get(key)
-                if row is None:                      # first step of this layer
-                    return None
-                from vllm.distributed.parallel_state import get_ep_group
-
-                T = int(h.shape[0])
-                buffer, _cap = mc._select_buffer_for_step(
-                    state.E, int(experts.top_k), state.H, T)
-                shells = _pf_shell_plan(buffer)
-                shell = shells[_PF["shell_idx"]]
-                _PF["shell_idx"] ^= 1                # never rewrite an in-flight plan
-                etc = shell.experts_to_copy
-                etc.fill_(-1)
-                etc[get_ep_group().rank_in_group] = row
-                _PF["spec_plan"] = shell
-                if _PF["main"] is None:
-                    _PF["main"] = torch_npu.npu.current_stream()
-                _PF["ev_main"] = _PF["main"].record_event()   # slots are safe after this
-                if _EARLY_PF_DEV:
-                    if _PF["stream"] is None:
-                        _PF["stream"] = torch_npu.npu.Stream()
-                    stream = _PF["stream"]
-                    stream.wait_event(_PF["ev_main"])
-                    with torch_npu.npu.stream(stream):
-                        _pf_prefetch(buffer, state, shell)
-                    _PF["ev_spec"] = stream.record_event()
-                else:
-                    _pf_prefetch(buffer, state, shell)
-                    _PF["ev_spec"] = None
-                _PF["spec"] += 1
-                _PF["pending"][key] = row
-            except Exception as exc:  # noqa: BLE001 - never break a step
-                _PF["fail"] += 1
-                if _PF["fail"] in (1, 50):
-                    print(f"[early-pf] speculative prefetch failed (#{_PF['fail']}): {exc}", flush=True)
-            return None
-
-        for blk in layers:
-            blk.register_forward_pre_hook(_hook, with_kwargs=True)
-        _PF["done"] = True
-        print(f"[early-pf] enabled on {len(layers)} decoder layers "
-              f"(side stream={int(_EARLY_PF_DEV)})", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[early-pf] install failed: {exc}", flush=True)
-
-
 def maybe_install_pf_stream(model) -> None:
     """MOONEP_PF_STREAM=1: 让 after_planning 钩子知道"当前是哪一层"。
 
     钩子在库的 `_run_dispatch_on_current_stream` 里触发（planning 之后、
     dispatch 之前），需要拿到本层的 `_LayerWeightState` 才能发 prefetch。
-    层的识别方式与 early-prefetch 一致：用 `experts.w13_weight` 的 id 当 key，
+    层的识别方式：用 `experts.w13_weight` 的 id 当 key，
     由 decoder 层的 forward pre-hook 在每层开始时记下。
     """
     if not _PF_STREAM or _PF["done"]:
@@ -1077,36 +877,9 @@ def run_slot_forward(
             "it is a deliberate override, not a claim that capture works.)"
         )
     home_overlap = _PF_STREAM == 3
-    if home_overlap and (MOONEP_SLOT_CACHE > 0 or _EARLY_PF):
-        raise RuntimeError("Home GEMM mode 3 currently requires cache and early prefetch disabled")
+    if home_overlap and MOONEP_SLOT_CACHE > 0:
+        raise RuntimeError("Home GEMM mode 3 currently requires cache disabled")
     plan_use = plan
-    if _EARLY_PF:
-        try:
-            from vllm.distributed.parallel_state import get_ep_group
-
-            rank = get_ep_group().rank_in_group
-            # the row the speculative prefetch fetched (previous step's plan)
-            spec_row = _PF["pending"].pop(id(state._w13_src), None)
-            _pf_stats_init(plan.experts_to_copy.device)
-            cnt = _PF["cnt"]
-            cnt["layers"] += 1
-            if spec_row is not None:
-                cnt["spec_layers"] += 1
-                real_row = plan.experts_to_copy[rank]
-                same = spec_row == real_row
-                cnt["slots"] += real_row.numel()
-                cnt["matched"] += same.sum()
-                repair_row = torch.where(same, torch.full_like(real_row, -1), real_row)
-                etc = torch.full_like(plan.experts_to_copy, -1)
-                etc[rank] = repair_row
-                plan_use = dataclasses.replace(plan, experts_to_copy=etc)
-        except Exception as exc:  # noqa: BLE001
-            _PF["fail"] += 1
-            if _PF["fail"] in (1, 50):
-                print(f"[early-pf] repair-plan build failed: {exc}", flush=True)
-            plan_use = plan
-        # anything that touches the slot chunks must wait for the side-stream GET
-        finish_speculative_prefetch()
     _sync = os.environ.get("MOONEP_PF_TIMING", "0") == "1"
     if _sync:
         # measurement-only: the device time of the prefetch itself (the host-side

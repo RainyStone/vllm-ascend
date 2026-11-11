@@ -1233,12 +1233,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             epn=epn,
             slot_experts=plan.experts_to_copy[rank],
         )
-        if os.environ.get("MOONEP_EARLY_PREFETCH", "0") == "1":
-            # remember this layer's real slot->expert row: the next step's
-            # speculative prefetch uses it as its (collective-free) prediction
-            from vllm_ascend.ops.fused_moe.moonep_balance import stash_plan_row
-
-            stash_plan_row(plan.experts_to_copy[rank])
         if _PLAN_STATS_ON:
             _PLAN_STATS.append([int(v) for v in plan.experts_to_copy[rank].tolist()])
         if _EARLY_PLAN_ON:
