@@ -27,6 +27,8 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 `MOONEP_NO_PIN` 已移除，固定采用原默认值 0 的行为：Ascend 平台继续声明支持 pinned host memory，原生 Off 与 MoonEP Slot 使用相同的平台能力查询；不改写调用处显式指定的 `pin_memory=False`。旧值 1 不再切换到 pageable memory，原有 `aclrtMallocHostWithCfg` 207001 分配失败的手动规避入口不再提供；本次不修复该分配问题，也不增加失败后自动回退。SHMEM/VMM、权重预取、副流、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变，历史实验脚本和记录保留原样。
 
+`MOONEP_ALLOW_CAPTURE` 已移除，固定采用原默认值 0 的捕获保护：MoonEP 的 token dispatch 和 Slot forward 在检测到图捕获时继续报错，旧值 1 不再绕过保护。使用 `--enforce-eager` 或关闭相应图模式；本次不自动更改图配置或增加静默回退，也不宣称 MoonEP 已支持图模式。Slot forward 在无执行上下文时的既有处理、AICPU 启动预热的捕获跳过逻辑、原生 Off 的图能力及其他优化保持不变，历史性能实验和捕获研究记录保留原样。
+
 ## 已验证（实测）
 
 > 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。

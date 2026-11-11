@@ -93,7 +93,6 @@ class CacheStreamTests(unittest.TestCase):
             _PF_STREAM=2, _PF_STREAMED=[0],
             _PF={"cur_key": 1, "stream": None, "fail": 0},
             _pf_state_for=lambda key: self.state, _pf_prefetch=prefetch,
-            _ALLOW_CAPTURE=False,
             _EXTRA_CTX=types.SimpleNamespace(capturing=False),
             build_mlp_compute_input=lambda **kw: Compute(),
             unified_apply_mlp=gemm,

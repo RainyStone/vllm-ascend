@@ -403,10 +403,6 @@ def _dump_plan(plan, cu):
             print(f"[moonep-dump-plan] failed: {exc}", flush=True)
 
 
-# MOONEP_ALLOW_CAPTURE=1: 图捕获可行性研究的实验开关 —— 放开 token_dispatch /
-# run_slot_forward 里那两道显式 raise。**这不是"声明图模式可用"**，只是把保守
-# 禁止去掉，好让真实的捕获报错暴露出来。默认 0（保持原行为）。
-_ALLOW_CAPTURE = os.environ.get("MOONEP_ALLOW_CAPTURE", "0") == "1"
 _MOONEP_TSTATS = {"dispatch": [0.0, 0], "disp_pre": [0.0, 0], "disp_pad": [0.0, 0],
                  "disp_tpe": [0.0, 0], "disp_buf": [0.0, 0],
                  "disp_lib": [0.0, 0], "disp_post": [0.0, 0],
@@ -1110,12 +1106,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ) -> MoETokenDispatchOutput[TMoECombineMetadata]:
-        if _EXTRA_CTX.capturing and not _ALLOW_CAPTURE:
+        if _EXTRA_CTX.capturing:
             raise RuntimeError(
-                "MoonEP dispatch cannot run inside captured CUDA graphs; "
-                "run with --enforce-eager (or disable cudagraph) when enable_moonep is on. "
-                "(MOONEP_ALLOW_CAPTURE=1 lifts this guard for the capture feasibility study; "
-                "it is a deliberate override, not a claim that capture works.)"
+                "MoonEP dispatch cannot run inside captured graphs; "
+                "run with --enforce-eager (or disable graph capture) when enable_moonep is on."
             )
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights

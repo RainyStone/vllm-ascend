@@ -690,9 +690,6 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
 _PF_STREAM = int(os.environ.get("MOONEP_PF_STREAM", "0"))
 _PF_STREAMED = [0]
 
-# 与 moonep_comm._ALLOW_CAPTURE 同义（各自定义以避免模块级循环 import）。
-# MOONEP_ALLOW_CAPTURE=1 放开 run_slot_forward 的捕获守卫，供可行性实验用。
-_ALLOW_CAPTURE = os.environ.get("MOONEP_ALLOW_CAPTURE", "0") == "1"
 _PF: dict = {"stream": None, "done": False, "fail": 0, "cur_key": None}
 
 
@@ -870,11 +867,10 @@ def run_slot_forward(
         capturing = _EXTRA_CTX.capturing
     except Exception:
         capturing = False  # outside an engine forward context (harness use)
-    if capturing and not _ALLOW_CAPTURE:
+    if capturing:
         raise RuntimeError(
-            "MoonEP slot mode cannot run inside captured graphs. "
-            "(MOONEP_ALLOW_CAPTURE=1 lifts this guard for the capture feasibility study; "
-            "it is a deliberate override, not a claim that capture works.)"
+            "MoonEP slot mode cannot run inside captured graphs; "
+            "run with --enforce-eager (or disable graph capture) when enable_moonep is on."
         )
     home_overlap = _PF_STREAM == 3
     if home_overlap and MOONEP_SLOT_CACHE > 0:
