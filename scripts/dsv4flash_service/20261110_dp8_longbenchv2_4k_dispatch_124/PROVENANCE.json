@@ -1,0 +1,17 @@
+{
+  "host": "141.61.45.124",
+  "commits": {
+    "vllm": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+    "vllm-ascend": "8cdd295e21c8e8633a45658830ce22a701ed9ab7",
+    "ascend-moonep": "4d681d01e28f24845f6159a324820def47a0235e",
+    "benchmark": "6fa4f7d8ed53c74c32aca1c57c7dcb2515e6bd50"
+  },
+  "files": {
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/vllm_ascend/ops/fused_moe/moonep_comm.py": "9d9529182b04369f4646673b56eed7135b7edd8964b87fc927e99238ce70fba6",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/api.py": "e59c62b555357956965191f26806c1ad14b33b5108d6569f6d252fdad115b172",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/ascend_moonep/mxfp8_transport.py": "845cd1f83b0f9faedf2f5678bd95f2c8a5674a1b1770ea9493b4699674f2770d",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/ascend-moonep/kernels/mxfp8_wire.cpp": "2b1aa325f95706a5676eb4acd931964ce0677bb673a399c3a2e6fdcdffc21c90",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/longbenchv2_full_le128k.json": "fef00721db994b6352c0591705b5818fa1c5c83521867edbbe37ca7042eb9b55",
+    "/mnt/share/x00893896/vllm_ascend_moonep_integration/vllm-ascend/scripts/dsv4flash_service/20261104_dp8_longbenchv2_aisbench/data/selection_manifest.json": "a2e83ed45ccc91a149fb89b1b107af4dce1fc2a5f5bf3a2653e7919152620a81"
+  }
+}
