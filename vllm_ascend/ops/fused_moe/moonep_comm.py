@@ -450,18 +450,12 @@ def _dump_slot_stats():
               flush=True)
 
 
-# Step-adaptive dispatch capacity (upstream MoonEPBufferPool equivalent): a
-# ``Buffer`` fixes its token capacity S at construction, so with a single
-# full-capacity buffer every step pads to max_num_batched_tokens and the
-# planning/dispatch/combine kernels plus the grouped GEMM run over the full
-# ``S*K`` row space. A pow2 pool lets decode-sized steps use a fraction of it.
-# This floor is both the ladder's first entry and the per-step clamp, so
-# ``MOONEP_MIN_DISPATCH_TOKENS=32`` (env) lowers both at once; 128 is the
-# historic default. Every padded row inside the MLP's group_list is real
-# (wasted) GEMM work, so small (decode) steps want a low floor; the dev line
-# shipped this knob as ``MOONEP_MIN_CAP`` (default 16) and the old name is
-# still honored as a fallback so dev-line launch scripts keep working. Raise
-# it (or set MOONEP_POOL_CAPS) if a rank's receive share can exceed S*K.
+# Step-adaptive dispatch capacity (upstream MoonEPBufferPool equivalent).
+# Each Buffer fixes its receive capacity at S*K rows. Real token bounds and
+# group_list exclude unused rows from expert load and GEMM work; smaller
+# rungs still reduce capacity-sized copies and tail-processing overhead.
+# MOONEP_MIN_DISPATCH_TOKENS is the per-step selection floor (default 128),
+# not the first allocated rung. MOONEP_MIN_CAP remains its fallback alias.
 def _min_dispatch_tokens() -> int:
     value = int(os.environ.get(
         "MOONEP_MIN_DISPATCH_TOKENS",
@@ -478,23 +472,16 @@ MOONEP_MIN_DISPATCH_TOKENS = _min_dispatch_tokens()
 def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[int]:
     """Capacity ladder for the buffer pool (MOONEP_POOL_CAPS overrides).
 
-    A rung fixes the dispatched row space to S*K, so a step of T tokens pads
-    (S-T)*K zero rows -- pure waste: the grouped GEMM multiplies zeros and the
-    pile lands on the pad expert, which skews that rank's expert groups. The
-    pool is idle memory, so trading pool bytes for smaller pads is a good deal;
-    MOONEP_POOL_BUDGET_MB caps how much we spend on it (default 2 GiB, a small
-    part of what releasing the vllm weight copies frees).
+    Each rung fixes receive capacity at S*K rows, independently of the real
+    token count used for planning, routing and expert computation. Powers of
+    two cover small steps through 512; uniformly spaced rungs cover larger
+    steps. Spacing is chosen using MOONEP_POOL_MAX_RUNGS (default 32) and
+    MOONEP_POOL_BUDGET_MB (default 2048 MiB).
 
-    Layout: dense where decode lives, geometric above it.
-
-        step 8  : MIN .. 128        (decode shapes, cheap)
-        step 32 : 160 .. 512        (big decode / small prefill)
-        ratio r : 512 .. s_max      with r from the budget; a geometric ladder
-                                    of ratio r costs ~s_max*cost*r/(r-1) bytes
-                                    and leaves at most (r-1) relative pad
-
-    ``cost_per_token`` is the hidden chunk's bytes per token of capacity
-    (K*H*2), passed by the caller because the pool is built per (E, K, H).
+    ``cost_per_token`` estimates hidden-buffer bytes per token of capacity
+    (K*H*2). The budget guides rung spacing, not a hard cap on total memory:
+    operator workspaces and other buffers also occupy device memory. Every
+    rung is created before collective SHMEM initialization.
     """
     override = os.environ.get("MOONEP_POOL_CAPS")
     if override:
@@ -510,11 +497,9 @@ def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[in
         if 0 < c <= s_max and c not in caps:
             caps.append(c)
 
-    # Shape: powers of two up to 512 (decode shapes, where the tail lives),
-    # then a uniform step up to s_max. The waste per step is (S-T)*K rows, so a
-    # uniform step bounds it by step*K rows whatever T is -- a geometric ladder
-    # does not (its absolute waste grows with S, and where the rungs land is
-    # luck: measured at T=4676, ratio 1.22 gave 6416 pad rows vs 688 for 1.35).
+    # Powers of two up to 512, then uniform spacing up to s_max. This keeps
+    # the gap between selected capacity and the real step size bounded by
+    # the uniform step; unused capacity does not become expert token load.
     #
     # Two caps bind, and the count one dominates: every Buffer also allocates
     # its op workspaces as separate VMM physical chunks (~10 per buffer, 16 MiB
@@ -678,7 +663,7 @@ def _warmup_aicpu_custom_scheduler() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Runtime pool: one ascend_moonep.Buffer per unique (E, K, H) layer shape.
+# Runtime pool: capacity-specific Buffers per unique (E, K, H) layer shape.
 # Construction registers CANN VMM descriptors only; ShmemRuntime is initialized
 # once, after every Buffer has been created (two-phase, collective).
 # ---------------------------------------------------------------------------
@@ -986,7 +971,6 @@ _ENV_DISPATCH_IN_SHARD = os.environ.get("MOONEP_DISPATCH_IN_SHARD", "1") != "0"
 _ENV_SLOT_MODE = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
 _ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
 _ENV_CAP_TRACE = os.environ.get("MOONEP_CAP_TRACE", "0") == "1"
-_ENV_POOL = os.environ.get("MOONEP_POOL", "1") == "1"
 _GEO_CACHE: dict = {}
 
 
@@ -1066,7 +1050,7 @@ def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
     pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
     geo = _geometry(E, K, H)
     s_max = geo["s_max"]
-    step_tokens = _step_token_count(tokens) if _ENV_POOL else None
+    step_tokens = _step_token_count(tokens)
     if step_tokens is None or step_tokens > s_max:
         capacity = s_max
     else:

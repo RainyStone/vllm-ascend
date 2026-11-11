@@ -178,10 +178,9 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
-| `MOONEP_POOL=0` | 关闭步长自适应容量池（退回固定 `max_num_batched_tokens` 容量） |
 | `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
-| `MOONEP_MIN_DISPATCH_TOKENS=16` | 池最小档兼每步取档下限（默认 128；改大会抬高每步补零行）。dev 线旧名 `MOONEP_MIN_CAP` 仍识别（回退别名） |
-| `MOONEP_POOL_BUDGET_MB=2048` | 档位表的内存预算：预算越大档越密、补零行越少（只影响档位密度） |
+| `MOONEP_MIN_DISPATCH_TOKENS=16` | 每步选档的最小 token 下限（代码默认 128；实验脚本可显式设 16）。dev 线旧名 `MOONEP_MIN_CAP` 仍识别（回退别名） |
+| `MOONEP_POOL_BUDGET_MB=2048` | 档位表的估算预算，单位 MiB，影响档位密度；不是包含全部工作区的总显存硬限制 |
 | `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
 | `MOONEP_RELEASE_WEIGHTS=0` | 关闭"释放 vllm 原权重"（默认开：home chunk 接管后释放原张量，省 13.8 GB/卡；仅 bf16 路径，量化 payload 走字节载体、跳过释放） |
 | `MOONEP_PAD_CUT=1` | 实验性：把补零行踢出 grouped GEMM。**实测错误，默认关**（见排障） |
@@ -197,6 +196,8 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 MoonEP dispatch 固定将有效行数保留在设备端，通过 count-mode `group_list` 限定 GEMM 工作量，并在 combine 中安全处理容量尾部，不再提供逐层 `.item()` 回读行数的开关。跨 rank 通信屏障、副流事件等待，以及独立开关控制的诊断/调试同步仍保留。
 
 MoonEP dispatch 固定按 Buffer 复用 planning 输出表和通信输出缓冲；MXFP8 路径同样复用激活、scale 和权重缓冲。返回数据仅在该 Buffer 下一次 dispatch 前有效，消费方须按 `group_list` 使用有效行。可释放的输出 view、权重快照、尾部清理及副流等待继续保留。
+
+MoonEP 固定启用自适应容量选档，使用跨 DP 一致的 step token 数选取足够大的最小档；上下文或必要元数据缺失时，仍安全回退到最大容量。`MOONEP_POOL_CAPS`、档数上限默认 32、估算预算默认 2048 MiB 和最小选档下限默认 128 保持不变，历史实验显式设置的下限 16 继续生效。容量尾部不参与真实专家负载及 GEMM 工作量。
 
 上表 `SIM_ROUTE` 的硬上限是 **`max(share) ≤ 100/top_k`**（本模型 K=6 → 16.67%；K=8 → 12.5%）：
 真实 topk 每个 token 的 K 个专家互异，任何专家最多被 T 个 token 选中。**该上限只由 K 决定，与 E
