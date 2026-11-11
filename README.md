@@ -25,6 +25,8 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 `MOONEP_EARLY_PREFETCH` 与专用的 `MOONEP_EARLY_PF_DEV` 已移除，固定采用原 `MOONEP_EARLY_PREFETCH=0` 的行为：不再用同一层上一次执行的 plan 在 attention 前投机预取，也不再安装对应 hook、保存预测行或进行预测修补。旧变量设为 1 不再启用该能力。`MOONEP_PF_STREAM` 仍保留 0/1/2/3 档与默认值 0：关闭、事件诊断、同层真实 planning 后与 dispatch 重叠、进一步与 Home GEMM1 重叠。共享副流/事件、MTE/UDMA 保护及缓存联动继续保留，Home GEMM 模式仍要求关闭持久缓存。`MOONEP_EARLY_PLAN` 独立诊断、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变；历史实验脚本和记录保留原样，最近 GSM8K/LongBench-v2 使用的是 `EARLY_PREFETCH=0` 与 `PF_STREAM=2`。
 
+`MOONEP_NO_PIN` 已移除，固定采用原默认值 0 的行为：Ascend 平台继续声明支持 pinned host memory，原生 Off 与 MoonEP Slot 使用相同的平台能力查询；不改写调用处显式指定的 `pin_memory=False`。旧值 1 不再切换到 pageable memory，原有 `aclrtMallocHostWithCfg` 207001 分配失败的手动规避入口不再提供；本次不修复该分配问题，也不增加失败后自动回退。SHMEM/VMM、权重预取、副流、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变，历史实验脚本和记录保留原样。
+
 ## 已验证（实测）
 
 > 数字来源：`Ascend 950PR / CANN 9.2.0 / torch_npu 2.10.0` 上的实测窗口（dp2ep2 = 2 卡 DP2×TP1 → EP=2）。
