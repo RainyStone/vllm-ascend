@@ -986,7 +986,6 @@ _ENV_REUSE_OUT = os.environ.get("MOONEP_REUSE_OUT", "1") == "1"
 # restores upstream behaviour (shard -> reused tensor -> MLP).
 _ENV_DISPATCH_IN_SHARD = os.environ.get("MOONEP_DISPATCH_IN_SHARD", "1") != "0"
 _ENV_SLOT_MODE = os.environ.get("MOONEP_SLOT_MODE", "0") == "1"
-_ENV_NO_SYNC = os.environ.get("MOONEP_NO_SYNC", "1") != "0"
 _ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
 _ENV_CAP_TRACE = os.environ.get("MOONEP_CAP_TRACE", "0") == "1"
 _ENV_POOL = os.environ.get("MOONEP_POOL", "1") == "1"
@@ -1339,47 +1338,27 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             if sr > 0:
                 s["with_slots"] += 1
             s["prefetch_experts"] += int((plan.experts_to_copy[ep_group.rank_in_group] >= 0).sum().item())
-        if _ENV_NO_SYNC:
-            # Fast path: keep the row count on the device. The MLP takes the
-            # full [NvS, H] shard plus the count-mode `group_list` and the
-            # grouped matmul walks exactly sum(group_list) rows (rows past the
-            # sum are not computed), so no `.item()` is needed -- the combine
-            # masks the untouched tail on the device instead (see combine).
-            # Fresh view object, not `h_nvs` itself: with reuse_outputs (the
-            # default) the library caches the dispatch output *tensor object*
-            # and hands that same object back on every later dispatch
-            # (contract: "valid until the next dispatch"). The MLP consumes it
-            # via dispose_tensor() -> Tensor.set_, which would re-point the
-            # cached object to an empty 1-D tensor, so every later dispatch
-            # returns [0] and the W4A8MXFP grouped matmul dies with
-            # "GroupedMatmul x dim num should be in the range [2, 6], but
-            # actual is 1". The view shares the storage but is disposable
-            # without touching the library's cached tensor.
-            hidden_trim = h_nvs[:]
-            # pre-allocated fp32 snapshot (one cast-copy instead of
-            # clone + to + contiguous, i.e. three allocating ops)
-            w_buf = sc["w"]
-            n = min(int(w_buf.numel()), int(w_nvs.numel()))
-            w_buf[:n].copy_(w_nvs[:n])
-            w_trim = w_buf[:n]
-            tail_masked = True
-        else:
-            # Validated default: read the dispatched row count back to the
-            # host and slice, so the MLP and the combine only ever see real
-            # rows.
-            rows_total = int(local_counts.sum().item())
-            if rows_total < 0 or rows_total > int(K) * capacity:
-                raise RuntimeError(f"MoonEP: invalid dispatched row count {rows_total}.")
-            hidden_trim = h_nvs[:rows_total]
-            # clone: the symmetric weights_buf is shared by all layers
-            w_trim = w_nvs[:rows_total].clone().to(torch.float32).contiguous()
-            tail_masked = False
+        # Keep the row count on the device. The MLP takes the full [NvS, H]
+        # shard plus the count-mode `group_list`; grouped matmul walks exactly
+        # sum(group_list) rows. Combine masks the untouched tail on the device.
+        # This avoids the per-layer row-count `.item()` and host-side slicing;
+        # it does not replace communication barriers or stream event waits.
+        #
+        # Return a disposable view: dispose_tensor() calls Tensor.set_, which
+        # must not mutate the SDK's cached dispatch output tensor object.
+        hidden_trim = h_nvs[:]
+        # Snapshot row weights into the pre-allocated fp32 workspace before
+        # another dispatch can overwrite the shared SDK weights buffer.
+        w_buf = sc["w"]
+        n = min(int(w_buf.numel()), int(w_nvs.numel()))
+        w_buf[:n].copy_(w_nvs[:n])
+        w_trim = w_buf[:n]
         if _ENV_PACE_SYNC:
             torch.npu.synchronize()
         _t3 = time.perf_counter()
 
         self._tstats("disp_lib", _t1, _t2)   # buffer.dispatch host side (planning + launches)
-        self._tstats("disp_post", _t2, _t3)  # counts + the rows_total host sync + w clone
+        self._tstats("disp_post", _t2, _t3)  # device counts + row-weight snapshot
         self._tstats("disp_buf", _t1)
         self._tstats("dispatch", _t0)
         state = (
@@ -1400,7 +1379,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 hidden_shape=hidden_states.shape,
                 state=state,
                 group_list=local_counts,
-                tail_masked=tail_masked,
+                tail_masked=True,
                 source_topk_weights_sk=source_topk_weights_sk,
             ),
         )

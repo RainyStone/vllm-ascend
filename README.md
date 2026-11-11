@@ -185,7 +185,6 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
 | `MOONEP_RELEASE_WEIGHTS=0` | 关闭"释放 vllm 原权重"（默认开：home chunk 接管后释放原张量，省 13.8 GB/卡；仅 bf16 路径，量化 payload 走字节载体、跳过释放） |
 | `MOONEP_PAD_CUT=1` | 实验性：把补零行踢出 grouped GEMM。**实测错误，默认关**（见排障） |
-| `MOONEP_NO_SYNC=0` | 关闭零同步 dispatch（默认开；改回逐层 `.item()` + 切片语义） |
 | `MOONEP_REUSE_OUT=0` | 关闭库内 dispatch 输出复用（默认开） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
 | `ASCEND_MOONEP_TIME_STATS=1` | 库内分段计时（barrier/planning 核/dispatch 核/边界拷贝，`[moonep-lib-tstats]`） |
@@ -195,6 +194,8 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `VLLM_ASCEND_MOE_SIM_ROUTE_EVERY` | 每 N 次调用打一行复用确认（默认 43 = 本模型一步的 MoE 层数；换层数不同的模型要改） |
 | `VLLM_ASCEND_MOE_SIM_ROUTE_TABLE` | 置 0 时只打 per-rank 汇总行，不打逐专家的全表（本模型 256 行） |
 | `DUMP_TOKENS=1` | 导出贪心 token ids（`/tmp/bench_tokids_<TAG>_rank*.json`），用于跨路线对拍 |
+
+MoonEP dispatch 固定将有效行数保留在设备端，通过 count-mode `group_list` 限定 GEMM 工作量，并在 combine 中安全处理容量尾部，不再提供逐层 `.item()` 回读行数的开关。跨 rank 通信屏障、副流事件等待，以及独立开关控制的诊断/调试同步仍保留。
 
 上表 `SIM_ROUTE` 的硬上限是 **`max(share) ≤ 100/top_k`**（本模型 K=6 → 16.67%；K=8 → 12.5%）：
 真实 topk 每个 token 的 K 个专家互异，任何专家最多被 T 个 token 选中。**该上限只由 K 决定，与 E
