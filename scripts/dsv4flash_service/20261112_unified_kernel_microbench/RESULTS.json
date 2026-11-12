@@ -1,0 +1,606 @@
+{
+  "machine": "141.61.45.124",
+  "physical_npu": 0,
+  "scope": "one-card local synthetic operators only; no SHMEM/HCCL/model",
+  "timing_method": "mean of 3 independent process medians; each median uses event-time batches",
+  "initial_sampling": {
+    "warmup": 10,
+    "batches": 7,
+    "iterations_per_batch": 50
+  },
+  "focus_sampling": {
+    "warmup": 500,
+    "batches": 9,
+    "iterations_per_batch": 100
+  },
+  "initial": {
+    "run_files": [
+      "raw/01_split.json",
+      "raw/02_unified.json",
+      "raw/03_unified.json",
+      "raw/04_split.json",
+      "raw/05_split.json",
+      "raw/06_unified.json"
+    ],
+    "correctness_checks": 150,
+    "identical_output_digests_and_correctness_metadata": true,
+    "cases": [
+      {
+        "case": "wire_pack_16",
+        "split_run_medians_us": [
+          20.075619220733643,
+          20.66512107849121,
+          19.631279706954956
+        ],
+        "unified_run_medians_us": [
+          19.965219497680664,
+          19.733099937438965,
+          20.17061948776245
+        ],
+        "split_mean_of_run_medians_us": 20.124006668726604,
+        "unified_mean_of_run_medians_us": 19.956312974294026,
+        "change_percent": -0.8333017236233586,
+        "paired_changes_percent": [
+          -0.5499193914724199,
+          -4.5101170107457955,
+          2.747349071779648
+        ],
+        "split_wall_mean_of_run_medians_us": 21.71266668786605,
+        "unified_wall_mean_of_run_medians_us": 21.47673474003871
+      },
+      {
+        "case": "wire_pack_512",
+        "split_run_medians_us": [
+          19.610999822616577,
+          19.748460054397583,
+          19.31205987930298
+        ],
+        "unified_run_medians_us": [
+          20.021579265594482,
+          19.4541597366333,
+          19.81227993965149
+        ],
+        "split_mean_of_run_medians_us": 19.557173252105713,
+        "unified_mean_of_run_medians_us": 19.762672980626423,
+        "change_percent": 1.050763962008583,
+        "paired_changes_percent": [
+          2.0936181056123493,
+          -1.4902443884415528,
+          2.5901952638651693
+        ],
+        "split_wall_mean_of_run_medians_us": 20.852067197362583,
+        "unified_wall_mean_of_run_medians_us": 21.28839958459139
+      },
+      {
+        "case": "wire_pack_4096",
+        "split_run_medians_us": [
+          33.043479919433594,
+          33.08046102523804,
+          33.0348801612854
+        ],
+        "unified_run_medians_us": [
+          33.08023929595947,
+          33.0361008644104,
+          33.054540157318115
+        ],
+        "split_mean_of_run_medians_us": 33.052940368652344,
+        "unified_mean_of_run_medians_us": 33.056960105895996,
+        "change_percent": 0.012161511801433988,
+        "paired_changes_percent": [
+          0.11124547600769308,
+          -0.1340977708678026,
+          0.0595128419922597
+        ],
+        "split_wall_mean_of_run_medians_us": 35.276200311879315,
+        "unified_wall_mean_of_run_medians_us": 35.807665747900806
+      },
+      {
+        "case": "wire_unpack_full",
+        "split_run_medians_us": [
+          535.7153701782227,
+          535.93994140625,
+          535.6766891479492
+        ],
+        "unified_run_medians_us": [
+          535.8865737915039,
+          536.0417175292969,
+          535.9064483642578
+        ],
+        "split_mean_of_run_medians_us": 535.777333577474,
+        "unified_mean_of_run_medians_us": 535.9449132283529,
+        "change_percent": 0.031277853760625085,
+        "paired_changes_percent": [
+          0.031957943118987586,
+          0.018990210503777583,
+          0.04289139717355006
+        ],
+        "split_wall_mean_of_run_medians_us": 538.582398245732,
+        "unified_wall_mean_of_run_medians_us": 538.7959349900484
+      },
+      {
+        "case": "wire_unpack_bounded_128",
+        "split_run_medians_us": [
+          20.002200603485107,
+          20.71589946746826,
+          19.74571943283081
+        ],
+        "unified_run_medians_us": [
+          20.380818843841553,
+          19.727660417556763,
+          20.072479248046875
+        ],
+        "split_mean_of_run_medians_us": 20.154606501261394,
+        "unified_mean_of_run_medians_us": 20.060319503148396,
+        "change_percent": -0.4678186007109453,
+        "paired_changes_percent": [
+          1.8928829275438597,
+          -4.77043756397546,
+          1.6548387427847588
+        ],
+        "split_wall_mean_of_run_medians_us": 21.542867956062157,
+        "unified_wall_mean_of_run_medians_us": 21.36580025156339
+      },
+      {
+        "case": "wire_unpack_bounded_512",
+        "split_run_medians_us": [
+          20.134880542755127,
+          20.651559829711914,
+          19.769920110702515
+        ],
+        "unified_run_medians_us": [
+          20.23102045059204,
+          19.65898036956787,
+          20.115320682525635
+        ],
+        "split_mean_of_run_medians_us": 20.18545349438985,
+        "unified_mean_of_run_medians_us": 20.001773834228516,
+        "change_percent": -0.909960532778642,
+        "paired_changes_percent": [
+          0.4774794051187303,
+          -4.806317141797656,
+          1.747101505160531
+        ],
+        "split_wall_mean_of_run_medians_us": 21.567801013588905,
+        "unified_wall_mean_of_run_medians_us": 21.467531720797222
+      },
+      {
+        "case": "wire_unpack_bounded_3072",
+        "split_run_medians_us": [
+          26.44887924194336,
+          26.638119220733643,
+          26.493699550628662
+        ],
+        "unified_run_medians_us": [
+          26.47495985031128,
+          26.494719982147217,
+          26.487460136413574
+        ],
+        "split_mean_of_run_medians_us": 26.526899337768555,
+        "unified_mean_of_run_medians_us": 26.485713322957356,
+        "change_percent": -0.15526132280586635,
+        "paired_changes_percent": [
+          0.09860761255455763,
+          -0.538323435668131,
+          -0.023550558513596442
+        ],
+        "split_wall_mean_of_run_medians_us": 29.25900121529897,
+        "unified_wall_mean_of_run_medians_us": 28.686334068576496
+      },
+      {
+        "case": "publish_3072_128",
+        "split_run_medians_us": [
+          29.093680381774902,
+          30.693581104278564,
+          28.495359420776367
+        ],
+        "unified_run_medians_us": [
+          29.549899101257324,
+          28.395040035247803,
+          29.23288106918335
+        ],
+        "split_mean_of_run_medians_us": 29.42754030227661,
+        "unified_mean_of_run_medians_us": 29.05927340189616,
+        "change_percent": -1.251436228096714,
+        "paired_changes_percent": [
+          1.5681024658819487,
+          -7.488670224636495,
+          2.588216690010392
+        ],
+        "split_wall_mean_of_run_medians_us": 30.980400430659454,
+        "unified_wall_mean_of_run_medians_us": 30.367467552423477
+      },
+      {
+        "case": "publish_24576_3072",
+        "split_run_medians_us": [
+          100.41330337524414,
+          100.72509765625,
+          97.64182090759277
+        ],
+        "unified_run_medians_us": [
+          100.0576400756836,
+          97.44427680969238,
+          100.14911651611328
+        ],
+        "split_mean_of_run_medians_us": 99.59340731302898,
+        "unified_mean_of_run_medians_us": 99.21701113382976,
+        "change_percent": -0.3779328264331583,
+        "paired_changes_percent": [
+          -0.3541993815614597,
+          -3.257202944348836,
+          2.567850113009862
+        ],
+        "split_wall_mean_of_run_medians_us": 101.89153254032135,
+        "unified_wall_mean_of_run_medians_us": 101.62386888017257
+      },
+      {
+        "case": "publish_24576_24576",
+        "split_run_medians_us": [
+          174.91214752197266,
+          175.74317932128906,
+          175.01056671142578
+        ],
+        "unified_run_medians_us": [
+          175.20750045776367,
+          174.9287223815918,
+          175.42356491088867
+        ],
+        "split_mean_of_run_medians_us": 175.22196451822916,
+        "unified_mean_of_run_medians_us": 175.18659591674805,
+        "change_percent": -0.020185027361352414,
+        "paired_changes_percent": [
+          0.16885787521070394,
+          -0.46343587434952704,
+          0.235984722079019
+        ],
+        "split_wall_mean_of_run_medians_us": 177.82053289314112,
+        "unified_wall_mean_of_run_medians_us": 178.20153385400772
+      },
+      {
+        "case": "gmm_bf16_small_home",
+        "split_run_medians_us": [
+          175.74111938476562,
+          175.72830200195312,
+          175.9486198425293
+        ],
+        "unified_run_medians_us": [
+          175.58086395263672,
+          175.45814514160156,
+          175.63745498657227
+        ],
+        "split_mean_of_run_medians_us": 175.80601374308267,
+        "unified_mean_of_run_medians_us": 175.55882136027017,
+        "change_percent": -0.14060519179607267,
+        "paired_changes_percent": [
+          -0.09118835289654292,
+          -0.15373554360558206,
+          -0.1768498418660669
+        ],
+        "split_wall_mean_of_run_medians_us": 178.1740008542935,
+        "unified_wall_mean_of_run_medians_us": 178.12613397836685
+      },
+      {
+        "case": "gmm_bf16_small_slot",
+        "split_run_medians_us": [
+          176.4485740661621,
+          176.4640235900879,
+          176.3076400756836
+        ],
+        "unified_run_medians_us": [
+          176.47947311401367,
+          176.24704360961914,
+          176.25694274902344
+        ],
+        "split_mean_of_run_medians_us": 176.40674591064453,
+        "unified_mean_of_run_medians_us": 176.32781982421875,
+        "change_percent": -0.0447409683900446,
+        "paired_changes_percent": [
+          0.01751164497365565,
+          -0.12295989633148707,
+          -0.02875503672919999
+        ],
+        "split_wall_mean_of_run_medians_us": 178.6972659950455,
+        "unified_wall_mean_of_run_medians_us": 178.9124667023619
+      },
+      {
+        "case": "gmm_bf16_small_full",
+        "split_run_medians_us": [
+          347.26829528808594,
+          347.1163558959961,
+          346.9997787475586
+        ],
+        "unified_run_medians_us": [
+          347.2096633911133,
+          346.9398880004883,
+          347.30743408203125
+        ],
+        "split_mean_of_run_medians_us": 347.1281433105469,
+        "unified_mean_of_run_medians_us": 347.15232849121094,
+        "change_percent": 0.00696721978039605,
+        "paired_changes_percent": [
+          -0.01688374601661602,
+          -0.05083825423677357,
+          0.08866153620705752
+        ],
+        "split_wall_mean_of_run_medians_us": 349.52346701174974,
+        "unified_wall_mean_of_run_medians_us": 349.75559916347265
+      },
+      {
+        "case": "gmm_bf16_prefill_home",
+        "split_run_medians_us": [
+          377.06504821777344,
+          376.5447998046875,
+          377.24910736083984
+        ],
+        "unified_run_medians_us": [
+          376.2206268310547,
+          376.3944625854492,
+          376.18404388427734
+        ],
+        "split_mean_of_run_medians_us": 376.9529851277669,
+        "unified_mean_of_run_medians_us": 376.26637776692706,
+        "change_percent": -0.1821466835199903,
+        "paired_changes_percent": [
+          -0.2239458127211713,
+          -0.03992545357585087,
+          -0.282323657175354
+        ],
+        "split_wall_mean_of_run_medians_us": 380.2212669203679,
+        "unified_wall_mean_of_run_medians_us": 378.9912676438689
+      },
+      {
+        "case": "gmm_bf16_prefill_slot",
+        "split_run_medians_us": [
+          378.19114685058594,
+          377.51346588134766,
+          377.7326965332031
+        ],
+        "unified_run_medians_us": [
+          377.3424530029297,
+          378.5525894165039,
+          377.28187561035156
+        ],
+        "split_mean_of_run_medians_us": 377.8124364217122,
+        "unified_mean_of_run_medians_us": 377.7256393432617,
+        "change_percent": -0.022973589560093544,
+        "paired_changes_percent": [
+          -0.22440870303913618,
+          0.2752546939564837,
+          -0.11934919242870823
+        ],
+        "split_wall_mean_of_run_medians_us": 381.2772672002514,
+        "unified_wall_mean_of_run_medians_us": 380.29059922943514
+      },
+      {
+        "case": "gmm_bf16_prefill_full",
+        "split_run_medians_us": [
+          749.0144348144531,
+          748.9503479003906,
+          749.9632263183594
+        ],
+        "unified_run_medians_us": [
+          748.8078308105469,
+          748.7593078613281,
+          748.7832641601562
+        ],
+        "split_mean_of_run_medians_us": 749.309336344401,
+        "unified_mean_of_run_medians_us": 748.7834676106771,
+        "change_percent": -0.07018045928660621,
+        "paired_changes_percent": [
+          -0.027583447568324537,
+          -0.025507704161975564,
+          -0.15733600219248745
+        ],
+        "split_wall_mean_of_run_medians_us": 752.0772004500031,
+        "unified_wall_mean_of_run_medians_us": 751.7304659510652
+      },
+      {
+        "case": "gmm_mxfp4_small_home",
+        "split_run_medians_us": [
+          41.70931816101074,
+          41.60347938537598,
+          41.85408115386963
+        ],
+        "unified_run_medians_us": [
+          41.48116111755371,
+          41.60952091217041,
+          41.700921058654785
+        ],
+        "split_mean_of_run_medians_us": 41.72229290008545,
+        "unified_mean_of_run_medians_us": 41.59720102945963,
+        "change_percent": -0.2998202206321188,
+        "paired_changes_percent": [
+          -0.5470169581201834,
+          0.014521686367796605,
+          -0.3659382573751313
+        ],
+        "split_wall_mean_of_run_medians_us": 44.28766823063294,
+        "unified_wall_mean_of_run_medians_us": 43.83866675198078
+      },
+      {
+        "case": "gmm_mxfp4_small_slot",
+        "split_run_medians_us": [
+          41.66790008544922,
+          41.565799713134766,
+          41.759161949157715
+        ],
+        "unified_run_medians_us": [
+          41.59709930419922,
+          41.48484230041504,
+          41.62553787231445
+        ],
+        "split_mean_of_run_medians_us": 41.66428724924723,
+        "unified_mean_of_run_medians_us": 41.569159825642906,
+        "change_percent": -0.22831885503104,
+        "paired_changes_percent": [
+          -0.16991684511292737,
+          -0.19476928936397186,
+          -0.3199874485171672
+        ],
+        "split_wall_mean_of_run_medians_us": 44.14146455625693,
+        "unified_wall_mean_of_run_medians_us": 43.73013352354368
+      },
+      {
+        "case": "gmm_mxfp4_small_full",
+        "split_run_medians_us": [
+          80.26989936828613,
+          78.10808181762695,
+          78.87199878692627
+        ],
+        "unified_run_medians_us": [
+          79.02177810668945,
+          78.3965015411377,
+          80.96976280212402
+        ],
+        "split_mean_of_run_medians_us": 79.08332665761311,
+        "unified_mean_of_run_medians_us": 79.46268081665039,
+        "change_percent": 0.4796891773150458,
+        "paired_changes_percent": [
+          -1.5549057260806798,
+          0.3692572097522051,
+          2.659706926998129
+        ],
+        "split_wall_mean_of_run_medians_us": 81.82219850520293,
+        "unified_wall_mean_of_run_medians_us": 81.9593978424867
+      },
+      {
+        "case": "gmm_mxfp4_prefill_home",
+        "split_run_medians_us": [
+          127.48244285583496,
+          127.33378410339355,
+          127.46983528137207
+        ],
+        "unified_run_medians_us": [
+          127.3749828338623,
+          127.24357604980469,
+          127.45282173156738
+        ],
+        "split_mean_of_run_medians_us": 127.42868741353352,
+        "unified_mean_of_run_medians_us": 127.3571268717448,
+        "change_percent": -0.05615732472900037,
+        "paired_changes_percent": [
+          -0.0842939777159546,
+          -0.07084377035054823,
+          -0.01334711837285285
+        ],
+        "split_wall_mean_of_run_medians_us": 130.16900047659874,
+        "unified_wall_mean_of_run_medians_us": 129.86766640096903
+      },
+      {
+        "case": "gmm_mxfp4_prefill_slot",
+        "split_run_medians_us": [
+          129.21409606933594,
+          127.89713859558105,
+          128.32114219665527
+        ],
+        "unified_run_medians_us": [
+          127.70153999328613,
+          127.83346176147461,
+          128.4274196624756
+        ],
+        "split_mean_of_run_medians_us": 128.47745895385742,
+        "unified_mean_of_run_medians_us": 127.98747380574544,
+        "change_percent": -0.38137829943224455,
+        "paired_changes_percent": [
+          -1.1705813236027818,
+          -0.049787536144807465,
+          0.08282147742844082
+        ],
+        "split_wall_mean_of_run_medians_us": 131.31746711830297,
+        "unified_wall_mean_of_run_medians_us": 129.88320086151361
+      },
+      {
+        "case": "gmm_mxfp4_prefill_full",
+        "split_run_medians_us": [
+          253.5869026184082,
+          297.5295829772949,
+          302.75489807128906
+        ],
+        "unified_run_medians_us": [
+          297.87057876586914,
+          295.3963851928711,
+          294.8748207092285
+        ],
+        "split_mean_of_run_medians_us": 284.62379455566406,
+        "unified_mean_of_run_medians_us": 296.04726155598956,
+        "change_percent": 4.013531974077944,
+        "paired_changes_percent": [
+          17.462919295204294,
+          -0.7169699775993799,
+          -2.602791040627539
+        ],
+        "split_wall_mean_of_run_medians_us": 287.13379986584187,
+        "unified_wall_mean_of_run_medians_us": 299.20619912445545
+      }
+    ]
+  },
+  "focused_confirmation": {
+    "run_files": [
+      "raw/focus_01_split.json",
+      "raw/focus_02_unified.json",
+      "raw/focus_03_unified.json",
+      "raw/focus_04_split.json",
+      "raw/focus_05_split.json",
+      "raw/focus_06_unified.json"
+    ],
+    "correctness_checks": 18,
+    "identical_output_digests_and_correctness_metadata": true,
+    "cases": [
+      {
+        "case": "gmm_mxfp4_prefill_full",
+        "split_run_medians_us": [
+          313.980770111084,
+          322.1142578125,
+          323.0331802368164
+        ],
+        "unified_run_medians_us": [
+          317.84692764282227,
+          320.22533416748047,
+          325.2030944824219
+        ],
+        "split_mean_of_run_medians_us": 319.7094027201335,
+        "unified_mean_of_run_medians_us": 321.0917854309082,
+        "change_percent": 0.4323872551176722,
+        "paired_changes_percent": [
+          1.2313357695028504,
+          -0.5864141680183121,
+          0.6717310723358905
+        ],
+        "split_wall_mean_of_run_medians_us": 321.05153348917764,
+        "unified_wall_mean_of_run_medians_us": 322.54763258000213
+      }
+    ]
+  },
+  "libraries": {
+    "split": {
+      "libascend_moonep_home_gmm.so": {
+        "bytes": 988376,
+        "sha256": "ebc00cac2f3ec8f0bcead6f308f734c8b0802e91ba656895d0852e3da07f9e54"
+      },
+      "libascend_moonep_kernels.so": {
+        "bytes": 1145000,
+        "sha256": "feb69446f10c9077887029ae4da23d3433377e2cead4cf33a40e9d556e7455be"
+      },
+      "libascend_moonep_mxfp8_wire.so": {
+        "bytes": 562472,
+        "sha256": "1ba2305a2d5c8076ad7dd4c851a95f6ca88bc5e9c9ffaa142c1dfa0862e5f28f"
+      },
+      "libascend_moonep_publish.so": {
+        "bytes": 554192,
+        "sha256": "e69aafba0bb53c235fa418409f41eeba7339d9a4e98bb6abe14bbc872856dacc"
+      }
+    },
+    "unified": {
+      "bytes": 1628920,
+      "sha256": "b8426920c57802eb25155f25f2fae19941b091cdb5d5a2c4a7f4eb086956352a"
+    }
+  },
+  "total_correctness_checks": 168,
+  "limits": [
+    "Other NPUs had unrelated tasks; package power/clock variation was not isolated.",
+    "Event spans include gaps between host submissions; these are not per-instruction hardware traces.",
+    "The initial MXFP4 prefill-full timing drift is retained, not discarded.",
+    "Focused confirmation uses its own identical synthetic inputs on both variants and longer warmup.",
+    "Three repeats support an exploratory comparison, not proof of zero performance impact.",
+    "No multi-rank communication, real-weight model or Home-GEMM-overlap end-to-end benchmark was run."
+  ]
+}

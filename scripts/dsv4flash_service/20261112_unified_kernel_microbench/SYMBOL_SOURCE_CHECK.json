@@ -1,0 +1,18 @@
+{
+  "old_exports_preserved": true,
+  "required_entry_points": [
+    "moonep_home_gmm_bf16",
+    "moonep_home_gmm_bf16_plan",
+    "moonep_home_gmm_bf16_plan_size",
+    "moonep_home_gmm_core_count",
+    "moonep_home_gmm_mxfp4",
+    "moonep_mxfp8_wire",
+    "moonep_mxfp8_wire_abi",
+    "moonep_mxfp8_wire_bounded",
+    "moonep_publish",
+    "moonep_publish_abi"
+  ],
+  "unified_export_count": 1248,
+  "kernel_source_hashes_unchanged": true,
+  "new_library_sha256": "b8426920c57802eb25155f25f2fae19941b091cdb5d5a2c4a7f4eb086956352a"
+}

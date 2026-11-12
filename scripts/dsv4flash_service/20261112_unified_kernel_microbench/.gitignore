@@ -1,0 +1,5 @@
+artifacts/
+raw/
+*.log
+__pycache__/
+RUN_STATUS*.json

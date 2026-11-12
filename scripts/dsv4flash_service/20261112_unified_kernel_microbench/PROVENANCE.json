@@ -1,0 +1,54 @@
+{
+  "machine": "141.61.45.124",
+  "physical_npu": 0,
+  "repositories": {
+    "ascend-moonep": "8841a3b7f4ab711fc0fc48f10dc43604d4c71a25",
+    "vllm-ascend": "0404f3452457fff1d3d6c88d7ed98e20b6411437"
+  },
+  "kernel_source_sha256": {
+    "kernels/moonep_combine.cpp": "d55a83c4502824d1f52a395816a5fe85c607a2b1a1f1ad521761f519322e60ec",
+    "kernels/moonep_combine_udma.cpp": "a628e0912f57d1739a89c0a34fe3240aae4d5ab6557775b4f2ca57aee2a76e1b",
+    "kernels/prefetch_udma.cpp": "c716f11348b69ad58c43332cd6ee0b88ab54ccade790b4510b3fe06798b10c7f",
+    "kernels/moonep_dispatch.cpp": "3ab9b6c2c635424c20e7cc4cdda8608b25836336c123e968f0ed9e5ddba76496",
+    "kernels/moonep_dispatch_udma.cpp": "407cbbb8699caca8cea16f4ef8fdcc8bab6046438e0ce502ef9768a52b3010e3",
+    "kernels/prefetch.cpp": "2f0d3f091a9d0490cdf82777b463e0f67f68b1a72a61da414c602a188feac1c8",
+    "kernels/planning.cpp": "cdc58b941559b65295e8f838a212c3edd2b5226945a7beb593fb1837a169daf2",
+    "kernels/allgather_matmul.cpp": "29e2fc5e9de197409f40c56552058f1c2a16f40e8f12f87eb0b8f99927a34082",
+    "kernels/home_gmm_mx_controller.h": "8996fa246aae4b3bc69ba1a01e4ce252eda1c8f65c8fc5eb188d4ca4e99b8e73",
+    "kernels/home_gmm_range.cpp": "0fb7f468bf2b241f6051ee1ed1883cc4e213f94cd7d523107ff058eb1e927035",
+    "kernels/mxfp8_wire.cpp": "2b1aa325f95706a5676eb4acd931964ce0677bb673a399c3a2e6fdcdffc21c90",
+    "kernels/combine_publish.cpp": "4f0c6e190c052251c294e24533004232a1dbf3b848811430338587115a6a4e1b"
+  },
+  "source_sha256": {
+    "ascend-moonep/CMakeLists.txt": "63a352d37dfad0aedc1b596a9519c371eb6adf4c8d3e24773c4ea13c8ac8b21e",
+    "ascend-moonep/cmake/AscendMoonEPKernel.cmake": "aa145f05d429de3750097179aad32277f6d799b8e4e107ecfa0fac2d274742f6",
+    "ascend-moonep/ascend_moonep/mxfp8_transport.py": "13707678679d43aa0705ec8c60dc837da5e6a26e509a430c8f41e514b1fd3b53",
+    "ascend-moonep/ascend_moonep/combine_publish.py": "1d60f4064b42f1c1d6ecc46a70879bc1b960518f61ce3de1f3699e4b2ac884da",
+    "ascend-moonep/ascend_moonep/home_gmm.py": "212eeb642c8f1a36a3e3d962cc27bc295e41d4a9c93bea1d65321f072ceac30a",
+    "vllm-ascend/scripts/dsv4flash_service/20261112_unified_kernel_microbench/bench_unified_kernels.py": "ac0a145312e401f47b0086598ed9344cd545ef8eab65fe3ca68c75a58d5e61e5",
+    "vllm-ascend/scripts/dsv4flash_service/20261112_unified_kernel_microbench/artifacts/initial_bench_unified_kernels.py": "87f32ed5c077031b0e41432f939b9f7044258b18bd5b235c6ff694fe4e7c92f4"
+  },
+  "old_binaries": {
+    "ascend_moonep/lib/libascend_moonep_home_gmm.so": {
+      "sha256": "ebc00cac2f3ec8f0bcead6f308f734c8b0802e91ba656895d0852e3da07f9e54",
+      "size": 988376
+    },
+    "ascend_moonep/lib/libascend_moonep_kernels.so": {
+      "sha256": "feb69446f10c9077887029ae4da23d3433377e2cead4cf33a40e9d556e7455be",
+      "size": 1145000
+    },
+    "ascend_moonep/lib/libascend_moonep_mxfp8_wire.so": {
+      "sha256": "1ba2305a2d5c8076ad7dd4c851a95f6ca88bc5e9c9ffaa142c1dfa0862e5f28f",
+      "size": 562472
+    },
+    "ascend_moonep/lib/libascend_moonep_publish.so": {
+      "sha256": "e69aafba0bb53c235fa418409f41eeba7339d9a4e98bb6abe14bbc872856dacc",
+      "size": 554192
+    }
+  },
+  "unified_binary": "b8426920c57802eb25155f25f2fae19941b091cdb5d5a2c4a7f4eb086956352a",
+  "model_experiment_run": false,
+  "multi_rank_experiment_run": false,
+  "other_cards_had_tasks": true,
+  "scope": "local one-card synthetic wire/publish/BF16 dense ND and MXFP4 NZ GEMM1 only"
+}
