@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU checks for fixed startup warmup and SHMEM initialization ordering."""
 import ast
+import importlib.util
 import io
 import os
 import sys
@@ -123,7 +124,11 @@ class WarmupTests(unittest.TestCase):
 class StartupOrderingTests(unittest.TestCase):
     def make_initialization(self, bootstrap):
         events = []
-        namespace = {}
+        spec = importlib.util.spec_from_file_location(
+            "bootstrap_warmup_envs", SOURCE.parents[2] / "envs.py")
+        envs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(envs)
+        namespace = {"envs": envs}
         tree = ast.parse(SOURCE.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_MoonEPRuntime")
         method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_initialize_locked")
@@ -149,7 +154,7 @@ class StartupOrderingTests(unittest.TestCase):
         }
 
         def initialize():
-            with patch.dict(os.environ, {"MOONEP_SHMEM_BOOTSTRAP": bootstrap,
+            with patch.dict(os.environ, {"MOONEP_SHMEM_BOOTSTRAP_TYPE": bootstrap,
                                          "MOONEP_SHMEM_IP_PORT": "28765"}), patch.dict(
                 sys.modules, modules
             ), redirect_stdout(io.StringIO()):

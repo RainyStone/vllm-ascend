@@ -787,11 +787,11 @@ class _MoonEPRuntime:
             # 冲突（实测 UB_INLINE_WRITE/HD Put 任务异常 → 全体自旋）。ipport
             # 只在本机 rank0 起 config-store，无 HCCL 广播，引擎内实测通过
             # （2026-09-09：uid 卡 init_with_buffer:182，ipport 可到首层 MoE
-            # dispatch）。standalone torchrun 无此问题，可用 MOONEP_SHMEM_BOOTSTRAP=uid 覆盖。
-            bootstrap = os.environ.get("MOONEP_SHMEM_BOOTSTRAP", "ipport")
+            # dispatch）。standalone torchrun 无此问题，可用 MOONEP_SHMEM_BOOTSTRAP_TYPE=uid 覆盖。
+            bootstrap = envs.MOONEP_SHMEM_BOOTSTRAP_TYPE
             print(
                 f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-enter "
-                f"bootstrap={bootstrap}",
+                f"bootstrap_type={bootstrap}",
                 flush=True,
             )
             if bootstrap == "ipport":

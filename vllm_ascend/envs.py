@@ -49,9 +49,21 @@ def _moonep_cached_redundant_expert_count() -> int:
     return value
 
 
+def _moonep_shmem_bootstrap_type() -> str:
+    value = os.getenv("MOONEP_SHMEM_BOOTSTRAP_TYPE", "ipport")
+    if value not in ("ipport", "uid"):
+        raise ValueError(
+            f"MOONEP_SHMEM_BOOTSTRAP_TYPE must be ipport or uid, got {value!r}"
+        )
+    return value
+
+
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # SHMEM startup bootstrap: ipport (default, TCP config store) or uid.
+    # Non-sensitive; exact lowercase values only, no whitespace normalization.
+    "MOONEP_SHMEM_BOOTSTRAP_TYPE": _moonep_shmem_bootstrap_type,
     # Manual MoonEP pool token-capacity tiers: comma-separated integers.
     # Non-sensitive; unset/empty selects automatic generation. Parsing, sorting,
     # deduplication and maximum-capacity handling stay in the ladder builder.

@@ -130,7 +130,7 @@ export PYTHONPATH=/path/to/this/repo:$PYTHONPATH   # ascend_moonep 由 ascend-mo
 export ASCEND_CUSTOM_OPP_PATH=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export MOONEP=1 MOONEP_SHMEM_BOOTSTRAP=ipport      # 引擎必须 ipport(config-store)引导,见限制#1
+export MOONEP=1 MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport      # 引擎必须 ipport(config-store)引导,见限制#1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False  # URMA 必需,见限制#1②
 export MOONEP_DISABLE_UDMA=1             # MTE 内核(无需 URMA 时;开 URMA 去掉此行)
 ```
@@ -235,6 +235,10 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+SHMEM 引导参数迁移：`MOONEP_SHMEM_BOOTSTRAP` 已重命名为 `MOONEP_SHMEM_BOOTSTRAP_TYPE`，只保留新名称的中央注册与读取，不提供旧名兼容别名。默认仍为 `ipport`；旧名单独设置（包括旧值 `uid`）时被忽略而采用新默认，新旧同时存在时仅采用新名。历史实验脚本与结果不改写，重跑旧 UID 配置前需迁移参数。
+
+新参数严格接受精确小写 `ipport` 或 `uid`：不自动去空格或转换大小写，空字符串、拼写错误及其他值在初始化读取处明确报错，不再像旧代码那样进入 UID 分支。`ipport` 仍使用 vLLM 的 DP master 地址及 `MOONEP_SHMEM_IP_PORT`（默认28765）建立 config store，并保留多机地址校验；`uid` 仍调用 SDK 的 UID/HCCL 广播初始化。AICPU 预热、引导读取、SHMEM 初始化和权重发布顺序不变，不增加逐层推理查询。两者只选择启动引导方式，不改变 MTE/UDMA 传输、副流 QP 或其他优化；本次不修复或重新验证历史 UID 初始化故障。
+
 容量池档位参数迁移：`MOONEP_POOL_CAPS` 已重命名为 `MOONEP_POOL_TOKEN_CAPACITY_TIERS`，表示逗号分隔的 token 容量档位列表；`MOONEP_POOL_MAX_RUNGS` 已重命名为 `MOONEP_POOL_MAX_TIER_COUNT`，表示自动生成档位的数量目标，默认仍为 32。只保留新名称，不提供旧名兼容别名；仅设置旧名时采用新的默认行为（自动生成、档数目标32），新旧同时存在时仅采用新名。
 
 手动档位未设置或为空字符串时仍自动生成；非空配置保持原整数解析、忽略空项、去重、升序、过滤超过最大容量的值及补上最大档的行为，不新增数值校验。手动模式仍跳过档数目标及内存预算的读取和解析；自动模式仍受原档数目标和估算预算共同控制，基础档与最大档继续保留。所有档位仍在 SHMEM 初始化前预分配，运行时按跨 DP 一致的 token 数选择满足需求的最小档。历史脚本及结果不改写，重跑自定义档位/档数实验前需迁移新名称。
@@ -242,7 +246,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | 开关 | 作用 |
 |---|---|
 | `MOONEP=1`（additional_config `enable_moonep`） | 启用 MoonEP comm（需 EP>1） |
-| `MOONEP_SHMEM_BOOTSTRAP=ipport` | shmem 引导方式（**引擎内必须 ipport**，默认已改；uid 走 HCCL 广播会死锁，见限制#1） |
+| `MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport` | SHMEM 引导类型，只接受 `ipport`/`uid`，默认 `ipport`；引擎沿用 config-store 路径，UID/HCCL 广播的历史故障见限制#1 |
 | `MOONEP_SHMEM_IP_PORT` | ipport 引导的 config-store 端口（默认 28765） |
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
@@ -285,7 +289,7 @@ MoonEP 启用且 EP>1 时，首次运行时初始化固定在 SHMEM 集体初始
 1. **引擎内 UDMA 路径已可用（2026-09-09 实测定案）**，两个坑：
    - **① shmem 引导**：默认 `uid` bootstrap 在引擎的 HCCL 组上做 UID 广播会触发
      设备任务异常（`UB_INLINE_WRITE` / `[HDCommunicate][Put] Invalid length` +
-     `Device oom 0x7110012`）→ 死锁。**必须 `MOONEP_SHMEM_BOOTSTRAP=ipport`**
+     `Device oom 0x7110012`）→ 死锁。**必须 `MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport`**
      （config-store，无 HCCL 广播）；代码默认已改 ipport。
    - **② torch_npu `expandable_segments` 分配器 × URMA 上下文死锁（根因已定）**：
      vllm-ascend 默认设 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`；
