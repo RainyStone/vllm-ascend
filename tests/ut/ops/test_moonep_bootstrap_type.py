@@ -115,7 +115,7 @@ class BootstrapTypeTests(unittest.TestCase):
 
     def test_ipport_keeps_explicit_multinode_address_and_port(self):
         h = self.harness(address="141.61.45.118", dp=16, local_dp=8)
-        h.run({NEW: "ipport", "MOONEP_SHMEM_IP_PORT": "28766"})
+        h.run({NEW: "ipport", "MOONEP_SHMEM_BOOTSTRAP_PORT": "28766"})
         self.assertEqual(h.calls[0]["ip_port"], "tcp://141.61.45.118:28766")
 
     def test_multinode_loopback_and_missing_master_remain_errors(self):
@@ -129,7 +129,7 @@ class BootstrapTypeTests(unittest.TestCase):
 
     def test_uid_skips_ipport_only_config_and_port_parsing(self):
         h = self.harness(address=None)
-        output = h.run({NEW: "uid", "MOONEP_SHMEM_IP_PORT": "invalid"})
+        output = h.run({NEW: "uid", "MOONEP_SHMEM_BOOTSTRAP_PORT": "invalid"})
         self.assertEqual(h.events, ["warmup", "uid"])
         self.assertEqual(h.calls[0], dict(group=h.group, enable_udma=False, prefetch_overlap=False))
         h.config_fn.assert_not_called()
@@ -162,6 +162,81 @@ class BootstrapTypeTests(unittest.TestCase):
             strings = {n.value for n in ast.walk(ast.parse(path.read_text()))
                        if isinstance(n, ast.Constant) and isinstance(n.value, str)}
             self.assertNotIn(OLD, strings)
+
+
+    def test_port_registration_default_and_old_name_removed(self):
+        self.assertIn("MOONEP_SHMEM_BOOTSTRAP_PORT", self.envs.env_variables)
+        self.assertNotIn("MOONEP_SHMEM_IP_PORT", self.envs.env_variables)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.envs.MOONEP_SHMEM_BOOTSTRAP_PORT, 28765)
+            with self.assertRaises(AttributeError):
+                getattr(self.envs, "MOONEP_SHMEM_IP_PORT")
+
+    def test_port_preserves_integer_parsing_without_new_range_checks(self):
+        for raw, expected in (("28765", 28765), (" +028766 ", 28766), ("0", 0), ("-1", -1), ("70000", 70000)):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"MOONEP_SHMEM_BOOTSTRAP_PORT": raw}, clear=True):
+                self.assertEqual(self.envs.MOONEP_SHMEM_BOOTSTRAP_PORT, expected)
+
+    def test_old_port_values_are_ignored(self):
+        for raw in ("28766", "0", "-1", "invalid", ""):
+            with self.subTest(raw=raw):
+                h = self.harness()
+                h.run({"MOONEP_SHMEM_IP_PORT": raw})
+                self.assertEqual(h.calls[0]["ip_port"], "tcp://127.0.0.1:28765")
+
+    def test_new_port_takes_precedence_over_old(self):
+        h = self.harness()
+        h.run({"MOONEP_SHMEM_BOOTSTRAP_PORT": "28766", "MOONEP_SHMEM_IP_PORT": "invalid"})
+        self.assertEqual(h.calls[0]["ip_port"], "tcp://127.0.0.1:28766")
+
+    def test_invalid_new_port_does_not_fall_back_or_initialize(self):
+        for raw in ("", "invalid", "1.5"):
+            with self.subTest(raw=raw):
+                h = self.harness()
+                with self.assertRaises(ValueError):
+                    h.run({"MOONEP_SHMEM_BOOTSTRAP_PORT": raw, "MOONEP_SHMEM_IP_PORT": "28765"})
+                self.assertEqual(h.calls, [])
+                self.assertEqual(h.events, ["warmup"])
+
+    def test_uid_does_not_read_new_port_even_with_invalid_value(self):
+        h = self.harness()
+        getter = Mock(side_effect=AssertionError("UID must not read the port"))
+        with patch.dict(self.envs.env_variables, {"MOONEP_SHMEM_BOOTSTRAP_PORT": getter}):
+            h.run({NEW: "uid", "MOONEP_SHMEM_BOOTSTRAP_PORT": "invalid"})
+        getter.assert_not_called()
+        self.assertEqual(h.events, ["warmup", "uid"])
+
+    def test_ipport_reads_port_once_at_initialization(self):
+        h = self.harness()
+        getter = Mock(return_value=28767)
+        with patch.dict(self.envs.env_variables, {"MOONEP_SHMEM_BOOTSTRAP_PORT": getter}):
+            h.run({NEW: "ipport"})
+        getter.assert_called_once_with()
+        self.assertEqual(h.calls[0]["ip_port"], "tcp://127.0.0.1:28767")
+
+    def test_port_uses_existing_dp_master_ip_without_changing_it(self):
+        h = self.harness(address="141.61.45.118", dp=16, local_dp=8)
+        h.run({"MOONEP_SHMEM_BOOTSTRAP_PORT": "28768"})
+        self.assertEqual(h.calls[0]["ip_port"], "tcp://141.61.45.118:28768")
+
+    def test_initialized_runtime_does_not_read_port_again(self):
+        h = self.harness(initialized=True)
+        getter = Mock(side_effect=AssertionError("Existing runtime must not reread port"))
+        with patch.dict(self.envs.env_variables, {"MOONEP_SHMEM_BOOTSTRAP_PORT": getter}):
+            h.run({"MOONEP_SHMEM_BOOTSTRAP_PORT": "invalid"})
+        getter.assert_not_called()
+        self.assertEqual(h.calls, [])
+
+    def test_port_runtime_uses_new_central_key_only(self):
+        tree = ast.parse(COMM.read_text())
+        reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                 and isinstance(n.value, ast.Name) and n.value.id == "envs"
+                 and n.attr == "MOONEP_SHMEM_BOOTSTRAP_PORT"]
+        self.assertEqual(len(reads), 1)
+        for path in (COMM, ROOT / "vllm_ascend/envs.py"):
+            strings = {n.value for n in ast.walk(ast.parse(path.read_text()))
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            self.assertNotIn("MOONEP_SHMEM_IP_PORT", strings)
 
 
 if __name__ == "__main__":

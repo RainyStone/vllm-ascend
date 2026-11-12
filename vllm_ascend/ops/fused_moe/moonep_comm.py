@@ -799,7 +799,7 @@ class _MoonEPRuntime:
                 # tests validated) instead of the UID-over-HCCL broadcast.
                 from ascend_moonep.buffer_c import symmetric_descriptors
 
-                port = int(os.environ.get("MOONEP_SHMEM_IP_PORT", "28765"))
+                port = envs.MOONEP_SHMEM_BOOTSTRAP_PORT
                 # All nodes must connect to the same rank-0 config store.
                 # Use vLLM's existing cluster address; keep loopback valid for
                 # single-node deployments, but reject it for a multi-node group.

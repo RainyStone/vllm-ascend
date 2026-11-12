@@ -61,6 +61,10 @@ def _moonep_shmem_bootstrap_type() -> str:
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # SHMEM ipport bootstrap's TCP port only; IP comes from vLLM's DP master.
+    # Non-sensitive; integer, default 28765. Read only for the ipport branch;
+    # preserve existing integer parsing without adding port-range validation.
+    "MOONEP_SHMEM_BOOTSTRAP_PORT": lambda: int(os.getenv("MOONEP_SHMEM_BOOTSTRAP_PORT", "28765")),
     # SHMEM startup bootstrap: ipport (default, TCP config store) or uid.
     # Non-sensitive; exact lowercase values only, no whitespace normalization.
     "MOONEP_SHMEM_BOOTSTRAP_TYPE": _moonep_shmem_bootstrap_type,

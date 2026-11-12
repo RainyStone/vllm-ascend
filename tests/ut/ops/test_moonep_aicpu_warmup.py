@@ -155,7 +155,7 @@ class StartupOrderingTests(unittest.TestCase):
 
         def initialize():
             with patch.dict(os.environ, {"MOONEP_SHMEM_BOOTSTRAP_TYPE": bootstrap,
-                                         "MOONEP_SHMEM_IP_PORT": "28765"}), patch.dict(
+                                         "MOONEP_SHMEM_BOOTSTRAP_PORT": "28765"}), patch.dict(
                 sys.modules, modules
             ), redirect_stdout(io.StringIO()):
                 exec(compile(ast.Module(body=[block], type_ignores=[]), str(SOURCE), "exec"), namespace)

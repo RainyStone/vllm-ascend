@@ -235,9 +235,13 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+SHMEM 引导端口迁移：`MOONEP_SHMEM_IP_PORT` 已重命名为 `MOONEP_SHMEM_BOOTSTRAP_PORT`，只保留新名称的中央注册与读取，不提供旧名兼容别名；默认仍为28765。值只表示整数端口，IP继续来自vLLM的DP master配置，并按原方式组装 `tcp://IP:端口`。旧名单独设置时被忽略而采用新默认，新旧同时存在时仅采用新名；历史脚本与结果不改写，自定义旧端口的配置重跑前需迁移。
+
+该参数仍只在 `MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport` 分支、原初始化位置读取，保留int解析和现有校验策略，不新增端口范围限制；非整数在该分支报错。`uid` 分支不读取或解析端口，即使端口值非法也不影响其选择。多机地址检查、AICPU预热/SHMEM初始化顺序、SDK的 `ip_port` 接口参数以及MTE/UDMA、副流QP和其他优化均保持不变，不增加逐层推理查询。
+
 SHMEM 引导参数迁移：`MOONEP_SHMEM_BOOTSTRAP` 已重命名为 `MOONEP_SHMEM_BOOTSTRAP_TYPE`，只保留新名称的中央注册与读取，不提供旧名兼容别名。默认仍为 `ipport`；旧名单独设置（包括旧值 `uid`）时被忽略而采用新默认，新旧同时存在时仅采用新名。历史实验脚本与结果不改写，重跑旧 UID 配置前需迁移参数。
 
-新参数严格接受精确小写 `ipport` 或 `uid`：不自动去空格或转换大小写，空字符串、拼写错误及其他值在初始化读取处明确报错，不再像旧代码那样进入 UID 分支。`ipport` 仍使用 vLLM 的 DP master 地址及 `MOONEP_SHMEM_IP_PORT`（默认28765）建立 config store，并保留多机地址校验；`uid` 仍调用 SDK 的 UID/HCCL 广播初始化。AICPU 预热、引导读取、SHMEM 初始化和权重发布顺序不变，不增加逐层推理查询。两者只选择启动引导方式，不改变 MTE/UDMA 传输、副流 QP 或其他优化；本次不修复或重新验证历史 UID 初始化故障。
+新参数严格接受精确小写 `ipport` 或 `uid`：不自动去空格或转换大小写，空字符串、拼写错误及其他值在初始化读取处明确报错，不再像旧代码那样进入 UID 分支。`ipport` 仍使用 vLLM 的 DP master 地址及 `MOONEP_SHMEM_BOOTSTRAP_PORT`（默认28765）建立 config store，并保留多机地址校验；`uid` 仍调用 SDK 的 UID/HCCL 广播初始化。AICPU 预热、引导读取、SHMEM 初始化和权重发布顺序不变，不增加逐层推理查询。两者只选择启动引导方式，不改变 MTE/UDMA 传输、副流 QP 或其他优化；本次不修复或重新验证历史 UID 初始化故障。
 
 容量池档位参数迁移：`MOONEP_POOL_CAPS` 已重命名为 `MOONEP_POOL_TOKEN_CAPACITY_TIERS`，表示逗号分隔的 token 容量档位列表；`MOONEP_POOL_MAX_RUNGS` 已重命名为 `MOONEP_POOL_MAX_TIER_COUNT`，表示自动生成档位的数量目标，默认仍为 32。只保留新名称，不提供旧名兼容别名；仅设置旧名时采用新的默认行为（自动生成、档数目标32），新旧同时存在时仅采用新名。
 
@@ -247,7 +251,7 @@ SHMEM 引导参数迁移：`MOONEP_SHMEM_BOOTSTRAP` 已重命名为 `MOONEP_SHME
 |---|---|
 | `MOONEP=1`（additional_config `enable_moonep`） | 启用 MoonEP comm（需 EP>1） |
 | `MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport` | SHMEM 引导类型，只接受 `ipport`/`uid`，默认 `ipport`；引擎沿用 config-store 路径，UID/HCCL 广播的历史故障见限制#1 |
-| `MOONEP_SHMEM_IP_PORT` | ipport 引导的 config-store 端口（默认 28765） |
+| `MOONEP_SHMEM_BOOTSTRAP_PORT` | ipport 引导的 config-store 端口（默认 28765） |
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
