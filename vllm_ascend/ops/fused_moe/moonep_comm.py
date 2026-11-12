@@ -910,7 +910,7 @@ def ensure_runtime_initialized() -> None:
         + " ".join(
             f"{k}={_os_audit.environ.get(k, '<unset>')}"
             for k in (
-                "ASCEND_MOONEP_SKIP_DUP",
+                "MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENABLED",
                 "MOONEP_MIN_DISPATCH_TOKENS",
             )
         ),

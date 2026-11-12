@@ -235,6 +235,11 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+Planning 源端去重使用 SDK 参数 `MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENABLED`，严格接受0/1，默认0不去重（等价历史优化实验的 `ASCEND_MOONEP_SKIP_DUP=1`），1启用去重；SDK扩展首次成功读取后缓存，所有EP rank须保持一致。旧名不保留兼容，旧名单独设置任何值均被忽略；新旧同时存在时仅采用新名。此处默认改变了旧SDK未设置时执行去重的行为，依赖旧去重默认的独立SDK调用需显式设置新值1。
+
+当前Slot固定使用融合加权combine，因此新参数必须为0，MTE/UDMA主机校验继续拒绝1；现有去重前导会先无权合并专家输出，与逐路FP32加权不兼容，本次不新增两者共存能力。只迁移一次性环境审计项，不增加逐层环境查询；实际开关由SDK的匹配新版 `_C` 读取，不能继续使用旧二进制。内部tiling ABI、设备算法、dispatch dtype、副流、缓存、Home GEMM1、有效行解包、融合publish及原生Off均不变。历史脚本/结果不改写，旧的“开启去重”配置重跑前需迁移；默认关闭与已核对的优化版LongBench-v2/GSM8K配置一致。
+
+
 内核并行参数清理：vLLM 不再读取或透传 `MOONEP_NUM_SMS`，不保留兼容入口；旧值（包括非法字符串）均被忽略。创建 Buffer 时省略 `num_sms`，继续采用 SDK 默认32。此前通过旧变量把大容量档 Planning 改成8～31的配置需要迁移至 `MOONEP_PLANNING_NUM_SMS`；旧变量未设或设为32、56时的 Planning 选择保持一致。
 
 保留 SDK 的 `MOONEP_PLANNING_NUM_SMS`：未设置或为空时，按每个 Buffer 的容量 `S×K` 自动选核，≤8192使用8，其余在 SDK 默认值下使用32；该容量不是逐请求的实际有效 token 数。显式非空值沿用 int 解析与[8,56]校验，覆盖自动规则。最终 Planning block 数同时用于工作区大小计算和 PlanningOp 创建，不能只改变启动核数而沿用旧工作区。

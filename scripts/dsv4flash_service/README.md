@@ -58,6 +58,10 @@ bash ../service/hold_cards_vllm.sh start 0 1 2 3   # stop 放卡
 - 起服 cwd 不能在有裸 `vllm/` 的目录（CANN set_env 空 PYTHONPATH 条目会抢解析）。
 - 容器有公司代理：本地 curl 要 `--noproxy '*'`，python 用 `ProxyHandler({})`。
 - 停服后驱动侧 HBM 释放滞后 ~1 分钟，立刻起下一台会被显存检查判死。
-- slot 性能腿优化前缀固定三件套（全 rank 一致）：
-  `ASCEND_MOONEP_PREFETCH_RELAXED=1 ASCEND_MOONEP_NO_RECONCILE=1 ASCEND_MOONEP_SKIP_DUP=1`
+- **历史版本**的slot性能腿使用三件套（全rank一致）：
+  `ASCEND_MOONEP_PREFETCH_RELAXED=1 ASCEND_MOONEP_NO_RECONCILE=1 ASCEND_MOONEP_SKIP_DUP=1`。
+  当前SDK已固定前两项的旧优化行为，最后一项改为正向参数
+  `MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENABLED=0`（默认不去重）。
+  三个旧变量不再生效；当前融合加权combine不支持新值1，不能用它重跑开启去重的对照。
+  历史脚本和结果保持原样，依赖去重的独立SDK调用需迁移新名称并使用兼容的归并路径。
 - worker 实际生效 env 以服务日志 `[moonep-env-audit]` 行为准，勿信 /proc/environ。
