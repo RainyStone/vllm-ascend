@@ -92,8 +92,6 @@ class RealTokenBoundsTest(unittest.TestCase):
             "_select_buffer_for_step": lambda *args: (buffer, capacity),
             "_pads_for": lambda *args: pads,
             "_scratch_for": lambda *args: {"tpe_compat": torch.zeros(experts, dtype=torch.int32)},
-            "_route_stats_enabled": lambda: False,
-            "_route_histogram": lambda routes, e, t, compat, collect: compat,
             "_MOONEP_RUNTIME": SimpleNamespace(_buffers={(experts, topk, hidden): {capacity: buffer}}),
         }
         dispatch = load_method("token_dispatch", namespace)

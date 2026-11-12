@@ -66,9 +66,6 @@ import atexit
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
-from vllm_ascend.ops.fused_moe.moe_par_stats import enabled as _route_stats_enabled
-from vllm_ascend.ops.fused_moe.moe_par_stats import note_compute_load as _note_compute_load
-from vllm_ascend.ops.fused_moe.moe_par_stats import note_route_counts as _note_route_counts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
@@ -112,24 +109,6 @@ _SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
 _SLOT_STATS = {"calls": 0, "with_slots": 0, "slot_rows": 0, "prefetch_experts": 0}
 # Planning, dispatch and combine always use the real token count. Buffer
 # capacity remains independent of the rows included in routing and computation.
-
-# optional per-rank MoE load accounting (MOONEP_BALANCE_STATS=1)
-_BALANCE_STATS_ON = os.environ.get("MOONEP_BALANCE_STATS", "0") == "1"
-_BALANCE_STATS = {"calls": 0, "tokens": 0, "local_rows": 0, "all_rows": 0, "pad_rows": 0}
-# MOONEP_BALANCE_STATS_EVERY=N: also print the (cumulative) ledger every N dispatch
-# calls, i.e. every N MoE layers of this rank. 0 = only at process exit.
-#
-# The exit print is what the counter would like to be its only output, but it is an
-# ``atexit`` handler and a served engine does not always let a worker reach it: the
-# API server stops its EngineCores with ``shutdown_timeout=0``, which force-kills the
-# tree (``Process manager: force killing remaining processes``), and the workers --
-# children of those EngineCores -- go with it. Nothing in that path runs ``atexit``,
-# so a service run would otherwise leave no balance line at all. Printing every N
-# layers keeps a near-final ledger in the log whatever the shutdown looks like; at
-# the exit (offline runs, graceful stops) the same line is printed once more, so the
-# last line in the file is always the fullest one. N = the model's MoE layer count
-# makes it one line per step.
-_BALANCE_EVERY = int(os.environ.get("MOONEP_BALANCE_STATS_EVERY", "0") or 0)
 
 # MOONEP_PLAN_STATS=1: record, per layer, this rank's slot assignment
 # (plan.experts_to_copy[rank], -1 = unused slot). This is the gate for any
@@ -349,23 +328,6 @@ def _dump_plan_stats():
 
 atexit.register(_dump_plan_stats)
 
-
-def _dump_balance_stats():
-    if not _BALANCE_STATS_ON:
-        return
-    s = _BALANCE_STATS
-    rank = s.get("rank", "?")
-    calls = max(s["calls"], 1)
-    print(
-        f"[moonep-balance r{rank}] layers={s['calls']} tokens={s['tokens']} "
-        f"rows_local={s['local_rows']} ({s['local_rows'] / calls:.0f}/layer) "
-        f"rows_all={s['all_rows']} ({s['all_rows'] / calls:.0f}/layer) "
-        f"pad_rows={s['pad_rows']}",
-        flush=True,
-    )
-
-
-atexit.register(_dump_balance_stats)
 
 # MOONEP_DUMP_PLAN=<dir>: 逐位比对用。把 buffer.dispatch 返回的 plan + cu 落到
 # <dir>/plan_r<rank>_<i>.pt。默认关(这是推理路径上的 D2H,会污染性能数字)。
@@ -951,19 +913,6 @@ def _scratch_for(E: int, K: int, H: int, s_max: int, extra: int, device) -> dict
     return sc
 
 
-def _route_histogram(topk_c, E: int, tokens: int, compatibility, collect: bool):
-    """Only diagnostics consume this histogram; planning rebuilds its own.
-
-    The compatibility tensor is immutable and reused, never passed to a recorder
-    that is enabled. SDK PlanningOp validates shape/dtype, not these values.
-    """
-    if not collect:
-        return compatibility
-    routes = topk_c[:tokens]
-    histogram = torch.histc(routes.to(torch.float32), bins=E, min=0, max=E - 1).to(torch.int32)
-    return histogram
-
-
 def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
     """Smallest pooled capacity that fits this step -> ``(buffer, capacity)``."""
     _MOONEP_RUNTIME._ensure_initialized()
@@ -1078,16 +1027,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         topk_c[:T].copy_(topk_ids)
         source_topk_weights_sk = pads["combine_route"][:capacity]
         source_topk_weights_sk[:T, :K].copy_(topk_weights)
-        # histc has a fixed-size output and avoids a dynamic sizing round trip.
-        # Only the copied prefix contributes to the diagnostic counts.
-        #
-        # The native planning kernel consumes topk_c, not this compatibility
-        # histogram. Construct real counts only when the route recorder needs them.
+        # SDK validates this compatibility tensor; Planning rebuilds real load
+        # from topk_c, independently of these unused histogram values.
         _pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
         sc = _scratch_for(E, K, H, max(_pool), buffer._require_ctx()["B"], topk_c.device)
-        tpe = _route_histogram(
-            topk_c, E, T, sc["tpe_compat"], _route_stats_enabled()
-        )
+        tpe = sc["tpe_compat"]
 
         dispatch_scale = None
         if use_mxfp8:
@@ -1136,23 +1080,9 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         own_counts = sc["own"]
         own_counts[:epn].copy_(counts[rank * epn:(rank + 1) * epn])
         own_counts = own_counts[:epn]
-        # Sending-side counts describe the real logical routing before Slot
-        # relocation. Planning independently rebuilds its histogram from topk_c.
-        _note_route_counts(tpe, pad_pairs=0, pad_index=-1)
         # Rows for prefetched Slot experts stay local and follow home rows.
         slot_counts = counts[E:].contiguous()
         local_counts = torch.cat((own_counts, slot_counts))
-        # The other half of the load accounting: the rows this rank is about to
-        # *compute*, i.e. the receive side -- ``local_counts`` is what the grouped
-        # matmul below will walk -- folded back onto global expert ids by the
-        # recorder. Slot groups included, so a row the plan relocated to this rank
-        # counts against this rank and not against the expert's owner.
-        _note_compute_load(
-            local_counts,
-            home_first=rank * epn,
-            epn=epn,
-            slot_experts=plan.experts_to_copy[rank],
-        )
         if _PLAN_STATS_ON:
             _PLAN_STATS.append([int(v) for v in plan.experts_to_copy[rank].tolist()])
         if _EARLY_PLAN_ON:
@@ -1174,22 +1104,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                         [int(v) for v in plan_pred.experts_to_copy[rank].tolist()])
                 except Exception:  # noqa: BLE001 - probe must never break a step
                     _EARLY["fail"] += 1
-        if _BALANCE_STATS_ON and not _EXTRA_CTX.in_profile_run:
-            # per-rank (token, expert) entries: what this rank computes vs the
-            # full step. Opt-in: reading the counts back costs a host sync.
-            #
-            # Profile/dummy forwards are skipped exactly as the load recorder skips
-            # them (moe_par_stats._in_profile_run): they compute a full-capacity
-            # batch that belongs to no step of the measured run, so counting them
-            # here would make this ledger miss the dump by one whole batch of rows.
-            stat = _BALANCE_STATS
-            stat["rank"] = get_ep_group().rank_in_group
-            stat["calls"] += 1
-            stat["tokens"] += T
-            stat["local_rows"] += int(local_counts.sum().item())
-            stat["all_rows"] += int(counts[:E].sum().item())
-            if _BALANCE_EVERY and stat["calls"] % _BALANCE_EVERY == 0:
-                _dump_balance_stats()
         if os.environ.get("MOONEP_SLOT_STATS", "0") == "1":
             # debug only: this host read re-introduces the per-layer sync
             s = _SLOT_STATS

@@ -13,8 +13,9 @@
 #   --kv-cache-memory-bytes 9663676416（9 GiB）、BATCHED_TOKENS 可前缀（默认 16384）。
 # 新增：MOONEP_REAL_T 透传 + 横幅回显（本脚本不 unset 它：未设 = 引擎默认 1；
 #   slot0 消融腿用命令前缀 MOONEP_REAL_T=0）。
-# 采集开关（MOE_PAR/PROFILE/BALANCE/SLOT_STATS/SIM_ROUTE）语义与 DP8 版一致，默认全关，
+# 采集开关（PROFILE/SLOT_STATS/SIM_ROUTE）语义与 DP8 版一致，默认全关，
 #   性能跑**什么都不加**（脚本对每个都有无条件 unset 兜底）。
+# MoE逐rank原始负载采集和BALANCE账本已移除，旧开关不再生效。
 set -euo pipefail
 
 # ---------------------------------------------------------- 模式变量 -- #
@@ -46,14 +47,6 @@ esac
 # MOONEP_REAL_T：不 unset、不设默认——未设 = 引擎默认 1（real-T 新路径）；
 # 消融腿用命令前缀 MOONEP_REAL_T=0 透传（回到旧的「pad 全量计算」路径）。
 MOONEP_REAL_T_GIVEN="${MOONEP_REAL_T:-}"
-BALANCE="${BALANCE:-0}"
-if [ "$BALANCE" = 1 ]; then
-  export MOONEP_BALANCE_STATS=1
-  export MOONEP_BALANCE_STATS_EVERY=43
-else
-  unset MOONEP_BALANCE_STATS MOONEP_BALANCE_STATS_EVERY
-fi
-
 # -------------------------------------------------- 产物路径（可前缀覆盖） -- #
 HERE=$(cd "$(dirname "$0")" && pwd)
 # cwd 必须在没有裸 vllm/ 目录的地方起服务（CANN set_env 的空 PYTHONPATH 条目 = cwd，
@@ -64,10 +57,9 @@ cd "$HERE" || exit 1
 BATCHED_TOKENS_OVERRIDE=${BATCHED_TOKENS:-}
 OUT_DIR=${OUT_DIR:-$HERE/serve_dp4_$MODE}
 LEG_NAME=$(basename "${OUT_DIR%/}")
-DUMP_DIR=${DUMP_DIR:-$OUT_DIR/moe_par}
 LOG_FILE=${LOG_FILE:-$HERE/start_service_dp4_$MODE.log}
 PROFILE_DIR=$OUT_DIR/profiling
-for p in "$OUT_DIR" "$DUMP_DIR" "$LOG_FILE"; do
+for p in "$OUT_DIR" "$LOG_FILE"; do
   case "$p" in
     /*) ;;
     *) echo "路径必须是绝对路径（要给 worker/profiler 用，那边 cwd 不可靠）：$p" >&2; exit 2 ;;
@@ -75,10 +67,6 @@ for p in "$OUT_DIR" "$DUMP_DIR" "$LOG_FILE"; do
 done
 if [ -e "$LOG_FILE" ]; then
   echo "[服务日志] 已存在，不覆盖：$LOG_FILE —— 删掉它，或用前缀指到别处" >&2
-  exit 2
-fi
-if [ "${MOE_PAR:-0}" = 1 ] && [ -e "$DUMP_DIR" ]; then
-  echo "[MoE 负载采集] 目录已存在，不覆盖：$DUMP_DIR" >&2
   exit 2
 fi
 
@@ -109,16 +97,6 @@ export MOONEP_SHMEM_BOOTSTRAP=ipport        # uid 走 HCCL 广播会死锁
 export MOONEP_DISABLE_UDMA=1                # 关 UDMA 走 MTE（与 H16 轮一致）
 export ASCEND_MOONEP_BUILD_DIR=$WS/ascend-moonep/ascend_moonep   # 含新编的 _C（real-T ABI）
 export LD_LIBRARY_PATH=$ASCEND_MOONEP_BUILD_DIR/lib:$LD_LIBRARY_PATH
-
-# ------------------------------------------------------ MoE 负载采集 -- #
-unset VLLM_ASCEND_MOE_PAR_STATS VLLM_ASCEND_MOE_PAR_STATS_DIR \
-      VLLM_ASCEND_MOE_PAR_STATS_TAG VLLM_ASCEND_MOE_PAR_FLUSH_EVERY
-if [ "${MOE_PAR:-0}" = 1 ]; then
-  export VLLM_ASCEND_MOE_PAR_STATS=1
-  export VLLM_ASCEND_MOE_PAR_STATS_DIR=$DUMP_DIR
-  export VLLM_ASCEND_MOE_PAR_STATS_TAG=serve_dp4_$MODE
-  export VLLM_ASCEND_MOE_PAR_FLUSH_EVERY=1
-fi
 
 # -------------------------------------------------------- 仿真路由 -- #
 unset VLLM_ASCEND_MOE_SIM_ROUTE VLLM_ASCEND_MOE_SIM_ROUTE_SEED \
@@ -173,7 +151,7 @@ cat <<EOF | tee -a "$LOG_FILE"
  real-T      $REAL_T_LINE
  min-tokens  MOONEP_MIN_DISPATCH_TOKENS=${MOONEP_MIN_DISPATCH_TOKENS:-未设 → 默认 128}
  引导/传输   MOONEP_SHMEM_BOOTSTRAP=$MOONEP_SHMEM_BOOTSTRAP   MOONEP_DISABLE_UDMA=$MOONEP_DISABLE_UDMA
- 采集        MOE_PAR=${MOE_PAR:-0}   PROFILE=${PROFILE:-0}   BALANCE=$BALANCE   SLOT_STATS=$SLOT_STATS
+ 采集        PROFILE=${PROFILE:-0}   SLOT_STATS=$SLOT_STATS
  仿真路由    SIM_ROUTE=${SIM_ROUTE:-未设}
  服务        http://$HOST:$PORT   api-server-count=$API_SERVER_COUNT   dp=$DP tp=$TP ep=on   served-model-name=$SERVED_NAME
  模型        $MODEL

@@ -38,7 +38,6 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
-from vllm_ascend.ops.fused_moe import moe_par_stats
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -705,16 +704,6 @@ else:
                     self.load_counter.add_(1)
                 else:
                     self.moe_load.add_(local_load)
-
-            if moe_par_stats.enabled():
-                # The same per-local-expert counts EPLB accumulates just above, kept
-                # per rank for the offline peak-to-average analysis. Adds no collective.
-                moe_par_stats.record(
-                    self,
-                    fused_experts_results.expert_tokens,
-                    fused_experts_results.group_list_type,
-                    type(_EXTRA_CTX.moe_comm_method).__name__,
-                )
 
             routed_out = _EXTRA_CTX.moe_comm_method.finalize(
                 hidden_states=fused_experts_results.routed_out,

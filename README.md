@@ -238,11 +238,15 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+MoE负载诊断清理：VLLM_ASCEND_MOE_PAR_STATS、VLLM_ASCEND_MOE_PAR_STATS_DIR、VLLM_ASCEND_MOE_PAR_STATS_TAG、VLLM_ASCEND_MOE_PAR_FLUSH_EVERY、MOONEP_BALANCE_STATS、MOONEP_BALANCE_STATS_EVERY 已移除，不保留兼容别名；旧变量任何值均不能开启采集或累计账本。删除专用记录模块、逐层调用、观测用直方图、D2H回读、周期/退出输出与导出状态。两份通用 service 起服脚本不再透传 MOE_PAR/BALANCE 或提供专用dump/报告入口，保留正常运行目录、服务日志和官方profiling入口。
+
+真实router、逻辑到物理专家映射、原生EPLB热度更新及其counts/prefix处理不变；Planning继续按真实top-k重建负载，SDK兼容张量及输入校验保留。保留MLP的home/slot counts、FP32路由权重快照、融合加权combine、MXFP8/有效行解包、BF16 zero-copy、容量池/缓存、副流/Home GEMM1及MTE/UDMA必要同步和事件。Slot/计划诊断及其DEV_BASE/TAG关联留待下一组处理；不清理正常脚本标签。历史实验脚本、负载原始日志和离线分析工具不改写；新代码不能通过旧变量补采八rank负载。
+
 vLLM执行诊断清理：`MOONEP_TIME_STATS`、`MOONEP_TIME_STATS_EVERY`、`MOONEP_MLP_SYNC`、`MOONEP_PF_TIMING`、`MOONEP_PACE_SYNC`、`MOONEP_CAP_TRACE` 已移除，不保留兼容别名；旧变量任何值均被忽略，固定原诊断关闭路径。删除阶段计时及退出/周期输出、MLP和原生dispatcher/MC2计时包装、预取/MLP/dispatch的诊断额外同步，以及容量变化日志和专用状态。
 
 保留真实容量选档、Planning/Dispatch/Combine、home/slot counts、路由权重快照、MLP数学流程、源端去重与图捕获保护；保留初始化/AICPU预热同步、副流事件等待、Home GEMM1事件传递、槽位复用、缓存回填和MTE/UDMA独立QP校验。MXFP8自动分发/有效行解包、BF16 zero-copy、融合publish/FP32加权combine及原生Off选路不变。保留常规起服与后端确认日志、缓存命中计数和官方profiling入口。
 
-该组清理不更改SDK独立的`ASCEND_MOONEP_*`计时/trace、负载采集、计划诊断及其参数；对应功能按后续独立变更处理。历史实验脚本、原始数据和离线分析工具保留，旧的这六项参数无法再恢复框架阶段计时或诊断同步。
+SDK内部计时/trace已另行移除，逐rank负载采集与累计账本由本组清理；Slot/计划诊断留待下一组处理。历史实验脚本、原始数据和离线分析工具保留，旧的这六项参数无法再恢复框架阶段计时或诊断同步。
 
 
 Planning 负载统计前的屏障由 SDK 参数 `MOONEP_PLANNING_LOAD_STATS_BARRIER_MODE` 控制，严格接受精确小写 `auto`/`pull`/`push`，默认 `auto`；SDK 在原 Planning 配置位置首次成功读取后缓存，各EP rank必须一致，不支持运行中切换。vLLM只增加一次性环境审计，不增加逐层解析或host同步。`auto`保留SHMEM自动选择（当前EP≤32用v3 pull，EP>32用v4 push），与此前8卡GSM8K/LongBench-v2默认路径一致；显式`pull`固定v3，`push`固定v4，不能关闭屏障，也不改变统计数据的gather方式。
@@ -327,7 +331,7 @@ MoonEP 启用且 EP>1 时，首次运行时初始化固定在 SHMEM 集体初始
 
 通用起服脚本已移除 `SIM_ROUTE`、`SIM_ROUTE_SEED`、`SIM_ROUTE_EVERY`、`SIM_ROUTE_TABLE` 透传入口及“仿真已开启”提示。历史合成倾斜度、二分阈值实验的脚本、路由档案与结果保留原样；这些实验需要历史代码才能按原注入方式重跑，不能把新代码忽略旧变量后的真实路由结果当作原合成实验。
 
-真实负载统计 `VLLM_ASCEND_MOE_PAR_STATS`、目录/标签/落盘频率参数，以及 `MOONEP_PLAN_STATS`、`MOONEP_EARLY_PLAN` 等独立诊断均保留。MoonEP Slot、预取副流、缓存、MXFP8、有效行解包、融合 publish 和其他优化不变。源码曾记录仿真注入绕过特定 DSV4 单 token dummy 的原生 gating 故障；当前版本是否仍复现未重新验证，本次不新增绕过，也不认定该历史故障已修复。
+真实负载统计及目录/标签/落盘频率参数已随本次诊断清理删除；MOONEP_PLAN_STATS、MOONEP_EARLY_PLAN等计划诊断留待下一组处理。MoonEP Slot、预取副流、缓存、MXFP8、有效行解包、融合 publish 和其他优化不变。源码曾记录仿真注入绕过特定 DSV4 单 token dummy 的原生 gating 故障；当前版本是否仍复现未重新验证，本次不新增绕过，也不认定该历史故障已修复。
 
 ## 限制与已知问题（重要）
 
@@ -407,7 +411,4 @@ MoonEP 启用且 EP>1 时，首次运行时初始化固定在 SHMEM 集体初始
 
 调测/分析脚本（A/B、数值 harness、探针、MoE PAR 报告套件、dev 线工具集）与过程报告已按
 「只保留功能代码」的清理决定移出本仓；现存的 `scripts/dsv4flash_service/` 是起服/占卡/
-bench 调度与 sim-route 载荷档案的运行工具。MoE 负载打点仍在功能层：
-`vllm_ascend/ops/fused_moe/moe_par_stats.py`（只记录本 rank、零集合通信，开关
-`VLLM_ASCEND_MOE_PAR_STATS`）。负载口径：专家负载按逻辑专家记（副本算同一个专家）、
-rank 负载按实际落到它所持专家上的对数记、pad 不计入；有冗余专家时 PAR 是上界。
+bench 调度与 sim-route 载荷档案的运行工具。历史负载打点模块及其环境变量已移除，历史原始数据和离线分析工具保留；新代码不再生成逐rank负载dump。官方profiling入口保留，不能将旧采集脚本在新代码上的无输出理解为零负载。

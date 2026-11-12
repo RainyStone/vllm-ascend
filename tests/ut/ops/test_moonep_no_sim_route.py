@@ -12,7 +12,6 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[3]
 SELECTOR = ROOT / "vllm_ascend/ops/fused_moe/experts_selector.py"
-STATS = ROOT / "vllm_ascend/ops/fused_moe/moe_par_stats.py"
 REMOVED = (
     "VLLM_ASCEND_MOE_SIM_ROUTE", "VLLM_ASCEND_MOE_SIM_ROUTE_SEED",
     "VLLM_ASCEND_MOE_SIM_ROUTE_EVERY", "VLLM_ASCEND_MOE_SIM_ROUTE_TABLE",
@@ -26,11 +25,6 @@ def functions(path, names=None, **namespace):
     exec(compile(ast.fix_missing_locations(ast.Module(
         body=[future, *nodes], type_ignores=[])), str(path), "exec"), namespace)
     return namespace
-
-
-class Untouched:
-    def __getattribute__(self, name):
-        raise AssertionError("Disabled statistics must not inspect a tensor")
 
 
 class NoSimRouteTests(unittest.TestCase):
@@ -48,13 +42,6 @@ class NoSimRouteTests(unittest.TestCase):
         self.ns["check_npu_moe_gating_top_k"] = Mock(return_value=False)
         return self.ns["select_experts"](**{**self.params, **overrides})
 
-    def stats(self, enabled=True):
-        names = {"enabled", "note_route_counts", "note_compute_load", "_to_counts",
-                 "_take_route_note", "_take_compute_note", "record"}
-        return functions(
-            STATS, names, torch=torch, _ENABLED=enabled, _route_note=None, _compute_note=None,
-            _in_profile_run=lambda: True,
-        )
 
     def test_all_four_keys_removed_even_when_invalid_values_are_present(self):
         with patch.dict(os.environ, {key: "invalid" for key in REMOVED}):
@@ -151,65 +138,6 @@ class NoSimRouteTests(unittest.TestCase):
         torch.testing.assert_close(ids[:, -1], torch.full((2,), 4, dtype=torch.int32))
         torch.testing.assert_close(weights[:, -1], torch.ones(2))
 
-    def test_real_load_statistics_configuration_is_preserved(self):
-        keys = ("VLLM_ASCEND_MOE_PAR_STATS", "VLLM_ASCEND_MOE_PAR_STATS_DIR",
-                "VLLM_ASCEND_MOE_PAR_STATS_TAG", "VLLM_ASCEND_MOE_PAR_FLUSH_EVERY")
-        for key in keys:
-            self.assertIn(key, self.envs.env_variables)
-        with patch.dict(os.environ, {
-            keys[0]: "1", keys[1]: "/tmp/native_route_stats", keys[2]: "native", keys[3]: "8",
-            **{key: "invalid" for key in REMOVED},
-        }, clear=True):
-            self.assertTrue(self.envs.VLLM_ASCEND_MOE_PAR_STATS)
-            self.assertEqual(self.envs.VLLM_ASCEND_MOE_PAR_STATS_DIR, "/tmp/native_route_stats")
-            self.assertEqual(self.envs.VLLM_ASCEND_MOE_PAR_STATS_TAG, "native")
-            self.assertEqual(self.envs.VLLM_ASCEND_MOE_PAR_FLUSH_EVERY, 8)
-
-    def test_disabled_real_statistics_do_not_inspect_or_copy_tensors(self):
-        ns = self.stats(enabled=False)
-        ns["note_route_counts"](Untouched(), 0, 0)
-        ns["note_compute_load"](Untouched(), 0, 2, Untouched())
-        ns["record"](Untouched(), Untouched(), 1, "test")
-        self.assertIsNone(ns["_route_note"])
-        self.assertIsNone(ns["_compute_note"])
-
-    def test_real_route_note_is_consumed_once(self):
-        ns = self.stats()
-        counts = torch.tensor([3, 1, 2, 0])
-        ns["note_route_counts"](counts, 2, 0)
-        note = ns["_take_route_note"]()
-        self.assertIs(note[0], counts)
-        self.assertEqual(note[1:], (2, 0))
-        self.assertIsNone(ns["_take_route_note"]())
-
-    def test_real_compute_note_preserves_snapshot_after_input_reuse(self):
-        ns = self.stats()
-        counts = torch.tensor([2, 1, 3, 4])
-        experts = torch.tensor([6, 7])
-        ns["note_compute_load"](counts, 2, 2, experts)
-        counts.fill_(99)
-        snapshot = ns["_take_compute_note"]()
-        torch.testing.assert_close(snapshot[0], torch.tensor([2, 1, 3, 4]))
-        self.assertEqual(snapshot[1:3], (2, 2))
-        self.assertIs(snapshot[3], experts)
-        self.assertIsNone(ns["_take_compute_note"]())
-
-    def test_real_count_and_prefix_statistic_modes_are_preserved(self):
-        ns = self.stats()
-        counts = torch.tensor([2, 0, 3, 1])
-        torch.testing.assert_close(ns["_to_counts"](counts, 1), counts)
-        torch.testing.assert_close(ns["_to_counts"](counts.cumsum(0), 0), counts)
-
-    def test_startup_profile_still_skips_statistics_and_consumes_pending_notes(self):
-        ns = self.stats()
-        ns["_record"] = Mock(side_effect=AssertionError("Startup profile must not record traffic"))
-        counts = torch.tensor([2, 1])
-        ns["note_route_counts"](counts, 0, 0)
-        ns["note_compute_load"](counts, 0, 2)
-        ns["record"](object(), counts, 1, "native")
-        ns["_record"].assert_not_called()
-        self.assertIsNone(ns["_route_note"])
-        self.assertIsNone(ns["_compute_note"])
 
     def test_runtime_and_generic_launcher_have_no_simulation_entry_points(self):
         self.assertFalse((ROOT / "vllm_ascend/ops/fused_moe/moe_sim_route.py").exists())
