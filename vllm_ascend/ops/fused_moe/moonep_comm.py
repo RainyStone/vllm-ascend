@@ -459,12 +459,12 @@ MOONEP_MIN_DISPATCH_TOKENS = _min_dispatch_tokens()
 
 
 def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[int]:
-    """Capacity ladder for the buffer pool (MOONEP_POOL_CAPS overrides).
+    """Capacity ladder for the buffer pool (MOONEP_POOL_TOKEN_CAPACITY_TIERS overrides).
 
     Each rung fixes receive capacity at S*K rows, independently of the real
     token count used for planning, routing and expert computation. Powers of
     two cover small steps through 512; uniformly spaced rungs cover larger
-    steps. Spacing is chosen using MOONEP_POOL_MAX_RUNGS (default 32) and
+    steps. Spacing is chosen using MOONEP_POOL_MAX_TIER_COUNT (default 32) and
     MOONEP_POOL_MEMORY_BUDGET_MB (default 2048 MiB).
 
     ``cost_per_token`` estimates hidden-buffer bytes per token of capacity
@@ -472,7 +472,7 @@ def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[in
     operator workspaces and other buffers also occupy device memory. Every
     rung is created before collective SHMEM initialization.
     """
-    override = os.environ.get("MOONEP_POOL_CAPS")
+    override = envs.MOONEP_POOL_TOKEN_CAPACITY_TIERS
     if override:
         caps = sorted({int(c) for c in override.split(",") if c.strip()})
         if not caps or caps[-1] != int(s_max):
@@ -495,7 +495,7 @@ def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[in
     # scale each), and the driver starts failing with
     # "aclrtMallocPhysical(...) failed with 207001" past a few dozen buffers
     # (measured: 51 rungs -> pool init dies; 31 rungs -> fine).
-    max_rungs = int(os.environ.get("MOONEP_POOL_MAX_RUNGS", "32"))
+    max_rungs = envs.MOONEP_POOL_MAX_TIER_COUNT
     budget = envs.MOONEP_POOL_MEMORY_BUDGET_MB * 2**20
     base = [c for c in (16, 32, 64, 128, 256, 512) if c <= s_max]
     for c in base:

@@ -136,7 +136,7 @@ class AdaptivePoolTests(unittest.TestCase):
             self.select(4097)
 
     def test_custom_capacity_list_still_controls_selection(self):
-        with patch.dict(os.environ, {"MOONEP_POOL_CAPS": "1024,256,256"}, clear=True):
+        with patch.dict(os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": "1024,256,256"}, clear=True):
             caps = self.namespace["_moonep_pool_capacities"](4096)
         self.assertEqual(caps, [256, 1024, 4096])
         self.install_pool(caps)
@@ -146,13 +146,13 @@ class AdaptivePoolTests(unittest.TestCase):
     def test_historical_4k_capacity_ladder_is_preserved(self):
         expected = [16, 32, 64, 128, 256, 512, *range(768, 4097, 256)]
         self.assertEqual(sorted(self.pool), expected)
-        with patch.dict(os.environ, {"MOONEP_POOL_MAX_RUNGS": "32",
+        with patch.dict(os.environ, {"MOONEP_POOL_MAX_TIER_COUNT": "32",
                                      "MOONEP_POOL_MEMORY_BUDGET_MB": "2048"}, clear=True):
             self.assertEqual(self.namespace["_moonep_pool_capacities"](
                 4096, cost_per_token=6 * 4096 * 2), expected)
 
     def test_rung_limit_and_budget_still_change_ladder_density(self):
-        with patch.dict(os.environ, {"MOONEP_POOL_MAX_RUNGS": "8"}, clear=True):
+        with patch.dict(os.environ, {"MOONEP_POOL_MAX_TIER_COUNT": "8"}, clear=True):
             sparse = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
         self.assertLessEqual(len(sparse), 8)
         self.assertEqual(sparse[-1], 4096)
@@ -200,7 +200,7 @@ class AdaptivePoolTests(unittest.TestCase):
     def test_nonpositive_budget_disables_only_the_budget_constraint(self):
         for value in ("0", "-1", "-2048"):
             with self.subTest(value=value), patch.dict(os.environ, {
-                "MOONEP_POOL_MEMORY_BUDGET_MB": value, "MOONEP_POOL_MAX_RUNGS": "100",
+                "MOONEP_POOL_MEMORY_BUDGET_MB": value, "MOONEP_POOL_MAX_TIER_COUNT": "100",
             }, clear=True):
                 caps = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
                 self.assertEqual(caps, [16, 32, 64, 128, 256, 512, *range(640, 4097, 128)])
@@ -208,7 +208,7 @@ class AdaptivePoolTests(unittest.TestCase):
     def test_manual_caps_bypass_even_invalid_budget_without_reading_it(self):
         getter = Mock(side_effect=AssertionError("Manual caps must not read the budget"))
         with patch.dict(self.envs.env_variables, {"MOONEP_POOL_MEMORY_BUDGET_MB": getter}), patch.dict(
-            os.environ, {"MOONEP_POOL_CAPS": "1024,256", "MOONEP_POOL_MEMORY_BUDGET_MB": "invalid"},
+            os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": "1024,256", "MOONEP_POOL_MEMORY_BUDGET_MB": "invalid"},
             clear=True,
         ):
             self.assertEqual(self.namespace["_moonep_pool_capacities"](4096), [256, 1024, 4096])
@@ -232,6 +232,109 @@ class AdaptivePoolTests(unittest.TestCase):
             tree = ast.parse((SOURCE.parents[2] / relative).read_text())
             self.assertFalse(any(isinstance(n, ast.Constant) and isinstance(n.value, str)
                                  and n.value == "MOONEP_POOL_BUDGET_MB" for n in ast.walk(tree)))
+
+
+    def test_tier_parameters_are_centralized_with_original_defaults(self):
+        self.assertIn("MOONEP_POOL_TOKEN_CAPACITY_TIERS", self.envs.env_variables)
+        self.assertIn("MOONEP_POOL_MAX_TIER_COUNT", self.envs.env_variables)
+        self.assertNotIn("MOONEP_POOL_CAPS", self.envs.env_variables)
+        self.assertNotIn("MOONEP_POOL_MAX_RUNGS", self.envs.env_variables)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(self.envs.MOONEP_POOL_TOKEN_CAPACITY_TIERS)
+            self.assertEqual(self.envs.MOONEP_POOL_MAX_TIER_COUNT, 32)
+
+    def test_empty_tier_string_preserves_automatic_generation(self):
+        with patch.dict(os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": ""}, clear=True):
+            self.assertEqual(self.namespace["_moonep_pool_capacities"](
+                4096, cost_per_token=6 * 4096 * 2), sorted(self.pool))
+
+    def test_manual_tiers_preserve_sort_dedup_and_empty_item_parsing(self):
+        with patch.dict(os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": " 1024,256, ,256,+0128, "}, clear=True):
+            self.assertEqual(self.namespace["_moonep_pool_capacities"](4096), [128, 256, 1024, 4096])
+
+    def test_manual_tiers_filter_oversized_values_and_keep_maximum(self):
+        for raw in ("8192", "128,4096,8192", "4096", " , , "):
+            with self.subTest(raw=raw), patch.dict(
+                os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": raw}, clear=True
+            ):
+                tiers = self.namespace["_moonep_pool_capacities"](4096)
+                self.assertEqual(tiers[-1], 4096)
+                self.assertTrue(all(tier <= 4096 for tier in tiers))
+                self.assertEqual(tiers, [128, 4096] if "128," in raw else [4096])
+
+    def test_manual_tiers_do_not_add_a_new_positive_value_validator(self):
+        # Preserve the existing parsing seam; invalid Buffer capacities are still
+        # rejected by the existing initialization checks, not silently changed here.
+        with patch.dict(os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": "-1,0,128"}, clear=True):
+            self.assertEqual(self.namespace["_moonep_pool_capacities"](4096), [-1, 0, 128, 4096])
+
+    def test_old_tier_and_count_names_are_ignored(self):
+        for raw in ("128,1024", "invalid", "", " , "):
+            with self.subTest(raw=raw), patch.dict(os.environ, {
+                "MOONEP_POOL_CAPS": raw, "MOONEP_POOL_MAX_RUNGS": "invalid",
+            }, clear=True):
+                self.assertEqual(self.namespace["_moonep_pool_capacities"](
+                    4096, cost_per_token=6 * 4096 * 2), sorted(self.pool))
+
+    def test_new_manual_tiers_override_old_name(self):
+        with patch.dict(os.environ, {
+            "MOONEP_POOL_TOKEN_CAPACITY_TIERS": "256,1024",
+            "MOONEP_POOL_CAPS": "128,512", "MOONEP_POOL_MAX_RUNGS": "invalid",
+        }, clear=True):
+            self.assertEqual(self.namespace["_moonep_pool_capacities"](4096), [256, 1024, 4096])
+
+    def test_new_maximum_count_overrides_old_name(self):
+        with patch.dict(os.environ, {
+            "MOONEP_POOL_MAX_TIER_COUNT": "8", "MOONEP_POOL_MAX_RUNGS": "100",
+        }, clear=True):
+            tiers = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+        self.assertEqual(tiers, [16, 32, 64, 128, 256, 512, 2560, 4096])
+
+    def test_invalid_new_names_do_not_fall_back(self):
+        for values in (
+            {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": "bad", "MOONEP_POOL_CAPS": "128"},
+            {"MOONEP_POOL_MAX_TIER_COUNT": "bad", "MOONEP_POOL_MAX_RUNGS": "32"},
+        ):
+            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                with self.assertRaises(ValueError):
+                    self.namespace["_moonep_pool_capacities"](4096)
+
+    def test_manual_tiers_do_not_read_count_or_budget(self):
+        count = Mock(side_effect=AssertionError("Manual tiers must skip the tier-count target"))
+        budget = Mock(side_effect=AssertionError("Manual tiers must skip the budget"))
+        with patch.dict(self.envs.env_variables, {
+            "MOONEP_POOL_MAX_TIER_COUNT": count, "MOONEP_POOL_MEMORY_BUDGET_MB": budget,
+        }), patch.dict(os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": "128,1024"}, clear=True):
+            self.assertEqual(self.namespace["_moonep_pool_capacities"](4096), [128, 1024, 4096])
+        count.assert_not_called()
+        budget.assert_not_called()
+
+    def test_tier_count_keeps_integer_parsing_and_no_new_range_validation(self):
+        for raw, expected in ((" +032 ", 32), ("8", 8), ("0", 0), ("-1", -1)):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"MOONEP_POOL_MAX_TIER_COUNT": raw}, clear=True):
+                self.assertEqual(self.envs.MOONEP_POOL_MAX_TIER_COUNT, expected)
+
+    def test_maximum_tier_count_is_still_a_generation_target(self):
+        with patch.dict(os.environ, {"MOONEP_POOL_MAX_TIER_COUNT": "1"}, clear=True):
+            tiers = self.namespace["_moonep_pool_capacities"](4096)
+        self.assertGreater(len(tiers), 1)
+        self.assertEqual(tiers[:6], [16, 32, 64, 128, 256, 512])
+        self.assertEqual(tiers[-1], 4096)
+
+    def test_tier_configuration_is_read_when_generating_without_a_new_cache(self):
+        with patch.dict(os.environ, {"MOONEP_POOL_TOKEN_CAPACITY_TIERS": "128"}, clear=True):
+            first = self.namespace["_moonep_pool_capacities"](4096)
+            os.environ["MOONEP_POOL_TOKEN_CAPACITY_TIERS"] = "512"
+            second = self.namespace["_moonep_pool_capacities"](4096)
+        self.assertEqual(first, [128, 4096])
+        self.assertEqual(second, [512, 4096])
+
+    def test_old_tier_keys_have_no_runtime_reference(self):
+        for relative in ("envs.py", "ops/fused_moe/moonep_comm.py"):
+            tree = ast.parse((SOURCE.parents[2] / relative).read_text())
+            self.assertFalse(any(isinstance(n, ast.Constant) and isinstance(n.value, str)
+                                 and any(key in n.value for key in ("MOONEP_POOL_CAPS", "MOONEP_POOL_MAX_RUNGS"))
+                                 for n in ast.walk(tree)))
 
 
 if __name__ == "__main__":

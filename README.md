@@ -222,7 +222,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `aclshmemx_init_attr_with_buffers failed with -100`，日志带 `Unsupported physical allocation properties ... locationId=...` | 同一个 id 空间问题的 **shmem 侧**：VMM 属性里是物理号、`aclrtGetDevice()` 是逻辑号，比较必然失败（修法与 dlsym 陷阱见限制 #7） |
 | `ImportError ... '_build_info'` / 找不到 `vllm_ascend`、`ascend_moonep` | 仓库没装：vllm-ascend 与 ascend-moonep 两个 editable 包没都挂上（ascend-moonep 由其 `build.sh` 的 `pip install -e .` 安装） |
 | OOM / `Failed to apply for memory`，但 `npu-smi` 看着空闲 | ① 别的容器占着卡（`npu-smi` 看不见，只有 ACL 级 `torch.npu.mem_get_info` 才反映）；② 上一次 `kill -9` 的残留进程仍持卡 |
-| `aclrtMallocPhysical(16777216, device_id=N) failed with 207001`（池初始化阶段） | **容量池档数过多**：每档除 hidden 块外还要为各算子分配 workspace（~10 个 16 MiB 级 VMM 物理块），几十档就把驱动的物理块吃光。降到 ≤32 档（`MOONEP_POOL_MAX_RUNGS`） |
+| `aclrtMallocPhysical(16777216, device_id=N) failed with 207001`（池初始化阶段） | **容量池档数过多**：每档除 hidden 块外还要为各算子分配 workspace（~10 个 16 MiB 级 VMM 物理块），几十档就把驱动的物理块吃光。降低档数目标并核对实际档位列表（`MOONEP_POOL_MAX_TIER_COUNT`） |
 | `cannot register a symmetric descriptor after buffer-backed shmem initialization` | 想在 shmem init 之后新建 `Buffer`（"懒建档"）——**库不支持**，对称堆在 init 时一次性定死 |
 | 参数改过之后跨路线 token 不再逐条一致 | **预期**：分组长度/tiling 变 ⇒ 数值末位差异 ⇒ 贪心解码分叉。跨实现不该要求 bit-exact，判据用任务准确率 |
 | `Free memory ... less than desired GPU memory utilization` | 同卡别的容器中途占回显存（`npu-smi` 之外也要看 ACL 级可用量）；自适应 GMU 会因此在运行中失效 |
@@ -231,9 +231,13 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 容量池预算迁移：`MOONEP_POOL_BUDGET_MB` 已重命名为 `MOONEP_POOL_MEMORY_BUDGET_MB`，只保留新名称的中央注册与读取，不提供旧名兼容别名。默认仍为 2048，后缀虽为 MB，换算仍是每单位 `2^20` 字节（MiB）；整数解析不变，正数参与估算，0 或负数取消预算约束。旧名单独设置时被忽略而使用新默认，新旧同时存在时仅采用新名。
 
-该值是每个形状容量池在自动生成档位时使用的估算预算，不是整卡或全部容量池的总显存硬上限，也不包含全部工作区、元数据及 VMM 对齐开销。基础档位和最大容量仍保留，`MOONEP_POOL_MAX_RUNGS` 及选档算法不变。显式指定 `MOONEP_POOL_CAPS` 仍先返回手动档位，不读取或解析预算；预算只在生成档位时查询，不增加逐层推理开销。历史实验脚本与结果不改写，自定义旧预算的启动配置重跑前需迁移。
+该值是每个形状容量池在自动生成档位时使用的估算预算，不是整卡或全部容量池的总显存硬上限，也不包含全部工作区、元数据及 VMM 对齐开销。基础档位和最大容量仍保留，`MOONEP_POOL_MAX_TIER_COUNT` 及选档算法不变。显式指定 `MOONEP_POOL_TOKEN_CAPACITY_TIERS` 仍先返回手动档位，不读取或解析预算；预算只在生成档位时查询，不增加逐层推理开销。历史实验脚本与结果不改写，自定义旧预算的启动配置重跑前需迁移。
 
 ## 关键配置/环境开关
+
+容量池档位参数迁移：`MOONEP_POOL_CAPS` 已重命名为 `MOONEP_POOL_TOKEN_CAPACITY_TIERS`，表示逗号分隔的 token 容量档位列表；`MOONEP_POOL_MAX_RUNGS` 已重命名为 `MOONEP_POOL_MAX_TIER_COUNT`，表示自动生成档位的数量目标，默认仍为 32。只保留新名称，不提供旧名兼容别名；仅设置旧名时采用新的默认行为（自动生成、档数目标32），新旧同时存在时仅采用新名。
+
+手动档位未设置或为空字符串时仍自动生成；非空配置保持原整数解析、忽略空项、去重、升序、过滤超过最大容量的值及补上最大档的行为，不新增数值校验。手动模式仍跳过档数目标及内存预算的读取和解析；自动模式仍受原档数目标和估算预算共同控制，基础档与最大档继续保留。所有档位仍在 SHMEM 初始化前预分配，运行时按跨 DP 一致的 token 数选择满足需求的最小档。历史脚本及结果不改写，重跑自定义档位/档数实验前需迁移新名称。
 
 | 开关 | 作用 |
 |---|---|
@@ -246,10 +250,10 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT` | 每个 EP rank 的冗余专家预取槽位数，默认 E/EP；当前 planning 要求等于 E/EP，其它值仍会报错，与持久缓存数量不同 |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
-| `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
+| `MOONEP_POOL_TOKEN_CAPACITY_TIERS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
 | `MOONEP_MIN_DISPATCH_TOKENS=16` | 每步选档的最小 token 下限，必须 ≥1；仅识别此变量，未设置时默认 128，实验脚本可显式设 16 |
 | `MOONEP_POOL_MEMORY_BUDGET_MB=2048` | 档位表的估算预算，单位 MiB，影响档位密度；不是包含全部工作区的总显存硬限制 |
-| `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
+| `MOONEP_POOL_MAX_TIER_COUNT=32` | 自动生成的档数目标；基础档和最大档仍保留，不是严格硬上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
 | `MOONEP_PAD_CUT=1` | 实验性：把补零行踢出 grouped GEMM。**实测错误，默认关**（见排障） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
 | `ASCEND_MOONEP_TIME_STATS=1` | 库内分段计时（barrier/planning 核/dispatch 核/边界拷贝，`[moonep-lib-tstats]`） |
@@ -270,7 +274,7 @@ MoonEP dispatch 固定按 Buffer 复用 planning 输出表和通信输出缓冲�
 
 Slot 的 home 权重发布后，符合条件的 BF16 权重固定由 home 存储接管，保留 Parameter 对象身份、shape/dtype 校验及接管后的销毁保护。量化权重及 scale 继续保留原张量，不以 BF16 字节载体接管原始量化权重存储；DSV4 Flash 属于此跳过释放的路径。Slot 发布后仍执行 `empty_cache()` 和显存统计，Off 路径不变。该静态推理路径不支持初始化后的权重热更新、sleep/RL 场景。
 
-MoonEP 固定启用自适应容量选档，使用跨 DP 一致的 step token 数选取足够大的最小档；上下文或必要元数据缺失时，仍安全回退到最大容量。`MOONEP_POOL_CAPS`、档数上限默认 32、估算预算默认 2048 MiB 和最小选档下限默认 128 保持不变，历史实验显式设置的下限 16 继续生效。容量尾部不参与真实专家负载及 GEMM 工作量。
+MoonEP 固定启用自适应容量选档，使用跨 DP 一致的 step token 数选取足够大的最小档；上下文或必要元数据缺失时，仍安全回退到最大容量。`MOONEP_POOL_TOKEN_CAPACITY_TIERS`、档数目标默认 32、估算预算默认 2048 MiB 和最小选档下限默认 128 保持不变，历史实验显式设置的下限 16 继续生效。容量尾部不参与真实专家负载及 GEMM 工作量。
 
 MoonEP 启用且 EP>1 时，首次运行时初始化固定在 SHMEM 集体初始化、建立跨设备映射前尝试预热 AICPU custom 调度器。保留 1-token metadata 调用及启动阶段同步，不进入逐层或逐请求路径；图捕获期间或目标算子未注册时跳过，算子调用/同步失败时告警并返回 False，延续现有失败处理策略。Off 和 EP≤1 的提前返回保持不变。
 
