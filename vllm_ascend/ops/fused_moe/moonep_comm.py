@@ -1036,6 +1036,35 @@ def _pads_for(E: int, K: int, H: int):
 # ---------------------------------------------------------------------------
 # Token dispatcher
 # ---------------------------------------------------------------------------
+def _moonep_dispatch_transport(quant, hidden_states) -> str:
+    """Select from per-layer quant metadata; never reinterpret quantized input."""
+    from vllm_ascend.quantization.quant_type import QuantType
+
+    if quant.quant_type != QuantType.W4A8MXFP:
+        return "bf16"
+    if hidden_states.dtype != torch.bfloat16 or not hidden_states.is_contiguous():
+        raise ValueError("MXFP8 transport expects contiguous original BF16 activations")
+    mxfp = quant.mxfp
+    if mxfp is None:
+        raise ValueError("W4A8MXFP dispatch requires MXFP quantization parameters")
+    if mxfp.act_quant_type not in (None, torch.float8_e4m3fn):
+        raise NotImplementedError("W4A8MXFP dispatch requires E4M3 activations")
+
+    # These dependencies stay lazy: native Off and BF16-only models do not
+    # need to load the SDK wire module or MXFP dtype compatibility helpers.
+    from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+    from ascend_moonep.mxfp8_transport import wire_geometry
+
+    if FLOAT8_E8M0FNU_DTYPE is None:
+        raise NotImplementedError("MXFP8 dispatch requires E8M0 scale dtype support")
+    if mxfp.per_token_scale_dtype not in (None, FLOAT8_E8M0FNU_DTYPE):
+        raise NotImplementedError("W4A8MXFP dispatch requires group32 E8M0 activation scales")
+    # Keep the SDK as the authority for wire geometry. Unsupported W4A8MXFP
+    # shapes fail here; there is no BF16 retry or exception-driven fallback.
+    wire_geometry(int(hidden_states.shape[1]))
+    return "mxfp8"
+
+
 class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
     """Dispatch home/Slot rows and combine using source-rank FP32 route weights."""
 
@@ -1044,7 +1073,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self.top_k = int(kwargs.get("top_k", 0))
         self.num_experts = int(kwargs.get("num_experts", 0))
         self.num_local_experts = int(kwargs.get("num_local_experts", 0))
-        self.activation_transport = envs.VLLM_ASCEND_MOONEP_DISPATCH_DTYPE
+        self._logged_transports: set[tuple] = set()
 
     def _tstats(self, name: str, t0: float, t1: float | None = None) -> None:
         """MOONEP_TIME_STATS=1: per-phase wall accumulation (host, incl. syncs)."""
@@ -1075,14 +1104,8 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             raise ValueError(f"MoonEP dispatch expects 2D hidden_states, got shape {tuple(hidden_states.shape)}")
         T, H = hidden_states.shape
         E, K = self.num_experts, self.top_k
-        use_mxfp8 = self.activation_transport == "mxfp8"
-        if use_mxfp8:
-            from vllm_ascend.quantization.quant_type import QuantType
-
-            if token_dispatch_input.quant.quant_type != QuantType.W4A8MXFP:
-                raise NotImplementedError("MXFP8 Slot transport currently supports W4A8MXFP")
-            if hidden_states.dtype != torch.bfloat16:
-                raise ValueError("MXFP8 transport expects the original BF16 activations")
+        transport = _moonep_dispatch_transport(token_dispatch_input.quant, hidden_states)
+        use_mxfp8 = transport == "mxfp8"
         if K <= 0 or E <= 0:
             raise ValueError(f"MoonEP: invalid geometry K={K}, E={E}")
 
@@ -1145,6 +1168,13 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 reuse_outputs=True,
             )
         _t2 = time.perf_counter()
+        quant_type = token_dispatch_input.quant.quant_type
+        log_key = (quant_type, H)
+        if log_key not in self._logged_transports:
+            reason = "W4A8MXFP_E4M3_group32" if use_mxfp8 else "existing_BF16_dispatch_path"
+            print(f"[moonep-dispatch-auto] quant_type={quant_type} transport={transport} "
+                  f"H={H} reason={reason}", flush=True)
+            self._logged_transports.add(log_key)
         if _DUMP_PLAN_DIR is not None and _DUMP_PLAN_I[0] < _DUMP_PLAN_N:
             _dump_plan(plan, cu)
 

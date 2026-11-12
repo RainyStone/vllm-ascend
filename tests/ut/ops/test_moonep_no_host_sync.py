@@ -11,16 +11,16 @@ from unittest.mock import patch
 
 import torch
 
-from test_moonep_real_tokens import Metadata, load_method
+from test_moonep_real_tokens import Metadata, dispatch_test_modules, dispatch_test_quant, load_method
 
 
 class NoHostCountSyncTests(unittest.TestCase):
     def make_dispatch(self, transport):
-        tokens, capacity, hidden, experts, topk, rows = 2, 4, 16, 4, 2, 8
+        tokens, capacity, hidden, experts, topk, rows = 2, 4, 1024, 4, 2, 8
         hidden_dtype = torch.float8_e4m3fn if transport == "mxfp8" else torch.bfloat16
         shard = torch.zeros(rows, hidden, dtype=hidden_dtype)
         weights = torch.arange(rows, dtype=torch.float32)
-        scales = torch.zeros(rows, 1, dtype=torch.uint8)
+        scales = torch.zeros(rows, hidden // 64, 2, dtype=torch.uint8)
         cu = torch.tensor([2, 3, 3, 3, 4, 4], dtype=torch.int32)
         calls = []
 
@@ -72,15 +72,14 @@ class NoHostCountSyncTests(unittest.TestCase):
         }
         dispatch = load_method("token_dispatch", namespace)
         dispatcher = SimpleNamespace(num_experts=experts, top_k=topk,
-                                     activation_transport=transport, _tstats=lambda *args: None)
-        quant_type = SimpleNamespace(W4A8MXFP=object())
+                                     _logged_transports=set(), _tstats=lambda *args: None)
+        modules = dispatch_test_modules()
         inputs = SimpleNamespace(
             hidden_states=torch.ones(tokens, hidden, dtype=torch.bfloat16),
             topk_weights=torch.full((tokens, topk), 0.5),
             topk_ids=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
-            quant=SimpleNamespace(quant_type=quant_type.W4A8MXFP),
+            quant=dispatch_test_quant(modules, transport),
         )
-        modules = {"vllm_ascend.quantization.quant_type": SimpleNamespace(QuantType=quant_type)}
         return dispatch, dispatcher, inputs, shard, weights, scales, calls, modules
 
     def invoke(self, case, old_switch):
@@ -132,9 +131,9 @@ class NoHostCountSyncTests(unittest.TestCase):
                 first = self.invoke(case, "0")
                 shard = case[3]
                 first.hidden_states.set_(torch.empty(0, dtype=shard.dtype))
-                self.assertEqual(tuple(shard.shape), (8, 16))
+                self.assertEqual(tuple(shard.shape), (8, case[2].hidden_states.shape[1]))
                 second = self.invoke(case, "0")
-                self.assertEqual(tuple(second.hidden_states.shape), (8, 16))
+                self.assertEqual(tuple(second.hidden_states.shape), (8, case[2].hidden_states.shape[1]))
                 self.assertEqual(second.hidden_states.data_ptr(), shard.data_ptr())
                 if transport == "mxfp8":
                     self.assertEqual(first.dynamic_scale.data_ptr(), second.dynamic_scale.data_ptr())

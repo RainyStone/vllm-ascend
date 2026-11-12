@@ -235,6 +235,15 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+MoonEP dispatch格式按每层实际 `MoEQuantParams` 自动选择，不再读取 `VLLM_ASCEND_MOONEP_DISPATCH_DTYPE`；删除中央注册与固定模式属性，不保留兼容别名，旧变量任意值均被忽略。`W4A8MXFP` 自动且必须走MXFP8，其余类型保留原先可用的BF16传输及MLP内必要量化，不新增INT8、普通FP8或MXFP4通信能力，不扩大模型支持范围。
+
+MXFP8继续要求原始连续BF16输入、E4M3激活、group32 E8M0激活scale和现有wire几何（H在1024～16384且为1024倍数）；MXFP元数据缺失、格式或尺寸不兼容时明确报错。量化参数中未显式指定的激活/激活scale类型沿用标准E4M3/E8M0默认语义。选中后缺wire库、ABI/接口不匹配或执行失败也直接报错，不回退BF16，不把预量化FP8直接强转BF16当作反量化。
+
+首次成功使用每种量化类型/H配置时记录自动选择及原因，不逐请求重复日志，不新增设备计数回读或host同步。保留量化一次、激活/scale打包、按有效行解包、输出缓冲复用、BF16 zero-copy、融合publish与FP32融合加权；MTE/UDMA、副流、Home GEMM1事件等待与scale复用、持久缓存限制及源端去重默认0/加权combine保护不变。现有模型布局、EP、图模式等校验继续生效；不将历史缓存设备异常视为已修复。
+
+默认语义变化：W4A8MXFP从旧变量未设时的BF16改为自动MXFP8，与近期显式mxfp8的LongBench-v2/GSM8K优化实验一致；未量化BF16模型仍走BF16。历史脚本即使显式设置旧值bf16也不能再强制BF16对照，复现该对照需使用历史代码；历史脚本和结果不改写。原生Off、All-to-All、SDK公共接口与二进制均不变。
+
+
 Planning 源端去重使用 SDK 参数 `MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENABLED`，严格接受0/1，默认0不去重（等价历史优化实验的 `ASCEND_MOONEP_SKIP_DUP=1`），1启用去重；SDK扩展首次成功读取后缓存，所有EP rank须保持一致。旧名不保留兼容，旧名单独设置任何值均被忽略；新旧同时存在时仅采用新名。此处默认改变了旧SDK未设置时执行去重的行为，依赖旧去重默认的独立SDK调用需显式设置新值1。
 
 当前Slot固定使用融合加权combine，因此新参数必须为0，MTE/UDMA主机校验继续拒绝1；现有去重前导会先无权合并专家输出，与逐路FP32加权不兼容，本次不新增两者共存能力。只迁移一次性环境审计项，不增加逐层环境查询；实际开关由SDK的匹配新版 `_C` 读取，不能继续使用旧二进制。内部tiling ABI、设备算法、dispatch dtype、副流、缓存、Home GEMM1、有效行解包、融合publish及原生Off均不变。历史脚本/结果不改写，旧的“开启去重”配置重跑前需迁移；默认关闭与已核对的优化版LongBench-v2/GSM8K配置一致。

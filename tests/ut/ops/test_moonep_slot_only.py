@@ -160,7 +160,7 @@ class NativeSelectionTests(unittest.TestCase):
             with patch.dict(os.environ, {"MOONEP_SLOT_MODE": legacy}, clear=True):
                 self.assertFalse(hasattr(envs, "MOONEP_SLOT_MODE"))
                 self.assertFalse(envs.MOONEP_KEEP_MC2)
-                self.assertEqual(envs.VLLM_ASCEND_MOONEP_DISPATCH_DTYPE, "bf16")
+                self.assertFalse(hasattr(envs, "VLLM_ASCEND_MOONEP_DISPATCH_DTYPE"))
                 self.assertFalse(hasattr(envs, "VLLM_ASCEND_MOONEP_FUSED_PUBLISH"))
                 self.assertFalse(hasattr(envs, "MOONEP_SLOT_QUANT"))
 

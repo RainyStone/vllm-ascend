@@ -25,13 +25,6 @@ from typing import Any
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
-def _moonep_dispatch_dtype() -> str:
-    value = os.getenv("VLLM_ASCEND_MOONEP_DISPATCH_DTYPE", "bf16").lower()
-    if value not in ("bf16", "mxfp8"):
-        raise ValueError("VLLM_ASCEND_MOONEP_DISPATCH_DTYPE must be bf16 or mxfp8")
-    return value
-
-
 def _moonep_prefetch_side_stream_overlap() -> str:
     value = os.getenv("MOONEP_PREFETCH_SIDE_STREAM_OVERLAP", "dispatch")
     if value not in ("none", "dispatch", "dispatch|home_gemm1"):
@@ -100,9 +93,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Non-sensitive; set before worker startup. Home GEMM1 requires cache off
     # and an already-supported Home GEMM backend/operator library.
     "MOONEP_PREFETCH_SIDE_STREAM_OVERLAP": _moonep_prefetch_side_stream_overlap,
-    # MoonEP activation transport: bf16 (default) or mxfp8 (Slot W4A8MXFP,
-    # REAL_T only). Non-sensitive; no change to model weights or combine dtype.
-    "VLLM_ASCEND_MOONEP_DISPATCH_DTYPE": _moonep_dispatch_dtype,
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
