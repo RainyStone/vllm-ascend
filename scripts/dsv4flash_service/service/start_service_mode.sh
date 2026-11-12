@@ -76,7 +76,7 @@ set -x
 # 只认真正的环境变量（printenv），shell 里没 export 的同名变量不算。
 PRE_ENV=""
 for v in MOONEP MOONEP_SLOT_MODE MOONEP_SLOT_STATS MOONEP_SHMEM_BOOTSTRAP MOONEP_SHMEM_IPPORT \
-         MOONEP_DISABLE_UDMA MOONEP_BALANCE_STATS MOONEP_BALANCE_STATS_EVERY \
+         MOONEP_TRANSPORT_TYPE MOONEP_BALANCE_STATS MOONEP_BALANCE_STATS_EVERY \
          VLLM_ASCEND_MOE_PAR_STATS \
          VLLM_ASCEND_MOE_PAR_STATS_DIR \
          VLLM_ASCEND_MOE_PAR_STATS_TAG VLLM_ASCEND_MOE_PAR_FLUSH_EVERY; do
@@ -241,7 +241,7 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn   # worker 用 spawn；fork 子进程�
 unset MOONEP_SHMEM_IPPORT                   # 清掉可能残留的上一次设置
 export MOONEP_SHMEM_BOOTSTRAP=ipport        # MoonEP shmem 引导方式必须用 ipport(config-store)；
                                             # uid 走 HCCL 广播会死锁
-export MOONEP_DISABLE_UDMA=1                # 关 UDMA，走 MTE 内核；要用 URMA/UDMA 时去掉这行
+export MOONEP_TRANSPORT_TYPE=mte            # mte（默认）或 udma；切换传输类型直接修改此处
 export ASCEND_MOONEP_BUILD_DIR=$WS/ascend-moonep/ascend_moonep   # 编好的 ascend_moonep（含 _C.cpython-*.so）
 export LD_LIBRARY_PATH=$ASCEND_MOONEP_BUILD_DIR/lib:$LD_LIBRARY_PATH   # libshmem.so 在这个 lib/ 下
 
@@ -367,7 +367,7 @@ cat <<EOF | tee -a "$LOG_FILE"
 ════════════════════════════════════ 启动核对 ════════════════════════════════════
  模式        mode=$MODE —— $MODE_DESC
  MoonEP      enable_moonep=$ENABLE_MOONEP   MOONEP=${MOONEP:-未设}   MOONEP_SLOT_MODE=${MOONEP_SLOT_MODE:-未设}   MOONEP_SLOT_STATS=${MOONEP_SLOT_STATS:-未设}
- 引导/传输   MOONEP_SHMEM_BOOTSTRAP=$MOONEP_SHMEM_BOOTSTRAP   MOONEP_SHMEM_IPPORT=${MOONEP_SHMEM_IPPORT:-未设}   MOONEP_DISABLE_UDMA=${MOONEP_DISABLE_UDMA:-未设}
+ 引导/传输   MOONEP_SHMEM_BOOTSTRAP=$MOONEP_SHMEM_BOOTSTRAP   MOONEP_SHMEM_IPPORT=${MOONEP_SHMEM_IPPORT:-未设}   MOONEP_TRANSPORT_TYPE=${MOONEP_TRANSPORT_TYPE:-未设}
  采集        MOE_PAR=${MOE_PAR:-0} → $DUMP_DIR$DUMP_DIR_NOTE（每 ${VLLM_ASCEND_MOE_PAR_FLUSH_EVERY:-16} 步落盘，文件 moe_par_serve_${MODE}_rank<r>.log）
              PROFILE=${PROFILE:-0} → $PROFILE_DIR（= OUT_DIR/profiling）
  负载计数    BALANCE=$BALANCE   MOONEP_BALANCE_STATS=${MOONEP_BALANCE_STATS:-未设}   EVERY=${MOONEP_BALANCE_STATS_EVERY:-0} —— $BALANCE_DESC

@@ -58,9 +58,22 @@ def _moonep_shmem_bootstrap_type() -> str:
     return value
 
 
+def _moonep_transport_type() -> str:
+    value = os.getenv("MOONEP_TRANSPORT_TYPE", "mte")
+    if value not in ("mte", "udma"):
+        raise ValueError(
+            f"MOONEP_TRANSPORT_TYPE must be mte or udma, got {value!r}"
+        )
+    return value
+
+
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # MoonEP dispatch/combine/weight-prefetch transport; planning stays native.
+    # Non-sensitive; exact lowercase mte (default) or udma. Read at startup,
+    # without whitespace/case normalization or fallback to the removed flag.
+    "MOONEP_TRANSPORT_TYPE": _moonep_transport_type,
     # SHMEM ipport bootstrap's TCP port only; IP comes from vLLM's DP master.
     # Non-sensitive; integer, default 28765. Read only for the ipport branch;
     # preserve existing integer parsing without adding port-range validation.

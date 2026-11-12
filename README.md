@@ -132,7 +132,7 @@ export LD_LIBRARY_PATH=$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export MOONEP=1 MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport      # 引擎必须 ipport(config-store)引导,见限制#1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False  # URMA 必需,见限制#1②
-export MOONEP_DISABLE_UDMA=1             # MTE 内核(无需 URMA 时;开 URMA 去掉此行)
+export MOONEP_TRANSPORT_TYPE=mte         # mte（默认）或 udma；只接受精确小写值
 ```
 
 ## 使用
@@ -235,6 +235,12 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+传输类型迁移：`MOONEP_DISABLE_UDMA` 已删除，统一使用 `MOONEP_TRANSPORT_TYPE`，严格接受精确小写 `mte` 或 `udma`，不自动去空格或转换大小写。**默认改为 `mte`**：旧代码未设置/0时请求UDMA，旧值1选择MTE；新代码未设置时选择MTE。旧名不保留兼容，单独设置任何旧值（包括0）均被忽略，新旧同时存在时只采用新名；旧UDMA配置必须改为 `MOONEP_TRANSPORT_TYPE=udma`。
+
+该参数在原初始化位置读取，统一控制vLLM MoonEP的dispatch、combine和权重prefetch，不表示激活或权重量化格式；planning保持SDK原生路径。Buffer与SHMEM使用一致的后端选择，初始化时继续核对实际后端，不匹配明确报错，不新增静默降级。原生Off与KEEP_MC2选路不变，不增加逐层环境查询或运行中切换。
+
+UDMA副流仍要求Ascend950 direct-mode构建、独立QP初始化/ready校验和显式完成事件；MTE不启用UDMA上下文或专用QP，保留MTE副流重叠。缓存、Home GEMM1、MXFP8、有效行解包、融合publish和BF16 zero-copy的原限制与事件依赖均不变。本次不修复或重新验证UDMA/URMA与分配器的历史兼容问题。SDK独立布尔接口及内部逐阶段后端变量不改；SDK创建上下文时会写入这些内部变量，不能把它们当作vLLM统一后端选择的替代配置。通用 `service/start_service_mode.sh` 保持显式MTE；历史实验脚本和结果不改写，重跑前需迁移旧名。
+
 SHMEM 引导端口迁移：`MOONEP_SHMEM_IP_PORT` 已重命名为 `MOONEP_SHMEM_BOOTSTRAP_PORT`，只保留新名称的中央注册与读取，不提供旧名兼容别名；默认仍为28765。值只表示整数端口，IP继续来自vLLM的DP master配置，并按原方式组装 `tcp://IP:端口`。旧名单独设置时被忽略而采用新默认，新旧同时存在时仅采用新名；历史脚本与结果不改写，自定义旧端口的配置重跑前需迁移。
 
 该参数仍只在 `MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport` 分支、原初始化位置读取，保留int解析和现有校验策略，不新增端口范围限制；非整数在该分支报错。`uid` 分支不读取或解析端口，即使端口值非法也不影响其选择。多机地址检查、AICPU预热/SHMEM初始化顺序、SDK的 `ip_port` 接口参数以及MTE/UDMA、副流QP和其他优化均保持不变，不增加逐层推理查询。
@@ -252,9 +258,9 @@ SHMEM 引导参数迁移：`MOONEP_SHMEM_BOOTSTRAP` 已重命名为 `MOONEP_SHME
 | `MOONEP=1`（additional_config `enable_moonep`） | 启用 MoonEP comm（需 EP>1） |
 | `MOONEP_SHMEM_BOOTSTRAP_TYPE=ipport` | SHMEM 引导类型，只接受 `ipport`/`uid`，默认 `ipport`；引擎沿用 config-store 路径，UID/HCCL 广播的历史故障见限制#1 |
 | `MOONEP_SHMEM_BOOTSTRAP_PORT` | ipport 引导的 config-store 端口（默认 28765） |
-| `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
+| `MOONEP_TRANSPORT_TYPE=mte` | dispatch/combine/权重预取统一使用 mte（默认）或 udma；planning 保持原生路径，非法值明确报错 |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
-| `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
+| `ASCEND_MOONEP_DISPATCH_USE_UDMA` | SDK内部逐阶段后端状态；创建上下文时由SDK写入，不是vLLM统一传输类型的替代开关 |
 | `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT` | 每个 EP rank 的冗余专家预取槽位数，默认 E/EP；当前 planning 要求等于 E/EP，其它值仍会报错，与持久缓存数量不同 |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |

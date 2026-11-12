@@ -695,7 +695,9 @@ class _MoonEPRuntime:
         capacity = get_moonep_tokens_capacity()
         if capacity is None or capacity <= 0:
             raise RuntimeError("MoonEP: token capacity S was not configured (set_moonep_tokens_capacity).")
-        use_udma = os.environ.get("MOONEP_DISABLE_UDMA", "0") != "1"
+        # Fix the transport once before creating Buffers and SHMEM contexts.
+        # Planning remains native; the other three stages must match this choice.
+        use_udma = envs.MOONEP_TRANSPORT_TYPE == "udma"
 
         keys = sorted(_registry_keys())
         if not keys:
