@@ -3843,8 +3843,8 @@ class NPUModelRunner(GPUModelRunner):
             maybe_install_pf_stream,
         )
 
-        # MOONEP_PF_STREAM: 1 为事件诊断，2 与同层 dispatch 重叠，
-        # 3 进一步与 Home GEMM1 重叠；0 不安装钩子。
+        # Real-plan prefetch overlap defaults to dispatch; the installer skips
+        # native Off, EP<=1, and the explicit "none" setting.
         maybe_install_pf_stream(self.model)
 
     def _start_dump_data(self) -> None:

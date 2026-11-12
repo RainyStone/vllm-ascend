@@ -678,12 +678,11 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
 # Same-layer prefetch uses the real plan after planning and before dispatch.
 # SDK prefetch never inserts cross-rank barriers. Event dependencies below
 # order side-stream transfers, consumers, and slot reuse.
-# MOONEP_PF_STREAM:
-#   0 = off (default)
-#   1 = event-pipeline diagnostic; prefetch stays on the main stream
-#   2 = overlap prefetch with dispatch; wait before unified GEMM
-#   3 = also run Home GEMM1 before waiting; Slot GEMM1 waits for prefetch
-_PF_STREAM = int(os.environ.get("MOONEP_PF_STREAM", "0"))
+# none: serial prefetch on the main stream, followed by unified GEMM.
+# dispatch (default): side-stream prefetch overlaps dispatch; join before GEMM.
+# dispatch|home_gemm1: run Home GEMM1 before joining, then run Slot GEMM1.
+# Snapshot the validated setting at module load, not in the per-layer hot path.
+_PREFETCH_OVERLAP = envs.MOONEP_PREFETCH_SIDE_STREAM_OVERLAP
 _PF_STREAMED = [0]
 
 _PF: dict = {"stream": None, "done": False, "fail": 0, "cur_key": None}
@@ -700,14 +699,21 @@ def _pf_state_for(key):
 
 
 def maybe_install_pf_stream(model) -> None:
-    """MOONEP_PF_STREAM=1: 让 after_planning 钩子知道"当前是哪一层"。
+    """Let the real-plan prefetch hook identify the current MoE layer.
 
     钩子在库的 `_run_dispatch_on_current_stream` 里触发（planning 之后、
     dispatch 之前），需要拿到本层的 `_LayerWeightState` 才能发 prefetch。
     层的识别方式：用 `experts.w13_weight` 的 id 当 key，
     由 decoder 层的 forward pre-hook 在每层开始时记下。
     """
-    if not _PF_STREAM or _PF["done"]:
+    if _PREFETCH_OVERLAP == "none" or _PF["done"]:
+        return
+    from vllm_ascend.ascend_config import get_ascend_config
+    from vllm.distributed.parallel_state import get_ep_group
+
+    if not get_ascend_config().enable_moonep:
+        return
+    if get_ep_group().world_size <= 1:
         return
     try:
         from vllm_ascend.ops.fused_moe import moonep_comm as mc
@@ -771,7 +777,7 @@ def _prepare_slot_cache(state, plan):
 
 def udma_prefetch_overlap_requested(use_udma: bool, slot_mode: bool) -> bool:
     """Use the existing side-stream switch; no independent transport toggle."""
-    return bool(use_udma and slot_mode and _PF_STREAM >= 2)
+    return bool(use_udma and slot_mode and _PREFETCH_OVERLAP != "none")
 
 
 def _pf_stream_hook(buffer):
@@ -787,7 +793,7 @@ def _pf_stream_hook(buffer):
         ctx = buffer._require_ctx()
         # Check before any stream/event submission. Never silently run an old
         # UDMA runtime on shared QP0 when overlap is requested.
-        if (_PF_STREAM >= 2 and ctx.get("_prefetch_use_udma", False)
+        if (_PREFETCH_OVERLAP != "none" and ctx.get("_prefetch_use_udma", False)
                 and not ctx.get("udma_prefetch_overlap_ready", False)):
             raise RuntimeError("UDMA prefetch overlap requires dedicated QP initialization")
         try:
@@ -798,12 +804,6 @@ def _pf_stream_hook(buffer):
             import torch_npu
 
             main = torch_npu.npu.current_stream()
-            if _PF_STREAM < 2:
-                # 诊断档：只走一遍事件管道，prefetch 留给 run_slot_forward 在主
-                # stream 上发。输出与档 0 完全一致，差值就是管道本身的开销。
-                main.record_event()
-                _PF_STREAMED[0] += 1
-                return
             ctx = buffer._require_ctx()
             if ctx.get("slot_prefetch_ready") is not None:
                 raise RuntimeError("Unconsumed Slot prefetch from the preceding layer")
@@ -825,7 +825,7 @@ def _pf_stream_hook(buffer):
                 from vllm.distributed.parallel_state import get_ep_group
 
                 rank = get_ep_group().rank_in_group
-                print(f"[pf-stream-active r{rank}] mode={_PF_STREAM} cache_aware=1", flush=True)
+                print(f"[pf-stream-active r{rank}] overlap={_PREFETCH_OVERLAP} cache_aware=1", flush=True)
             _PF_STREAMED[0] += 1
         except Exception as exc:  # noqa: BLE001 - preserve the MTE diagnostic path
             if ctx.get("_prefetch_use_udma", False):
@@ -868,9 +868,9 @@ def run_slot_forward(
             "MoonEP slot mode cannot run inside captured graphs; "
             "run with --enforce-eager (or disable graph capture) when enable_moonep is on."
         )
-    home_overlap = _PF_STREAM == 3
+    home_overlap = _PREFETCH_OVERLAP == "dispatch|home_gemm1"
     if home_overlap and MOONEP_SLOT_CACHE > 0:
-        raise RuntimeError("Home GEMM mode 3 currently requires cache disabled")
+        raise RuntimeError("Home GEMM overlap currently requires cache disabled")
     plan_use = plan
     _sync = os.environ.get("MOONEP_PF_TIMING", "0") == "1"
     if _sync:
@@ -881,7 +881,7 @@ def run_slot_forward(
     # Install before the next dispatch; first use safely takes the main-stream
     # path. When the hook ran, reuse its cache decision and completion event.
     prefetched = None
-    if _PF_STREAM:
+    if _PREFETCH_OVERLAP != "none":
         _pf_ctx = buffer._require_ctx()
         if _pf_ctx.get('after_planning_hook') is None:
             _pf_ctx['after_planning_hook'] = _pf_stream_hook(buffer)
@@ -915,10 +915,9 @@ def run_slot_forward(
         acc[0] += time.perf_counter() - _t_pf
         acc[1] += 1
     if pf_ev is not None and not home_overlap:
-        # MOONEP_PF_STREAM：prefetch 在 side stream 上跑，主 stream 一路走到
-        # dispatch 结束都不用等它。但下面 cache 回填和 GEMM 都要读 slot，所以在
-        # 这里 join。此时 dispatch 的 host 时间和设备时间都已经过去，prefetch
-        # 的 279us 被盖掉了。
+        # Side-stream prefetch overlaps dispatch; the main stream proceeds until
+        # cache refill / unified GEMM needs Slot weights. Join here before
+        # consuming them; actual overlap depends on the current workload.
         import torch_npu as _tn_pf
 
         _tn_pf.npu.current_stream().wait_event(pf_ev)
@@ -959,7 +958,7 @@ def run_slot_forward(
 
             rank = get_ep_group().rank_in_group
             transport = "udma" if buffer._require_ctx().get("_prefetch_use_udma", False) else "mte"
-            print(f"[home-gemm-active r{rank}] mode=3 split=gemm1 home={state.epn} "
+            print(f"[home-gemm-active r{rank}] overlap={_PREFETCH_OVERLAP} split=gemm1 home={state.epn} "
                   f"slots={state.B} prefetch={transport} backend={mlp_compute_input.quant.quant_type} "
                   f"library={runner.library_path}", flush=True)
             runner.activation_logged = True

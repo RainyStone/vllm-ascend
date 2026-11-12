@@ -23,7 +23,28 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 `MOONEP_FORCE_ALLGATHER` 已移除，固定采用原默认值 0 的正常选路：A5 小步满足条件时走 MC2，其余按并行规模与 top-k 选择 AllGather 或 All-to-All，必要的原生 AllGather 分支继续保留。MoonEP 的 SHMEM/Slot 覆盖、`MOONEP_KEEP_MC2` 和容量/EP 校验不变。旧值 1 不再强制 AllGather，原有 MC2 建链问题的手动规避入口不再提供，本次不新增自动回退；历史实验记录保留原样。
 
-`MOONEP_EARLY_PREFETCH` 与专用的 `MOONEP_EARLY_PF_DEV` 已移除，固定采用原 `MOONEP_EARLY_PREFETCH=0` 的行为：不再用同一层上一次执行的 plan 在 attention 前投机预取，也不再安装对应 hook、保存预测行或进行预测修补。旧变量设为 1 不再启用该能力。`MOONEP_PF_STREAM` 仍保留 0/1/2/3 档与默认值 0：关闭、事件诊断、同层真实 planning 后与 dispatch 重叠、进一步与 Home GEMM1 重叠。共享副流/事件、MTE/UDMA 保护及缓存联动继续保留，Home GEMM 模式仍要求关闭持久缓存。`MOONEP_EARLY_PLAN` 独立诊断、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变；历史实验脚本和记录保留原样，最近 GSM8K/LongBench-v2 使用的是 `EARLY_PREFETCH=0` 与 `PF_STREAM=2`。
+`MOONEP_EARLY_PREFETCH` 与专用的 `MOONEP_EARLY_PF_DEV` 已移除，固定采用原 `MOONEP_EARLY_PREFETCH=0` 的行为：不再用同一层上一次执行的 plan 在 attention 前投机预取，也不再安装对应 hook、保存预测行或进行预测修补。旧变量设为 1 不再启用该能力。同层真实 planning 后的副流预取由 `MOONEP_PREFETCH_SIDE_STREAM_OVERLAP` 控制；共享流/事件、MTE/UDMA 保护及缓存联动继续保留，Home GEMM 模式仍要求关闭持久缓存。`MOONEP_EARLY_PLAN` 独立诊断、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变；历史实验脚本和结果保留原样。
+
+
+### 同层预取副流重叠
+
+`MOONEP_PREFETCH_SIDE_STREAM_OVERLAP` 在起服前设置，只接受以下精确取值：
+
+| 取值 | 行为 | 对应旧值 |
+|---|---|---|
+| `none` | 主流串行执行 dispatch、必要的权重预取/缓存处理及完整 GEMM；不关闭 Slot 或必要的权重搬运 | `MOONEP_PF_STREAM=0` |
+| `dispatch`（默认） | 真实 planning 后发起副流预取，与 dispatch 重叠；缓存回填或完整 GEMM 读取 Slot 前等待完成事件 | `MOONEP_PF_STREAM=2` |
+| `dispatch\|home_gemm1` | 进一步先执行 Home GEMM1，再等待预取、执行 Slot GEMM1；GEMM2 仍合并 | `MOONEP_PF_STREAM=3` |
+
+组合值在 shell 中必须加引号，例如：
+
+```bash
+export MOONEP_PREFETCH_SIDE_STREAM_OVERLAP='dispatch|home_gemm1'
+```
+
+这是启动配置，不支持服务运行中切换。关闭重叠时，SDK 使用当前流，MTE/UDMA 内核保留传输完成检查；UDMA 使用现有非重叠队列布局。两种重叠模式保留 planning、dispatch、预取、消费者及槽位复用之间的事件依赖，UDMA 仍要求独立 QP 及现有设备能力检查。Home GEMM1 模式仍要求 `MOONEP_SLOT_CACHE=0`，并满足现有 BF16/W4A8MXFP 后端、形状、激活及专用算子库限制；不新增模型支持或静默回退。持久缓存自身的既有问题不在本次重命名修复范围内。
+
+迁移说明：`MOONEP_PF_STREAM` 已移除，不保留兼容别名；原事件管道诊断值 1 一并移除。默认值从原 0 改为 `dispatch`，与最近 GSM8K/LongBench-v2 优化实验显式使用的原值 2 一致。只设置旧名时（包括 0、3 或非法值）会被忽略而采用新默认；新旧同时设置时仅采用新名。历史脚本及结果不改写，重跑前需迁移参数，不能再依据旧值 0/3 判断当前模式。原生 Off 或 EP<=1 不安装副流层 hook，`KEEP_MC2` 正常选路保持不变；MXFP8、融合 publish、有效行解包和其他优化不变。
 
 `MOONEP_NO_PIN` 已移除，固定采用原默认值 0 的行为：Ascend 平台继续声明支持 pinned host memory，原生 Off 与 MoonEP Slot 使用相同的平台能力查询；不改写调用处显式指定的 `pin_memory=False`。旧值 1 不再切换到 pageable memory，原有 `aclrtMallocHostWithCfg` 207001 分配失败的手动规避入口不再提供；本次不修复该分配问题，也不增加失败后自动回退。SHMEM/VMM、权重预取、副流、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变，历史实验脚本和记录保留原样。
 

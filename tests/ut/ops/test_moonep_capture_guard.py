@@ -74,7 +74,7 @@ class CaptureGuardTests(unittest.TestCase):
     def test_missing_forward_context_keeps_existing_fallback(self):
         case = self.harness()
         case.ns.pop("_EXTRA_CTX")
-        case.ns["_PF_STREAM"] = 0
+        case.ns["_PREFETCH_OVERLAP"] = "none"
         plan = cache_cases.Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         self.assertEqual(case.forward(plan).flatten().tolist(), [11., 22.])
         self.assertEqual(case.events, ["prefetch", "gemm"])
@@ -87,7 +87,7 @@ class CaptureGuardTests(unittest.TestCase):
 
         case = self.harness()
         case.ns["_EXTRA_CTX"] = MissingContext()
-        case.ns["_PF_STREAM"] = 0
+        case.ns["_PREFETCH_OVERLAP"] = "none"
         plan = cache_cases.Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         self.assertEqual(case.forward(plan).flatten().tolist(), [11., 22.])
 

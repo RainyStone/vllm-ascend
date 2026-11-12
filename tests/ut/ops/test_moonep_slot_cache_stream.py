@@ -90,7 +90,7 @@ class CacheStreamTests(unittest.TestCase):
         self.state.prefetch_views = lambda: []
         self.ns.update(
             MOONEP_SLOT_CACHE=2, _SLOT_CACHE_STATS={}, _PF_SKIPPED=[0],
-            _PF_STREAM=2, _PF_STREAMED=[0],
+            _PREFETCH_OVERLAP="dispatch", _PF_STREAMED=[0],
             _PF={"cur_key": 1, "stream": None, "fail": 0},
             _pf_state_for=lambda key: self.state, _pf_prefetch=prefetch,
             _EXTRA_CTX=types.SimpleNamespace(capturing=False),
@@ -153,7 +153,7 @@ class CacheStreamTests(unittest.TestCase):
         self.assertEqual(self.state.cache_stats, [0, 0])
 
     def test_main_stream_cache_path(self):
-        self.ns["_PF_STREAM"] = 0
+        self.ns["_PREFETCH_OVERLAP"] = "none"
         plan = Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         self.assertEqual(self.forward(plan).flatten().tolist(), [11., 22.])
         self.assertNotIn("after_planning_hook", self.ctx)

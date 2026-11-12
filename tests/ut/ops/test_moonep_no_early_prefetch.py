@@ -1,5 +1,6 @@
 """CPU regressions for removal of speculative pre-attention prefetch."""
 import ast
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -17,11 +18,11 @@ BALANCE = ROOT / "vllm_ascend/ops/fused_moe/moonep_balance.py"
 
 
 class NoEarlyPrefetchTests(unittest.TestCase):
-    def harness(self, mode=2, cache=0):
+    def harness(self, mode="dispatch", cache=0):
         case = cache_cases.CacheStreamTests()
         case.setUp()
         self.addCleanup(case.doCleanups)
-        case.ns.update(_PF_STREAM=mode, MOONEP_SLOT_CACHE=cache)
+        case.ns.update(_PREFETCH_OVERLAP=mode, MOONEP_SLOT_CACHE=cache)
         return case
 
     def check_old_value(self, value):
@@ -61,23 +62,14 @@ class NoEarlyPrefetchTests(unittest.TestCase):
             self.assertEqual(len(case.calls), 1)
 
     def test_main_stream_mode_fetches_without_side_event(self):
-        case = self.harness(mode=0)
+        case = self.harness(mode="none")
         plan = cache_cases.Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         case.forward(plan)
         self.assertEqual(case.events, ["prefetch", "gemm"])
         self.assertNotIn("after_planning_hook", case.ctx)
 
-    def test_event_diagnostic_leaves_fetch_on_main_stream(self):
-        case = self.harness(mode=1)
-        plan = cache_cases.Plan(torch.tensor([[1, 2]], dtype=torch.int32))
-        case.hook(plan)
-        self.assertEqual(case.calls, [])
-        self.assertEqual(case.events, ["record"])
-        case.forward(plan)
-        self.assertEqual(case.events, ["record", "prefetch", "gemm"])
-
     def test_home_mode_passes_completion_event_to_home_runner(self):
-        case = self.harness(mode=3)
+        case = self.harness(mode="dispatch|home_gemm1")
         runner = types.SimpleNamespace(activation_logged=True)
         case.state.home_gmm_runner = lambda: runner
         case.state.epn = 1
@@ -102,7 +94,7 @@ class NoEarlyPrefetchTests(unittest.TestCase):
         self.assertEqual(len(case.calls), 1)
 
     def test_home_mode_still_rejects_persistent_cache(self):
-        case = self.harness(mode=3, cache=2)
+        case = self.harness(mode="dispatch|home_gemm1", cache=2)
         plan = cache_cases.Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         with self.assertRaisesRegex(RuntimeError, "requires cache disabled"):
             case.forward(plan)
@@ -117,20 +109,23 @@ class NoEarlyPrefetchTests(unittest.TestCase):
                 statements.append(node)
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(isinstance(t, ast.Name) and t.id in {"_PF", "_PF_STREAM"} for t in targets):
+                if any(isinstance(t, ast.Name) and t.id in {"_PF", "_PREFETCH_OVERLAP"} for t in targets):
                     statements.append(node)
-        ns = {"os": os}
-        with patch.dict(os.environ, {"MOONEP_PF_STREAM": str(mode),
+        spec = importlib.util.spec_from_file_location("prefetch_envs", ROOT / "vllm_ascend/envs.py")
+        envs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(envs)
+        ns = {"envs": envs}
+        with patch.dict(os.environ, {"MOONEP_PREFETCH_SIDE_STREAM_OVERLAP": mode,
                                     "MOONEP_EARLY_PREFETCH": "1", "MOONEP_EARLY_PF_DEV": "1"}):
             exec(compile(ast.Module(body=statements, type_ignores=[]), str(BALANCE), "exec"), ns)
         return ns
 
     def test_shared_state_retains_only_real_plan_stream_fields(self):
-        ns = self.installer(2)
+        ns = self.installer("dispatch")
         self.assertEqual(ns["_PF"], {"stream": None, "done": False, "fail": 0, "cur_key": None})
 
     def test_real_plan_layer_hook_installs_once_and_sets_key(self):
-        ns = self.installer(2)
+        ns = self.installer("dispatch")
         hooks = []
         weight = object()
         layer = types.SimpleNamespace(mlp=types.SimpleNamespace(
@@ -139,6 +134,10 @@ class NoEarlyPrefetchTests(unittest.TestCase):
         mc = types.SimpleNamespace(_early_layers=lambda model: [layer])
         with patch.dict(sys.modules, {
             "vllm_ascend.ops.fused_moe": types.SimpleNamespace(moonep_comm=mc),
+            "vllm_ascend.ascend_config": types.SimpleNamespace(
+                get_ascend_config=lambda: types.SimpleNamespace(enable_moonep=True)),
+            "vllm.distributed.parallel_state": types.SimpleNamespace(
+                get_ep_group=lambda: types.SimpleNamespace(world_size=8)),
         }):
             ns["maybe_install_pf_stream"](object())
             ns["maybe_install_pf_stream"](object())
@@ -148,7 +147,7 @@ class NoEarlyPrefetchTests(unittest.TestCase):
         self.assertTrue(ns["_PF"]["done"])
 
     def test_off_mode_does_not_install_layer_hook(self):
-        ns = self.installer(0)
+        ns = self.installer("none")
         ns["maybe_install_pf_stream"](object())
         self.assertFalse(ns["_PF"]["done"])
 

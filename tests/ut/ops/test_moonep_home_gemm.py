@@ -199,7 +199,7 @@ class HomeSlotIntegrationTests(unittest.TestCase):
         self.case = CacheStreamTests(methodName="runTest")
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
-        self.case.ns["_PF_STREAM"] = 3
+        self.case.ns["_PREFETCH_OVERLAP"] = "dispatch|home_gemm1"
         self.case.ns["MOONEP_SLOT_CACHE"] = 0
         self.case.state.caches = {}
         self.case.state.epn = self.case.state.B = 2

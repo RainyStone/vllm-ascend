@@ -32,9 +32,23 @@ def _moonep_dispatch_dtype() -> str:
     return value
 
 
+def _moonep_prefetch_side_stream_overlap() -> str:
+    value = os.getenv("MOONEP_PREFETCH_SIDE_STREAM_OVERLAP", "dispatch")
+    if value not in ("none", "dispatch", "dispatch|home_gemm1"):
+        raise ValueError(
+            "MOONEP_PREFETCH_SIDE_STREAM_OVERLAP must be none, dispatch, "
+            "or dispatch|home_gemm1"
+        )
+    return value
+
+
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # MoonEP prefetch overlap: none, dispatch (default), dispatch|home_gemm1.
+    # Non-sensitive; set before worker startup. Home GEMM1 requires cache off
+    # and an already-supported Home GEMM backend/operator library.
+    "MOONEP_PREFETCH_SIDE_STREAM_OVERLAP": _moonep_prefetch_side_stream_overlap,
     # MoonEP activation transport: bf16 (default) or mxfp8 (Slot W4A8MXFP,
     # REAL_T only). Non-sensitive; no change to model weights or combine dtype.
     "VLLM_ASCEND_MOONEP_DISPATCH_DTYPE": _moonep_dispatch_dtype,
