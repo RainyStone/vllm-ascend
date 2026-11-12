@@ -235,6 +235,12 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+内核并行参数清理：vLLM 不再读取或透传 `MOONEP_NUM_SMS`，不保留兼容入口；旧值（包括非法字符串）均被忽略。创建 Buffer 时省略 `num_sms`，继续采用 SDK 默认32。此前通过旧变量把大容量档 Planning 改成8～31的配置需要迁移至 `MOONEP_PLANNING_NUM_SMS`；旧变量未设或设为32、56时的 Planning 选择保持一致。
+
+保留 SDK 的 `MOONEP_PLANNING_NUM_SMS`：未设置或为空时，按每个 Buffer 的容量 `S×K` 自动选核，≤8192使用8，其余在 SDK 默认值下使用32；该容量不是逐请求的实际有效 token 数。显式非空值沿用 int 解析与[8,56]校验，覆盖自动规则。最终 Planning block 数同时用于工作区大小计算和 PlanningOp 创建，不能只改变启动核数而沿用旧工作区。
+
+此次不删除或更改 SDK 公共 `Buffer(num_sms=...)` 接口，独立 SDK 调用仍可传参；不修改 SDK 自动选核算法、源码或二进制。Dispatch、Combine、Prefetch 的底层启动策略、专家 GEMM、副流、MXFP8、有效行解包、融合 publish、BF16 zero-copy 和原生 Off 均不变；不涉及独立的 `MOONEP_NUM_SMS_DEDUP` 参数。清理 vLLM 中将旧变量描述为统一控制各阶段核数的过时注释，历史实验脚本与结果不改写。
+
 传输类型迁移：`MOONEP_DISABLE_UDMA` 已删除，统一使用 `MOONEP_TRANSPORT_TYPE`，严格接受精确小写 `mte` 或 `udma`，不自动去空格或转换大小写。**默认改为 `mte`**：旧代码未设置/0时请求UDMA，旧值1选择MTE；新代码未设置时选择MTE。旧名不保留兼容，单独设置任何旧值（包括0）均被忽略，新旧同时存在时只采用新名；旧UDMA配置必须改为 `MOONEP_TRANSPORT_TYPE=udma`。
 
 该参数在原初始化位置读取，统一控制vLLM MoonEP的dispatch、combine和权重prefetch，不表示激活或权重量化格式；planning保持SDK原生路径。Buffer与SHMEM使用一致的后端选择，初始化时继续核对实际后端，不匹配明确报错，不新增静默降级。原生Off与KEEP_MC2选路不变，不增加逐层环境查询或运行中切换。

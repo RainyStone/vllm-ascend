@@ -730,18 +730,9 @@ class _MoonEPRuntime:
                     int(cap), H, K, E, R,
                     token_padding=1, B=_moonep_slot_count(E, E // R), group=group,
                     explicitly_destroy=True,
-                    # MOONEP_NUM_SMS: block count for the MoonEP kernels
-                    # (library default 32). Measured on the slot path:
-                    # 32 -> 56 cuts planning_kernel 278 -> 242 us/layer (-13%),
-                    # dispatch -20%, combine -13%, total device time -7%, but
-                    # the step time is unchanged (71.3 vs 71.9 ms, noise) --
-                    # planning is latency-bound on the cross-rank histogram
-                    # exchange, so the saving is absorbed by the barriers.
-                    # Kept as an env knob (unset = library default); the legal
-                    # range is [8, 56] -- 64+ fails at init with
-                    # "planning core_num must be in [8, 56]".
-                    **({"num_sms": int(os.environ["MOONEP_NUM_SMS"])}
-                       if os.environ.get("MOONEP_NUM_SMS") else {}),
+                    # Keep the SDK's num_sms default. Planning selects its own
+                    # block count and sizes its workspace consistently; only
+                    # MOONEP_PLANNING_NUM_SMS overrides that selection.
                     **({"use_udma": True} if use_udma else {}),
                 )
                 for cap in capacities
