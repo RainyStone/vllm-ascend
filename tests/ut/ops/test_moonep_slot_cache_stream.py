@@ -45,7 +45,7 @@ class CacheStreamTests(unittest.TestCase):
         self.state = types.SimpleNamespace(
             caches={name: torch.tensor([[[[11.]], [[33.]]]]) for name in ("w13", "w2", "w13_scale", "w2_scale")},
             slots={name: torch.zeros(2, 1, 1) for name in ("w13", "w2", "w13_scale", "w2_scale")},
-            cache_experts=[1, 3], cache_next=0, cache_stats=[0, 0], layer_index=0,
+            cache_experts=[1, 3], cache_next=0, cache_stats=[0, 0], layer_index=0, cache_layer_index=0,
             compute_weights=lambda: None,
         )
         self.ctx = {}

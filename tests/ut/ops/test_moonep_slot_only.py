@@ -121,14 +121,14 @@ class SlotOnlyForwardTests(unittest.TestCase):
     def test_runtime_creates_slot_states_without_legacy_flag(self):
         method = function_node(COMM, "_initialize_locked", "_MoonEPRuntime")
         start = next(i for i, n in enumerate(method.body) if isinstance(n, ast.ImportFrom)
-                     and any(a.name == "_LayerWeightState" for a in n.names))
+                     and any(a.name == "_build_slot_states" for a in n.names))
         end = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Attribute) and t.attr == "_state_by_w13" for t in n.targets))
         layer = SimpleNamespace(w13_weight=object())
         entries = [dict(layer=layer, E=256, H=4096), dict(layer=layer, E=256, H=4096), dict(layer=None)]
 
-        def state_type(layer, experts, hidden, rank, device):
-            return SimpleNamespace(_w13_src=layer.w13_weight)
+        state = SimpleNamespace(_w13_src=layer.w13_weight, layer_index=0)
+        builder = Mock(return_value=[state])
 
         for legacy in ("0", "1"):
             with self.subTest(legacy=legacy):
@@ -138,12 +138,13 @@ class SlotOnlyForwardTests(unittest.TestCase):
                     "get_ep_group": lambda: SimpleNamespace(rank_in_group=0),
                     "_registry_lock": threading.Lock(), "_moonep_layer_registry": entries, "self": runtime,
                 }
-                module = SimpleNamespace(_LayerWeightState=state_type)
+                module = SimpleNamespace(_build_slot_states=builder)
                 with patch.dict(os.environ, {"MOONEP_SLOT_MODE": legacy}), patch.dict(
                     sys.modules, {"vllm_ascend.ops.fused_moe.moonep_balance": module}
                 ):
                     exec(compile(ast.Module(body=method.body[start:end + 1], type_ignores=[]), str(COMM), "exec"),
                          namespace)
+                builder.assert_called_with(entries, 0, 0)
                 self.assertEqual(len(runtime._states), 1)
                 self.assertEqual(runtime._states[0].layer_index, 0)
                 self.assertIs(runtime._state_by_w13[id(layer.w13_weight)], runtime._states[0])

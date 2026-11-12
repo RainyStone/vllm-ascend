@@ -759,28 +759,16 @@ class _MoonEPRuntime:
                 "combine_route": torch.zeros(
                     capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
             }
-        from vllm_ascend.ops.fused_moe.moonep_balance import _LayerWeightState
+        from vllm_ascend.ops.fused_moe.moonep_balance import _build_slot_states
 
         dev = int(torch.npu.current_device())
         ep_grp = get_ep_group()
         rank = ep_grp.rank_in_group
-        states = []
-        seen = set()
         with _registry_lock:
             entries = list(_moonep_layer_registry)
-        for e in entries:
-            layer = e.get("layer")
-            if layer is None or id(layer) in seen:
-                continue
-            seen.add(id(layer))
-            # F（每分区的 ffn 维）改由 _LayerWeightState 按权重布局自己推并做校验，
-            # 布局知识只留一处：量化后 w13 是 [epn, H/2, 2F]、w2 是 [epn, F/2, H]
-            # （process_weights_after_loading 的 npu_format_cast + transpose(1,2)），
-            # 两边的 scale 又各自不同，散落推导迟早会错。
-            st = _LayerWeightState(layer, int(e["E"]), int(e["H"]), rank, dev)
-            st.layer_index = len(states)      # registration order == layer order
-            states.append(st)
-        self._states = states
+        # All loaded payload layouts and per-pool counts are known before
+        # allocating caches; no new descriptors may be added after SHMEM init.
+        self._states = states = _build_slot_states(entries, rank, dev)
         self._state_by_w13 = {id(st._w13_src): st for st in states}
 
         from vllm_ascend.ops.fused_moe.moonep_balance import udma_prefetch_overlap_requested

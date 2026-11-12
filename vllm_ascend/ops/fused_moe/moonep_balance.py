@@ -370,6 +370,61 @@ def _payload_specs(layer, H: int, F: int) -> list[_PayloadSpec]:
     ]
 
 
+@dataclass(frozen=True)
+class _LayerWeightLayout:
+    E: int
+    H: int
+    F: int
+    epn: int
+    B: int
+    specs: list[_PayloadSpec]
+
+
+def _layer_weight_layout(layer, E: int, H: int) -> _LayerWeightLayout:
+    """Describe loaded payloads without allocating Slot or cache storage."""
+    w13 = layer.w13_weight
+    epn = int(w13.shape[0])
+    configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
+    B = int(epn if configured_slot_count is None else configured_slot_count)
+    if B < 1 or B > epn:
+        raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {B}")
+    F = _infer_F(layer, H)
+    return _LayerWeightLayout(E, H, F, epn, B, _payload_specs(layer, H, F))
+
+
+def _slot_pool_key(E: int, H: int, F: int, B: int, rank: int, dev: int,
+                   specs: list[_PayloadSpec]) -> tuple:
+    return (E, H, F, B, rank, dev,
+            tuple((spec.name, *spec.carrier) for spec in specs))
+
+
+def _build_slot_states(entries, rank: int, dev: int) -> list:
+    """Size every pool from unique registered layers before any pool allocation."""
+    layers, counts, seen = [], {}, set()
+    for entry in entries:
+        layer = entry.get("layer")
+        if layer is None or id(layer) in seen:
+            continue
+        seen.add(id(layer))
+        layout = _layer_weight_layout(layer, int(entry["E"]), int(entry["H"]))
+        key = _slot_pool_key(layout.E, layout.H, layout.F, layout.B, rank, dev, layout.specs)
+        layers.append((layer, layout, key))
+        counts[key] = counts.get(key, 0) + 1
+
+    states, indices = [], {}
+    for layer, layout, key in layers:
+        cache_index = indices.get(key, 0)
+        state = _LayerWeightState(
+            layer, layout, rank, dev, layer_index=len(states),
+            cache_layer_index=cache_index, cache_layer_count=counts[key],
+        )
+        states.append(state)
+        indices[key] = cache_index + 1
+    if indices != counts:
+        raise RuntimeError("MoonEP Slot cache layer counts do not match registered layers")
+    return states
+
+
 # ---------------------------------------------------------------------------
 # Per-(E, H, F, payload geometry) shared slot pool + per-layer home mirrors
 # ---------------------------------------------------------------------------
@@ -384,11 +439,14 @@ class _SharedSlots:
 
     @classmethod
     def get(cls, E: int, H: int, F: int, B: int, rank: int, dev: int,
-            specs: list[_PayloadSpec]) -> dict:
-        key = (E, H, F, B, rank, dev,
-               tuple((spec.name, *spec.carrier) for spec in specs))
+            specs: list[_PayloadSpec], *, cache_layers: int) -> dict:
+        if cache_layers < 1:
+            raise ValueError("MoonEP Slot cache requires at least one registered layer per pool")
+        key = _slot_pool_key(E, H, F, B, rank, dev, specs)
         with cls._lock:
             pool = cls._pools.get(key)
+            if pool is not None and pool["cache_layers"] != cache_layers:
+                raise RuntimeError("MoonEP Slot cache pool layer count changed after allocation")
             if pool is None:
                 from ascend_moonep.buffer_c import create_vmm_physical
 
@@ -399,22 +457,20 @@ class _SharedSlots:
                     slot, _, _ = create_vmm_physical([B, rows, cols], torch.bfloat16, dev)
                     slot.zero_()
                     slots[spec.name] = slot
-                # per-layer weight cache (dev 版按 w13/w2 硬编码，这里按 payload
-                # spec 参数化): one [L, N] chunk per payload, so the whole cache
-                # costs one VMM allocation per payload rather than 2 per layer
-                n_layers = max(1, int(os.environ.get("MOONEP_SLOT_CACHE_LAYERS", "64")))
+                # One contiguous cache allocation per payload, sized to the
+                # actual unique registered layers using this exact Slot pool.
                 cache = {}
                 if MOONEP_SLOT_CACHE > 0:
                     for spec in specs:
                         rows, cols = spec.carrier
                         c, _, _ = create_vmm_physical(
-                            [n_layers, MOONEP_SLOT_CACHE, rows, cols],
+                            [cache_layers, MOONEP_SLOT_CACHE, rows, cols],
                             torch.bfloat16, dev)
                         c.zero_()
                         cache[spec.name] = c
                 # full [E+B] projections need home chunks; built per layer, so
                 # keep slot chunks here and let _LayerState build the fulls.
-                pool = {"slots": slots, "cache": cache, "B": B}
+                pool = {"slots": slots, "cache": cache, "B": B, "cache_layers": cache_layers}
                 cls._pools[key] = pool
         return pool
 
@@ -422,24 +478,30 @@ class _SharedSlots:
 class _LayerWeightState:
     """Home mirrors + full projections + packed [epn+B] aliases for ONE MoE layer."""
 
-    def __init__(self, layer, E: int, H: int, rank: int, dev: int):
+    def __init__(self, layer, layout: _LayerWeightLayout, rank: int, dev: int, *,
+                 layer_index: int, cache_layer_index: int, cache_layer_count: int):
         from ascend_moonep.buffer_c import (
             attach_local_source_vas,
             create_full_projection_tensor,
             create_vmm_physical,
         )
 
+        if not 0 <= cache_layer_index < cache_layer_count:
+            raise ValueError("MoonEP Slot cache layer index is outside its pool capacity")
+        E, H, F, epn, B = layout.E, layout.H, layout.F, layout.epn, layout.B
         w13 = layer.w13_weight
-        epn = int(w13.shape[0])
-        configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
-        B = int(epn if configured_slot_count is None else configured_slot_count)
-        if B < 1 or B > epn:
-            raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {B}")
-        F = _infer_F(layer, H)
         self.E, self.H, self.F, self.epn, self.B = E, H, F, epn, B
-        self._specs = _payload_specs(layer, H, F)
+        self._specs = layout.specs
 
-        shared = _SharedSlots.get(E, H, F, B, rank, dev, self._specs)
+        shared = _SharedSlots.get(
+            E, H, F, B, rank, dev, self._specs, cache_layers=cache_layer_count)
+        for spec in self._specs:
+            cached = shared["cache"].get(spec.name)
+            if MOONEP_SLOT_CACHE > 0 and (
+                cached is None or tuple(cached.shape) != (
+                    cache_layer_count, MOONEP_SLOT_CACHE, *spec.carrier)
+            ):
+                raise RuntimeError("MoonEP Slot cache allocation does not match registered layers")
         self.slots: dict[str, torch.Tensor] = {}
         self.homes: dict[str, torch.Tensor] = {}
         self.fulls: dict[str, torch.Tensor] = {}
@@ -463,7 +525,8 @@ class _LayerWeightState:
         self._layer = layer
         # persistent per-layer expert cache (FreeBalance-style reuse): one cache
         # chunk per payload spec (bf16 carriers, like the slots themselves)
-        self.layer_index = 0
+        self.layer_index = layer_index
+        self.cache_layer_index = cache_layer_index
         self.caches = dict(shared.get("cache") or {})
         self.cache_experts = [-1] * max(MOONEP_SLOT_CACHE, 1)
         self.cache_next = 0
@@ -928,12 +991,12 @@ def run_slot_forward(
         with torch.no_grad():
             for j, i in hits:
                 for name, cache in state.caches.items():
-                    state.slots[name][i].copy_(cache[state.layer_index, j])
+                    state.slots[name][i].copy_(cache[state.cache_layer_index, j])
             for e, i in misses:
                 j = state.cache_next
                 state.cache_next = (j + 1) % max(MOONEP_SLOT_CACHE, 1)
                 for name, cache in state.caches.items():
-                    cache[state.layer_index, j].copy_(state.slots[name][i])
+                    cache[state.cache_layer_index, j].copy_(state.slots[name][i])
                 state.cache_experts[j] = e
     if _sync:
         torch.npu.synchronize()

@@ -28,20 +28,16 @@ class RedundantSlotCountTests(unittest.TestCase):
 
         balance = ROOT / "vllm_ascend/ops/fused_moe/moonep_balance.py"
         tree = ast.parse(balance.read_text())
-        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_LayerWeightState")
-        init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
-        # Execute the actual constructor's count parsing before weight inference
-        # and NPU/VMM allocation. Buffer imports are outside the code under test.
-        start = next(i for i, n in enumerate(init.body) if isinstance(n, ast.Assign)
-                     and any(isinstance(t, ast.Name) and t.id == "w13" for t in n.targets))
-        end = next(i for i, n in enumerate(init.body) if isinstance(n, ast.Assign)
+        layout = next(n for n in tree.body
+                      if isinstance(n, ast.FunctionDef) and n.name == "_layer_weight_layout")
+        end = next(i for i, n in enumerate(layout.body) if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "F" for t in n.targets))
-        init.body = init.body[start:end] + [ast.Return(value=ast.Name(id="B", ctx=ast.Load()))]
-        layer_namespace = {"envs": self.envs}
+        layout.body = layout.body[:end] + [ast.Return(value=ast.Name(id="B", ctx=ast.Load()))]
+        layer_namespace = {"envs": self.envs, "_LayerWeightLayout": object}
         exec(compile(ast.fix_missing_locations(ast.Module(
-            body=[init], type_ignores=[])), str(balance), "exec"), layer_namespace)
-        self.layer_count = lambda epn: layer_namespace["__init__"](
-            None, SimpleNamespace(w13_weight=SimpleNamespace(shape=(epn, 4, 8))), 256, 4, 0, 0)
+            body=[layout], type_ignores=[])), str(balance), "exec"), layer_namespace)
+        self.layer_count = lambda epn: layer_namespace["_layer_weight_layout"](
+            SimpleNamespace(w13_weight=SimpleNamespace(shape=(epn, 4, 8))), 256, 4)
         self.readers = {"buffer": self.buffer_count, "layer": self.layer_count}
 
     def values(self, environment, epn=8):
