@@ -61,6 +61,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
@@ -430,9 +431,10 @@ class _LayerWeightState:
 
         w13 = layer.w13_weight
         epn = int(w13.shape[0])
-        B = int(os.environ.get("MOONEP_B", epn))
+        configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
+        B = int(epn if configured_slot_count is None else configured_slot_count)
         if B < 1 or B > epn:
-            raise ValueError(f"MOONEP_B must be in [1, {epn}], got {B}")
+            raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {B}")
         F = _infer_F(layer, H)
         self.E, self.H, self.F, self.epn, self.B = E, H, F, epn, B
         self._specs = _payload_specs(layer, H, F)

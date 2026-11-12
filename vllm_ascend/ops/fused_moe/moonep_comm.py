@@ -541,10 +541,11 @@ def _step_token_count(tokens: int):
 
 
 def _moonep_slot_count(E: int, epn: int) -> int:
-    """Effective prefetch-slot count B: env MOONEP_B, default epn = E/R."""
-    b = int(os.environ.get("MOONEP_B", epn))
+    """Per-rank redundant expert slots; unset defaults to epn = E/R."""
+    configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
+    b = int(epn if configured_slot_count is None else configured_slot_count)
     if b < 1 or b > epn:
-        raise ValueError(f"MOONEP_B must be in [1, {epn}], got {b}")
+        raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {b}")
     return b
 
 

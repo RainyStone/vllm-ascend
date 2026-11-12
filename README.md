@@ -37,7 +37,7 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 ```bash
 bash scripts/build_combine_publish.sh
-install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so `ascend_moonep/lib/libascend_moonep_publish.so`
+install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so ascend_moonep/lib/libascend_moonep_publish.so
 ```
 
 无需因删除环境变量重复编译已有匹配库。仅修改 vLLM 接入路径，不改变模型量化、MXFP8 dispatch、有效行解包、dispatch zero-copy、副流、Home GEMM1、缓存或原生 Off。
@@ -47,6 +47,8 @@ install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so `a
 该约定要求 home 权重已发布且在使用期间不变，各 rank 的 collective 顺序一致；跨流消费和槽位复用由调用者建立事件依赖。它不提供权重热更新或任意跨流并发的自动同步。旧值 0 不再恢复保守同步，历史实验脚本和结果保留原样。vLLM 的普通非 async_finish 调用不会因此额外少掉“三次同步”；原生 Off 与其他优化不变。
 
 这是 Python 与 C++ 配套变更：必须重编译并安装匹配的 `ascend_moonep._C` 后再启动新进程，不能只更新 Python。已有进程保留已加载版本，更新后须按原计划重启才能采用新行为；设备 kernel 库无需因这次主机侧清理而重编译。
+
+`MOONEP_B` 已重命名为 `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT`，只保留新名称，不提供旧名回退。未设置新名时仍按每层 E/EP 默认取值；旧名单独设置时被忽略，新旧同时存在时只采用新名。整数解析、范围校验及当前 planning 的 `B==E/EP` 限制不变，改名不表示支持关闭槽位或任意减少槽数。该值表示每个 EP rank 的临时冗余专家预取槽位数，不是全机总数，也不是 `MOONEP_SLOT_CACHE` 持久缓存数量；SDK 的 B 参数、计划字段、槽位分配和其他优化保持不变，历史实验脚本和结果保留原样。
 
 ## 已验证（实测）
 
@@ -202,7 +204,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_DISABLE_UDMA=1` | 用 MTE 内核（无需 URMA 时；开 URMA 则不要设） |
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA=0` | 仅关闭 dispatch 的 UDMA kernel（保留 UDMA 上下文，调测用） |
-| `MOONEP_B` | 预取槽数（库要求 == E/R，其它值会报错） |
+| `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT` | 每个 EP rank 的冗余专家预取槽位数，默认 E/EP；当前 planning 要求等于 E/EP，其它值仍会报错，与持久缓存数量不同 |
 | `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
 | `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |

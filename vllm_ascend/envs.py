@@ -141,9 +141,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # HCCL UB_MEM link, which a cross-UB-domain card group does not have
     # (aclnnMoeDistributeDispatchV4 561000), so enable this only on one UB domain.
     "MOONEP_KEEP_MC2": lambda: bool(int(os.getenv("MOONEP_KEEP_MC2", "0"))),
-    # Number of prefetch slots; defaults to E/R (the library plan requires B == E/R,
-    # other values are rejected).
-    "MOONEP_B": lambda: os.getenv("MOONEP_B", None),
+    # Redundant expert prefetch slots per EP rank, not the persistent cache size.
+    # Unset is resolved per layer as E/EP; the current planner requires B == E/EP.
+    # Runtime accepts integer values in [1, E/EP] before that planner check.
+    # Non-sensitive. This does not change the SDK's B parameter.
+    "MOONEP_REDUNDANT_EXPERT_SLOT_COUNT": lambda: os.getenv("MOONEP_REDUNDANT_EXPERT_SLOT_COUNT", None),
     # Synthetic expert-selection profile, for routing-skew performance experiments.
     # Replaces the router's top-k output wholesale in ops/fused_moe/experts_selector.py
     # (see ops/fused_moe/moe_sim_route.py). One share per expert, in percent, summing
