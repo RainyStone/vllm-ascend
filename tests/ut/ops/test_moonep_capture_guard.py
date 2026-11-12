@@ -68,7 +68,7 @@ class CaptureGuardTests(unittest.TestCase):
         case = cache_cases.CacheStreamTests()
         case.setUp()
         self.addCleanup(case.doCleanups)
-        case.ns["MOONEP_SLOT_CACHE"] = 0
+        case.ns["_CACHED_EXPERT_COUNT"] = 0
         return case
 
     def test_missing_forward_context_keeps_existing_fallback(self):

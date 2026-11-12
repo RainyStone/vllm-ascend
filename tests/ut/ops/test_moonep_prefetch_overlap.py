@@ -39,7 +39,7 @@ class PrefetchOverlapTests(unittest.TestCase):
         case = cache_cases.CacheStreamTests(methodName="runTest")
         case.setUp()
         self.addCleanup(case.doCleanups)
-        case.ns.update(_PREFETCH_OVERLAP=mode, MOONEP_SLOT_CACHE=cache)
+        case.ns.update(_PREFETCH_OVERLAP=mode, _CACHED_EXPERT_COUNT=cache)
         return case
 
     def installer(self, mode="dispatch"):

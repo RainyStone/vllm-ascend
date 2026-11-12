@@ -83,7 +83,8 @@ _MAX_CARRIER_ROW_ELEMS = 32768
 # per-layer host read of the plan row costs more than the prefetch it saves
 # (the prefetch is not on the critical path; the earlier 0.49 ms figure was
 # a sync-based measurement that included queue drain).
-MOONEP_SLOT_CACHE = int(os.environ.get("MOONEP_SLOT_CACHE", "0"))
+# Snapshot once at module load; do not query the environment per MoE layer.
+_CACHED_EXPERT_COUNT = envs.MOONEP_CACHED_REDUNDANT_EXPERT_COUNT
 
 # MOONEP_PF_TIMING=1: device-synchronised timing of prefetch_projections (and of
 # the grouped GEMM that follows). Measurement only: it serialises the step.
@@ -460,11 +461,11 @@ class _SharedSlots:
                 # One contiguous cache allocation per payload, sized to the
                 # actual unique registered layers using this exact Slot pool.
                 cache = {}
-                if MOONEP_SLOT_CACHE > 0:
+                if _CACHED_EXPERT_COUNT > 0:
                     for spec in specs:
                         rows, cols = spec.carrier
                         c, _, _ = create_vmm_physical(
-                            [cache_layers, MOONEP_SLOT_CACHE, rows, cols],
+                            [cache_layers, _CACHED_EXPERT_COUNT, rows, cols],
                             torch.bfloat16, dev)
                         c.zero_()
                         cache[spec.name] = c
@@ -497,9 +498,9 @@ class _LayerWeightState:
             E, H, F, B, rank, dev, self._specs, cache_layers=cache_layer_count)
         for spec in self._specs:
             cached = shared["cache"].get(spec.name)
-            if MOONEP_SLOT_CACHE > 0 and (
+            if _CACHED_EXPERT_COUNT > 0 and (
                 cached is None or tuple(cached.shape) != (
-                    cache_layer_count, MOONEP_SLOT_CACHE, *spec.carrier)
+                    cache_layer_count, _CACHED_EXPERT_COUNT, *spec.carrier)
             ):
                 raise RuntimeError("MoonEP Slot cache allocation does not match registered layers")
         self.slots: dict[str, torch.Tensor] = {}
@@ -528,7 +529,7 @@ class _LayerWeightState:
         self.layer_index = layer_index
         self.cache_layer_index = cache_layer_index
         self.caches = dict(shared.get("cache") or {})
-        self.cache_experts = [-1] * max(MOONEP_SLOT_CACHE, 1)
+        self.cache_experts = [-1] * max(_CACHED_EXPERT_COUNT, 1)
         self.cache_next = 0
         self.cache_stats = [0, 0]      # [hits, misses] over used slots
         self._vmm_tensors = list(self.homes.values())
@@ -806,7 +807,7 @@ def maybe_install_pf_stream(model) -> None:
 
 def _prepare_slot_cache(state, plan):
     """Mask cache hits before issuing remote GETs; consume once per layer call."""
-    if MOONEP_SLOT_CACHE <= 0 or state.caches.get("w13") is None:
+    if _CACHED_EXPERT_COUNT <= 0 or state.caches.get("w13") is None:
         return plan, None, False
     from vllm.distributed.parallel_state import get_ep_group
 
@@ -833,7 +834,7 @@ def _prepare_slot_cache(state, plan):
     _SLOT_CACHE_STATS[id(state)] = state.cache_stats
     if first_hit:
         print(f"[slot-cache-active r{rank}] layer={state.layer_index} "
-              f"capacity={MOONEP_SLOT_CACHE} hits={len(hits)} misses={len(misses)} "
+              f"capacity={_CACHED_EXPERT_COUNT} hits={len(hits)} misses={len(misses)} "
               f"payloads={','.join(state.caches)}", flush=True)
     return plan, (hits, misses), not misses
 
@@ -932,8 +933,8 @@ def run_slot_forward(
             "run with --enforce-eager (or disable graph capture) when enable_moonep is on."
         )
     home_overlap = _PREFETCH_OVERLAP == "dispatch|home_gemm1"
-    if home_overlap and MOONEP_SLOT_CACHE > 0:
-        raise RuntimeError("Home GEMM overlap currently requires cache disabled")
+    if home_overlap and _CACHED_EXPERT_COUNT > 0:
+        raise RuntimeError("Home GEMM overlap currently requires cache disabled (MOONEP_CACHED_REDUNDANT_EXPERT_COUNT=0)")
     plan_use = plan
     _sync = os.environ.get("MOONEP_PF_TIMING", "0") == "1"
     if _sync:
@@ -994,7 +995,7 @@ def run_slot_forward(
                     state.slots[name][i].copy_(cache[state.cache_layer_index, j])
             for e, i in misses:
                 j = state.cache_next
-                state.cache_next = (j + 1) % max(MOONEP_SLOT_CACHE, 1)
+                state.cache_next = (j + 1) % max(_CACHED_EXPERT_COUNT, 1)
                 for name, cache in state.caches.items():
                     cache[state.cache_layer_index, j].copy_(state.slots[name][i])
                 state.cache_experts[j] = e

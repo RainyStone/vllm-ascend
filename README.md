@@ -29,7 +29,10 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 ### 持久专家缓存的层容量
 
-`MOONEP_SLOT_CACHE` 默认仍为 0，关闭时不分配持久缓存。设置为正整数 N 时，每个 EP rank 为每个实际注册的 MoE 层保留最多 N 个远端专家（权重及必要 scale），循环替换策略不变。临时 Slot 仍由同形状层共享，持久缓存按层隔离。
+
+迁移说明：`MOONEP_SLOT_CACHE` 已重命名为 `MOONEP_CACHED_REDUNDANT_EXPERT_COUNT`，只保留新名称的中央注册与读取，不提供旧名兼容别名。旧名单独设置时被忽略而使用新默认 0；新旧同时设置时仅采用新名。负数原先按关闭处理，现在明确报错，非整数继续拒绝。参数在起服/模块加载时固定，不增加逐层环境查询，也不支持运行中切换。旧缓存实验脚本需先迁移参数再重跑，否则旧值 8 等会被忽略；历史脚本与结果不改写。默认关闭、临时 Slot 数、按实际注册层数分配缓存及其他优化保持不变。
+
+`MOONEP_CACHED_REDUNDANT_EXPERT_COUNT` 默认仍为 0，关闭时不分配持久缓存。设置为正整数 N 时，每个 EP rank 为每个实际注册的 MoE 层保留最多 N 个远端专家（权重及必要 scale），循环替换策略不变。取值要求为整数且 N>=0，不限制 N<=E/R，也不限制 N<=临时冗余 Slot 数；缓存可跨执行步骤保留不同专家，但实际容量受可用显存与底层分配约束。临时 Slot 仍由同形状层共享，持久缓存按层隔离。
 
 `MOONEP_SLOT_CACHE_LAYERS` 已移除，不保留兼容别名，旧值不再控制容量。模型加载完成后，对非空注册层按对象身份去重，保持注册顺序，并按现有权重/payload 几何分组。每个池、每种 payload 一次性分配 `[该池实际层数, N, rows, cols]` 的连续 VMM 缓存；使用池内缓存索引，原全局层编号继续用于层标识与日志。不是读取模型配置的总层数，也不再固定预留 64 层。
 
@@ -53,7 +56,7 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 export MOONEP_PREFETCH_SIDE_STREAM_OVERLAP='dispatch|home_gemm1'
 ```
 
-这是启动配置，不支持服务运行中切换。关闭重叠时，SDK 使用当前流，MTE/UDMA 内核保留传输完成检查；UDMA 使用现有非重叠队列布局。两种重叠模式保留 planning、dispatch、预取、消费者及槽位复用之间的事件依赖，UDMA 仍要求独立 QP 及现有设备能力检查。Home GEMM1 模式仍要求 `MOONEP_SLOT_CACHE=0`，并满足现有 BF16/W4A8MXFP 后端、形状、激活及专用算子库限制；不新增模型支持或静默回退。持久缓存自身的既有问题不在本次重命名修复范围内。
+这是启动配置，不支持服务运行中切换。关闭重叠时，SDK 使用当前流，MTE/UDMA 内核保留传输完成检查；UDMA 使用现有非重叠队列布局。两种重叠模式保留 planning、dispatch、预取、消费者及槽位复用之间的事件依赖，UDMA 仍要求独立 QP 及现有设备能力检查。Home GEMM1 模式仍要求 `MOONEP_CACHED_REDUNDANT_EXPERT_COUNT=0`，并满足现有 BF16/W4A8MXFP 后端、形状、激活及专用算子库限制；不新增模型支持或静默回退。持久缓存自身的既有问题不在本次重命名修复范围内。
 
 迁移说明：`MOONEP_PF_STREAM` 已移除，不保留兼容别名；原事件管道诊断值 1 一并移除。默认值从原 0 改为 `dispatch`，与最近 GSM8K/LongBench-v2 优化实验显式使用的原值 2 一致。只设置旧名时（包括 0、3 或非法值）会被忽略而采用新默认；新旧同时设置时仅采用新名。历史脚本及结果不改写，重跑前需迁移参数，不能再依据旧值 0/3 判断当前模式。原生 Off 或 EP<=1 不安装副流层 hook，`KEEP_MC2` 正常选路保持不变；MXFP8、融合 publish、有效行解包和其他优化不变。
 
@@ -80,7 +83,7 @@ install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so as
 
 这是 Python 与 C++ 配套变更：必须重编译并安装匹配的 `ascend_moonep._C` 后再启动新进程，不能只更新 Python。已有进程保留已加载版本，更新后须按原计划重启才能采用新行为；设备 kernel 库无需因这次主机侧清理而重编译。
 
-`MOONEP_B` 已重命名为 `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT`，只保留新名称，不提供旧名回退。未设置新名时仍按每层 E/EP 默认取值；旧名单独设置时被忽略，新旧同时存在时只采用新名。整数解析、范围校验及当前 planning 的 `B==E/EP` 限制不变，改名不表示支持关闭槽位或任意减少槽数。该值表示每个 EP rank 的临时冗余专家预取槽位数，不是全机总数，也不是 `MOONEP_SLOT_CACHE` 持久缓存数量；SDK 的 B 参数、计划字段、槽位分配和其他优化保持不变，历史实验脚本和结果保留原样。
+`MOONEP_B` 已重命名为 `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT`，只保留新名称，不提供旧名回退。未设置新名时仍按每层 E/EP 默认取值；旧名单独设置时被忽略，新旧同时存在时只采用新名。整数解析、范围校验及当前 planning 的 `B==E/EP` 限制不变，改名不表示支持关闭槽位或任意减少槽数。该值表示每个 EP rank 的临时冗余专家预取槽位数，不是全机总数，也不是 `MOONEP_CACHED_REDUNDANT_EXPERT_COUNT` 持久缓存数量；SDK 的 B 参数、计划字段、槽位分配和其他优化保持不变，历史实验脚本和结果保留原样。
 
 ## 已验证（实测）
 

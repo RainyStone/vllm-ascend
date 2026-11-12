@@ -89,7 +89,7 @@ class CacheStreamTests(unittest.TestCase):
         self.buffer.prefetch_projections = lambda **kw: prefetch(self.buffer, self.state, kw["plan"])
         self.state.prefetch_views = lambda: []
         self.ns.update(
-            MOONEP_SLOT_CACHE=2, _SLOT_CACHE_STATS={}, _PF_SKIPPED=[0],
+            _CACHED_EXPERT_COUNT=2, _SLOT_CACHE_STATS={}, _PF_SKIPPED=[0],
             _PREFETCH_OVERLAP="dispatch", _PF_STREAMED=[0],
             _PF={"cur_key": 1, "stream": None, "fail": 0},
             _pf_state_for=lambda key: self.state, _pf_prefetch=prefetch,
@@ -145,7 +145,7 @@ class CacheStreamTests(unittest.TestCase):
         self.assertIn("after_planning_hook", self.ctx)
 
     def test_cache_disabled_still_uses_side_stream(self):
-        self.ns["MOONEP_SLOT_CACHE"] = 0
+        self.ns["_CACHED_EXPERT_COUNT"] = 0
         plan = Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         self.hook(plan)
         self.assertEqual(self.calls[0].tolist(), [[1, 2]])
@@ -174,7 +174,7 @@ class CacheStreamTests(unittest.TestCase):
 
     def test_udma_with_dedicated_qps_preserves_event_join(self):
         self.ctx.update(_prefetch_use_udma=True, udma_prefetch_overlap_ready=True)
-        self.ns["MOONEP_SLOT_CACHE"] = 0
+        self.ns["_CACHED_EXPERT_COUNT"] = 0
         plan = Plan(torch.tensor([[1, 2]], dtype=torch.int32))
         self.hook(plan)
         self.assertEqual(len(self.calls), 1)
@@ -184,7 +184,7 @@ class CacheStreamTests(unittest.TestCase):
 
     def test_udma_issue_error_is_not_swallowed_or_retried(self):
         self.ctx.update(_prefetch_use_udma=True, udma_prefetch_overlap_ready=True)
-        self.ns["MOONEP_SLOT_CACHE"] = 0
+        self.ns["_CACHED_EXPERT_COUNT"] = 0
         def fail(*args):
             self.calls.append("issued")
             raise RuntimeError("injected partial issue failure")

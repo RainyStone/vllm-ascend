@@ -28,7 +28,7 @@ class ActualCacheLayersTests(unittest.TestCase):
         ns = {
             "dataclass": dataclass, "torch": torch, "threading": threading,
             "envs": SimpleNamespace(MOONEP_REDUNDANT_EXPERT_SLOT_COUNT=None),
-            "MOONEP_SLOT_CACHE": 2, "MoEWeights": SimpleNamespace,
+            "_CACHED_EXPERT_COUNT": 2, "MoEWeights": SimpleNamespace,
             "_packed_alias": lambda home, slot, *args: home,
         }
 
@@ -128,7 +128,7 @@ class ActualCacheLayersTests(unittest.TestCase):
         self.assertEqual(self.pools(), [])
 
     def test_cache_disabled_allocates_only_existing_slots_and_homes(self):
-        self.ns["MOONEP_SLOT_CACHE"] = 0
+        self.ns["_CACHED_EXPERT_COUNT"] = 0
         states = self.build([self.layer(), self.layer()])
         self.assertEqual(self.pools()[0]["cache"], {})
         self.assertTrue(all(state.caches == {} for state in states))
@@ -190,7 +190,7 @@ class ActualCacheLayersTests(unittest.TestCase):
                 self.assertEqual(states[0].caches["w13"].shape[0], 3)
 
     def test_logical_bytes_follow_pool_counts_and_payload_geometry(self):
-        self.ns["MOONEP_SLOT_CACHE"] = 3
+        self.ns["_CACHED_EXPERT_COUNT"] = 3
         states = self.build([self.layer(2), self.layer(3), self.layer(2)])
         actual = sum(t.numel() * t.element_size() for p in self.pools() for t in p["cache"].values())
         # Two width-2 layers plus one width-3 layer; all payload carriers are BF16 bytes.
@@ -209,7 +209,7 @@ class ActualCacheLayersTests(unittest.TestCase):
         self.fail_cache = True
         with self.assertRaisesRegex(RuntimeError, "cache allocation OOM"):
             self.build([self.layer(), self.layer()])
-        self.assertEqual(self.ns["MOONEP_SLOT_CACHE"], 2)
+        self.assertEqual(self.ns["_CACHED_EXPERT_COUNT"], 2)
         self.assertEqual(self.pools(), [])
 
     def test_cache_rows_are_independent_while_temporary_slots_are_shared(self):

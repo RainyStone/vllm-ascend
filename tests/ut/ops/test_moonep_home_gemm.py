@@ -200,7 +200,7 @@ class HomeSlotIntegrationTests(unittest.TestCase):
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
         self.case.ns["_PREFETCH_OVERLAP"] = "dispatch|home_gemm1"
-        self.case.ns["MOONEP_SLOT_CACHE"] = 0
+        self.case.ns["_CACHED_EXPERT_COUNT"] = 0
         self.case.state.caches = {}
         self.case.state.epn = self.case.state.B = 2
         self.case.state.F = 2
@@ -242,7 +242,7 @@ class HomeSlotIntegrationTests(unittest.TestCase):
     def test_mode3_rejects_unadapted_cache_combination(self):
         from test_moonep_slot_cache_stream import Plan
 
-        self.case.ns["MOONEP_SLOT_CACHE"] = 2
+        self.case.ns["_CACHED_EXPERT_COUNT"] = 2
         with self.assertRaisesRegex(RuntimeError, "cache disabled"):
             self.case.forward(Plan(torch.tensor([[2, 4]], dtype=torch.int32)))
         self.assertEqual(self.case.events, [])

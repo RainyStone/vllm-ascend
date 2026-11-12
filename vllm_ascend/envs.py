@@ -42,9 +42,20 @@ def _moonep_prefetch_side_stream_overlap() -> str:
     return value
 
 
+def _moonep_cached_redundant_expert_count() -> int:
+    value = int(os.getenv("MOONEP_CACHED_REDUNDANT_EXPERT_COUNT", "0"))
+    if value < 0:
+        raise ValueError(f"MOONEP_CACHED_REDUNDANT_EXPERT_COUNT must be >= 0, got {value}")
+    return value
+
+
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Persistent remote-expert cache capacity per EP rank and MoE layer.
+    # Non-sensitive; integer >=0, default 0 disables caching. No E/R or Slot
+    # capacity upper bound; available memory still limits actual allocation.
+    "MOONEP_CACHED_REDUNDANT_EXPERT_COUNT": _moonep_cached_redundant_expert_count,
     # MoonEP prefetch overlap: none, dispatch (default), dispatch|home_gemm1.
     # Non-sensitive; set before worker startup. Home GEMM1 requires cache off
     # and an already-supported Home GEMM backend/operator library.
