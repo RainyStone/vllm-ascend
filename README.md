@@ -238,6 +238,13 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+vLLM执行诊断清理：`MOONEP_TIME_STATS`、`MOONEP_TIME_STATS_EVERY`、`MOONEP_MLP_SYNC`、`MOONEP_PF_TIMING`、`MOONEP_PACE_SYNC`、`MOONEP_CAP_TRACE` 已移除，不保留兼容别名；旧变量任何值均被忽略，固定原诊断关闭路径。删除阶段计时及退出/周期输出、MLP和原生dispatcher/MC2计时包装、预取/MLP/dispatch的诊断额外同步，以及容量变化日志和专用状态。
+
+保留真实容量选档、Planning/Dispatch/Combine、home/slot counts、路由权重快照、MLP数学流程、源端去重与图捕获保护；保留初始化/AICPU预热同步、副流事件等待、Home GEMM1事件传递、槽位复用、缓存回填和MTE/UDMA独立QP校验。MXFP8自动分发/有效行解包、BF16 zero-copy、融合publish/FP32加权combine及原生Off选路不变。保留常规起服与后端确认日志、缓存命中计数和官方profiling入口。
+
+该组清理不更改SDK独立的`ASCEND_MOONEP_*`计时/trace、负载采集、计划诊断及其参数；对应功能按后续独立变更处理。历史实验脚本、原始数据和离线分析工具保留，旧的这六项参数无法再恢复框架阶段计时或诊断同步。
+
+
 Planning 负载统计前的屏障由 SDK 参数 `MOONEP_PLANNING_LOAD_STATS_BARRIER_MODE` 控制，严格接受精确小写 `auto`/`pull`/`push`，默认 `auto`；SDK 在原 Planning 配置位置首次成功读取后缓存，各EP rank必须一致，不支持运行中切换。vLLM只增加一次性环境审计，不增加逐层解析或host同步。`auto`保留SHMEM自动选择（当前EP≤32用v3 pull，EP>32用v4 push），与此前8卡GSM8K/LongBench-v2默认路径一致；显式`pull`固定v3，`push`固定v4，不能关闭屏障，也不改变统计数据的gather方式。
 
 旧名 `ASCEND_MOONEP_BARRIER_V4` 不再生效，不提供兼容别名；旧值1强制push的配置需迁移为新值`push`，旧名单独设置时采用新默认`auto`。必须配套部署重编译的SDK `_C`和`libascend_moonep_kernels.so`，保留56字节tiling布局但新增pull编码，不能混用旧设备库。保留写入→屏障→读取、内存可见性、代次计数、核间同步及跨rank调用顺序；原生Off、通信选择、源端去重、MTE/UDMA、副流/Home GEMM1、缓存、MXFP8、有效行解包和融合publish/加权combine均不变。不改写历史脚本与结果，也不宣称已重新验证多rank同步或性能。

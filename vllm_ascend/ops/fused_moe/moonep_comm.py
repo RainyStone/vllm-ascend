@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from dataclasses import dataclass
 
 import torch
@@ -368,9 +367,6 @@ def _dump_balance_stats():
 
 atexit.register(_dump_balance_stats)
 
-# MOONEP_TIME_STATS=1: per-phase wall totals [total_s, calls]
-_TSTATS_ENABLED = os.environ.get("MOONEP_TIME_STATS", "0") == "1"
-
 # MOONEP_DUMP_PLAN=<dir>: 逐位比对用。把 buffer.dispatch 返回的 plan + cu 落到
 # <dir>/plan_r<rank>_<i>.pt。默认关(这是推理路径上的 D2H,会污染性能数字)。
 # 只落前 MOONEP_DUMP_PLAN_N 次(默认 96 = 2 个 step),好让 profile 剩下的部分干净。
@@ -401,35 +397,6 @@ def _dump_plan(plan, cu):
         _DUMP_PLAN_FAIL[0] += 1
         if _DUMP_PLAN_FAIL[0] in (1, 50):
             print(f"[moonep-dump-plan] failed: {exc}", flush=True)
-
-
-_MOONEP_TSTATS = {"dispatch": [0.0, 0], "disp_pre": [0.0, 0], "disp_pad": [0.0, 0],
-                 "disp_tpe": [0.0, 0], "disp_buf": [0.0, 0],
-                 "disp_lib": [0.0, 0], "disp_post": [0.0, 0],
-                 "combine": [0.0, 0], "comb_pre": [0.0, 0], "comb_buf": [0.0, 0]}
-# MOONEP_TIME_STATS_EVERY=N: also print the (cumulative) ledger every N dispatch
-# calls (N = MoE layer count -> one line per step). Same reason as
-# MOONEP_BALANCE_STATS_EVERY: a served engine is force-killed at shutdown, so the
-# atexit print may never run; the periodic line keeps a near-final ledger in the log.
-_TSTATS_EVERY = int(os.environ.get("MOONEP_TIME_STATS_EVERY", "0") or 0)
-
-
-def _dump_tstats():
-    if not _TSTATS_ENABLED:
-        return
-    try:
-        import torch
-        dev = f"npu:{torch.npu.current_device()}" if torch.npu.is_available() else "?"
-    except Exception:  # noqa: BLE001
-        dev = "?"
-    parts = [f"[moonep-tstats dev={dev}]"]
-    for name, (total, calls) in _MOONEP_TSTATS.items():
-        parts.append(
-            f"{name}: calls={calls} total={total:.3f}s avg={total / max(calls, 1) * 1e3:.2f}ms")
-    print(" ".join(parts), flush=True)
-
-
-atexit.register(_dump_tstats)
 
 
 def _dump_slot_stats():
@@ -925,8 +892,6 @@ def ensure_runtime_initialized() -> None:
 # lookups. At 48 layers/step each microsecond-class cost shows up in the step
 # time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
 # out of the hot path.
-_ENV_PACE_SYNC = os.environ.get("MOONEP_PACE_SYNC", "0") == "1"
-_ENV_CAP_TRACE = os.environ.get("MOONEP_CAP_TRACE", "0") == "1"
 _GEO_CACHE: dict = {}
 
 
@@ -946,7 +911,6 @@ def _geometry(E: int, K: int, H: int) -> dict:
     return geo
 
 
-_CAP_TRACE = {"capacity": None}
 
 
 # Pre-allocated scratch for the per-layer hot path (space-for-time). The hot
@@ -1019,13 +983,6 @@ def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
             f"MoonEP: step has {tokens} tokens but the selected capacity is "
             f"{capacity} (s_max={s_max})."
         )
-    if _ENV_CAP_TRACE and _CAP_TRACE["capacity"] != capacity:
-        _CAP_TRACE["capacity"] = capacity
-        print(
-            f"[moonep-cap] tokens={tokens} step_tokens={step_tokens} "
-            f"capacity={capacity} (s_max={s_max})",
-            flush=True,
-        )
     return pool[capacity], capacity
 
 
@@ -1076,18 +1033,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self.num_local_experts = int(kwargs.get("num_local_experts", 0))
         self._logged_transports: set[tuple] = set()
 
-    def _tstats(self, name: str, t0: float, t1: float | None = None) -> None:
-        """MOONEP_TIME_STATS=1: per-phase wall accumulation (host, incl. syncs)."""
-        if not _TSTATS_ENABLED:
-            return
-        dt = (time.perf_counter() if t1 is None else t1) - t0
-        acc = _MOONEP_TSTATS[name]
-        acc[0] += dt
-        acc[1] += 1
-        # "dispatch" is accounted once per dispatch call (= once per MoE layer per
-        # step), so it doubles as the step counter for the periodic ledger.
-        if name == "dispatch" and _TSTATS_EVERY and acc[1] % _TSTATS_EVERY == 0:
-            _dump_tstats()
 
     def token_dispatch(
         self,
@@ -1120,7 +1065,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Kernels bound their row loops by the real T (num_valid_tokens), so
         # planning, balancing and computation exclude the unused capacity.
         buffer, capacity = _select_buffer_for_step(E, K, H, T)
-        _t0 = time.perf_counter()
         pads = _pads_for(E, K, H)
         hidden_c = pads["hidden"][:capacity]
         route_c = pads["route"][:capacity]
@@ -1134,7 +1078,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         topk_c[:T].copy_(topk_ids)
         source_topk_weights_sk = pads["combine_route"][:capacity]
         source_topk_weights_sk[:T, :K].copy_(topk_weights)
-        _tp0 = time.perf_counter()
         # histc has a fixed-size output and avoids a dynamic sizing round trip.
         # Only the copied prefix contributes to the diagnostic counts.
         #
@@ -1146,10 +1089,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             topk_c, E, T, sc["tpe_compat"], _route_stats_enabled()
         )
 
-        self._tstats("disp_pad", _t0, _tp0)
-        self._tstats("disp_tpe", _tp0)
-        self._tstats("disp_pre", _t0)
-        _t1 = time.perf_counter()
         dispatch_scale = None
         if use_mxfp8:
             h_nvs, dispatch_scale, w_nvs, cu, plan = buffer.dispatch_mxfp8(
@@ -1168,7 +1107,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 num_tokens=T,
                 reuse_outputs=True,
             )
-        _t2 = time.perf_counter()
         quant_type = token_dispatch_input.quant.quant_type
         log_key = (quant_type, H)
         if log_key not in self._logged_transports:
@@ -1276,14 +1214,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         n = min(int(w_buf.numel()), int(w_nvs.numel()))
         w_buf[:n].copy_(w_nvs[:n])
         w_trim = w_buf[:n]
-        if _ENV_PACE_SYNC:
-            torch.npu.synchronize()
-        _t3 = time.perf_counter()
 
-        self._tstats("disp_lib", _t1, _t2)   # buffer.dispatch host side (planning + launches)
-        self._tstats("disp_post", _t2, _t3)  # device counts + row-weight snapshot
-        self._tstats("disp_buf", _t1)
-        self._tstats("dispatch", _t0)
         state = getattr(_SLOT_TLS, "state", None)
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
@@ -1305,7 +1236,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
         assert bias is None, "Bias is not supported in TokenDispatcherWithMoonEP."
-        _t0c = time.perf_counter()
         assert isinstance(combine_metadata, MoonEPCombineMetadata)
         T = combine_metadata.num_tokens
         # Slot applies source-rank FP32 route weights inside combine, retaining
@@ -1322,15 +1252,11 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Native publication writes valid rows and zeros the SHMEM tail.
         # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
         combine_input = hidden_states
-        self._tstats("comb_pre", _t0c)
-        _t1c = time.perf_counter()
         out, _, _ = buffer.combine_weighted(
             plan=combine_metadata.plan, hidden_nvsh=combine_input,
             source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
             num_tokens=T, inter_rank_sync=True,
             fused_publish=True, row_counts=row_counts)
-        self._tstats("comb_buf", _t1c)
-        self._tstats("combine", _t0c)
         return out[:T].view(combine_metadata.hidden_shape)
 
 

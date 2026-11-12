@@ -54,8 +54,6 @@ validation unconditionally; this does not quantize BF16 model weights.
 from __future__ import annotations
 
 import dataclasses
-import os
-import time
 import threading
 from dataclasses import dataclass
 
@@ -86,17 +84,6 @@ _MAX_CARRIER_ROW_ELEMS = 32768
 # Snapshot once at module load; do not query the environment per MoE layer.
 _CACHED_EXPERT_COUNT = envs.MOONEP_CACHED_REDUNDANT_EXPERT_COUNT
 
-# MOONEP_PF_TIMING=1: device-synchronised timing of prefetch_projections (and of
-# the grouped GEMM that follows). Measurement only: it serialises the step.
-_PF_TIMING: dict = {}
-
-
-def _pf_time(name: str, dt: float) -> None:
-    acc = _PF_TIMING.setdefault(name, [0.0, 0])
-    acc[0] += dt
-    acc[1] += 1
-
-
 _SLOT_CACHE_STATS: dict = {}
 _PF_SKIPPED = [0]
 
@@ -116,19 +103,6 @@ import atexit as _atexit_sc
 
 _atexit_sc.register(_dump_slot_cache_stats)
 
-
-def _dump_pf_timing() -> None:
-    if not _PF_TIMING:
-        return
-    parts = ["[moonep-pf-timing]"]
-    for name, (tot, calls) in _PF_TIMING.items():
-        parts.append(f"{name}: calls={calls} total={tot:.3f}s avg={tot / max(calls, 1) * 1e3:.3f}ms")
-    print(" ".join(parts), flush=True)
-
-
-import atexit as _atexit_pf
-
-_atexit_pf.register(_dump_pf_timing)
 
 # Published home mirrors take over supported BF16 source storage. Quantized
 # byte carriers keep their original weight tensors; see _release_sources.
@@ -936,12 +910,6 @@ def run_slot_forward(
     if home_overlap and _CACHED_EXPERT_COUNT > 0:
         raise RuntimeError("Home GEMM overlap currently requires cache disabled (MOONEP_CACHED_REDUNDANT_EXPERT_COUNT=0)")
     plan_use = plan
-    _sync = os.environ.get("MOONEP_PF_TIMING", "0") == "1"
-    if _sync:
-        # measurement-only: the device time of the prefetch itself (the host-side
-        # timer under MOONEP_TIME_STATS only sees the launch)
-        torch.npu.synchronize()
-        _t_dev = time.perf_counter()
     # Install before the next dispatch; first use safely takes the main-stream
     # path. When the hook ran, reuse its cache decision and completion event.
     prefetched = None
@@ -957,7 +925,6 @@ def run_slot_forward(
             raise RuntimeError("Slot prefetch belongs to a different MoE layer")
     else:
         plan_use, cache_plan, skip_prefetch = _prepare_slot_cache(state, plan_use)
-    _t_pf = time.perf_counter() if os.environ.get("MOONEP_TIME_STATS", "0") == "1" else None
     if skip_prefetch:
         _PF_SKIPPED[0] += 1
     elif pf_ev is not None:
@@ -969,15 +936,6 @@ def run_slot_forward(
             plan=plan_use,
             projections=state.prefetch_views(),
         )
-    if _sync:
-        torch.npu.synchronize()
-        _pf_time(name="prefetch", dt=time.perf_counter() - _t_dev)
-    if _t_pf is not None:
-        from vllm_ascend.ops.fused_moe.moonep_comm import _MOONEP_TSTATS
-
-        acc = _MOONEP_TSTATS.setdefault("prefetch", [0.0, 0])
-        acc[0] += time.perf_counter() - _t_pf
-        acc[1] += 1
     if pf_ev is not None and not home_overlap:
         # Side-stream prefetch overlaps dispatch; the main stream proceeds until
         # cache refill / unified GEMM needs Slot weights. Join here before
@@ -999,9 +957,6 @@ def run_slot_forward(
                 for name, cache in state.caches.items():
                     cache[state.cache_layer_index, j].copy_(state.slots[name][i])
                 state.cache_experts[j] = e
-    if _sync:
-        torch.npu.synchronize()
-        _t_gemm = time.perf_counter()
     mlp_compute_input = build_mlp_compute_input(
         fused_experts_input=fused_experts_input,
         token_dispatch_output=token_dispatch_output,
@@ -1031,9 +986,6 @@ def run_slot_forward(
         rows, _ = unified_apply_mlp(
             mlp_compute_input=mlp_compute_input, record_before_gmm2=False,
         )
-    if _sync:
-        torch.npu.synchronize()
-        _pf_time("gemm_after_prefetch", time.perf_counter() - _t_gemm)
     return rows
 
 

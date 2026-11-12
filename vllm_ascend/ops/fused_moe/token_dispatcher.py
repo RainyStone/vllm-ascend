@@ -22,43 +22,10 @@
 # limitations under the License.
 from abc import ABC, abstractmethod
 from typing import Generic
-import atexit
-import os
-import time
 
 import torch
 import torch_npu
 
-# MOONEP_TIME_STATS=1: same-granularity component timing for the MC2 baseline
-# path (npu_moe_distribute_dispatch_v2 / combine_v2 are single fused ops, so
-# dispatch/combine wall here is the pure collective cost).
-_BASE_TSTATS_ENABLED = os.environ.get("MOONEP_TIME_STATS", "0") == "1"
-_BASE_TSTATS = {"dispatch": [0.0, 0], "combine": [0.0, 0]}
-
-
-def _base_ts_dump():
-    if not _BASE_TSTATS_ENABLED:
-        return
-    try:
-        dev = f"npu:{torch.npu.current_device()}" if torch.npu.is_available() else "?"
-    except Exception:  # noqa: BLE001
-        dev = "?"
-    parts = [f"[tstats-baseline dev={dev}]"]
-    for name, (total, calls) in _BASE_TSTATS.items():
-        parts.append(
-            f"{name}: calls={calls} total={total:.3f}s avg={total / max(calls, 1) * 1e3:.2f}ms")
-    print(" ".join(parts), flush=True)
-
-
-atexit.register(_base_ts_dump)
-
-
-def _base_ts(name: str, t0: float) -> None:
-    if not _BASE_TSTATS_ENABLED:
-        return
-    acc = _BASE_TSTATS[name]
-    acc[0] += time.perf_counter() - t0
-    acc[1] += 1
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
@@ -260,7 +227,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        _t0 = time.perf_counter()
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
@@ -278,7 +244,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             expand_scales,
         ) = output[0:7]
         group_list_type = kwargs_mc2["expert_token_nums_type"]
-        _base_ts("dispatch", _t0)
         return MoETokenDispatchOutput(
             hidden_states=expand_x,
             dynamic_scale=dynamic_scale,
@@ -364,14 +329,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
     def token_combine(self, hidden_states, combine_metadata, bias=None):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
-        _t0 = time.perf_counter()
         kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, combine_metadata)
         combined_output = (
             torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
             if self.enable_dispatch_v2
             else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
         )
-        _base_ts("combine", _t0)
 
         return combined_output
 
@@ -743,53 +706,3 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         )
         output = output.view(combine_metadata.hidden_shape)
         return output
-
-
-# --- MOONEP_TIME_STATS: wrap every dispatcher's token_dispatch/token_combine
-# so whichever comm path the engine selects is timed at the same granularity. ---
-if _BASE_TSTATS_ENABLED:
-    def _ts_wrap(cls, meth: str, name: str) -> None:
-        orig = getattr(cls, meth, None)
-        if orig is None or getattr(orig, "_ts_wrapped", False):
-            return
-
-        def _wrapped(self, *args, **kwargs):
-            _t = time.perf_counter()
-            try:
-                return orig(self, *args, **kwargs)
-            finally:
-                _base_ts(name, _t)
-
-        _wrapped._ts_wrapped = True
-        setattr(cls, meth, _wrapped)
-
-    for _cls in (TokenDispatcherWithAllGather, TokenDispatcherWithAll2AllV):
-        _ts_wrap(_cls, "token_dispatch", "dispatch")
-        _ts_wrap(_cls, "token_combine", "combine")
-
-
-# --- Also wrap the raw fused MC2 ops themselves (catches any call path). ---
-if _BASE_TSTATS_ENABLED:
-    _op_map = {
-        "npu_moe_distribute_dispatch_v2": "dispatch",
-        "npu_moe_distribute_dispatch": "dispatch",
-        "npu_moe_distribute_combine_v2": "combine",
-        "npu_moe_distribute_combine": "combine",
-    }
-    for _fname, _phase in _op_map.items():
-        _orig_fn = getattr(torch_npu, _fname, None)
-        if _orig_fn is None or getattr(_orig_fn, "_ts_wrapped", False):
-            continue
-
-        def _mk_fn(orig, name):
-            def _w(*args, **kwargs):
-                _t = time.perf_counter()
-                try:
-                    return orig(*args, **kwargs)
-                finally:
-                    _base_ts(name, _t)
-
-            _w._ts_wrapped = True
-            return _w
-
-        setattr(torch_npu, _fname, _mk_fn(_orig_fn, _phase))
