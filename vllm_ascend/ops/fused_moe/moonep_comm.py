@@ -911,6 +911,7 @@ def ensure_runtime_initialized() -> None:
             f"{k}={_os_audit.environ.get(k, '<unset>')}"
             for k in (
                 "MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENABLED",
+                "MOONEP_PLANNING_LOAD_STATS_BARRIER_MODE",
                 "MOONEP_MIN_DISPATCH_TOKENS",
             )
         ),

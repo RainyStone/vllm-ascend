@@ -235,6 +235,11 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+Planning 负载统计前的屏障由 SDK 参数 `MOONEP_PLANNING_LOAD_STATS_BARRIER_MODE` 控制，严格接受精确小写 `auto`/`pull`/`push`，默认 `auto`；SDK 在原 Planning 配置位置首次成功读取后缓存，各EP rank必须一致，不支持运行中切换。vLLM只增加一次性环境审计，不增加逐层解析或host同步。`auto`保留SHMEM自动选择（当前EP≤32用v3 pull，EP>32用v4 push），与此前8卡GSM8K/LongBench-v2默认路径一致；显式`pull`固定v3，`push`固定v4，不能关闭屏障，也不改变统计数据的gather方式。
+
+旧名 `ASCEND_MOONEP_BARRIER_V4` 不再生效，不提供兼容别名；旧值1强制push的配置需迁移为新值`push`，旧名单独设置时采用新默认`auto`。必须配套部署重编译的SDK `_C`和`libascend_moonep_kernels.so`，保留56字节tiling布局但新增pull编码，不能混用旧设备库。保留写入→屏障→读取、内存可见性、代次计数、核间同步及跨rank调用顺序；原生Off、通信选择、源端去重、MTE/UDMA、副流/Home GEMM1、缓存、MXFP8、有效行解包和融合publish/加权combine均不变。不改写历史脚本与结果，也不宣称已重新验证多rank同步或性能。
+
+
 MoonEP dispatch格式按每层实际 `MoEQuantParams` 自动选择，不再读取 `VLLM_ASCEND_MOONEP_DISPATCH_DTYPE`；删除中央注册与固定模式属性，不保留兼容别名，旧变量任意值均被忽略。`W4A8MXFP` 自动且必须走MXFP8，其余类型保留原先可用的BF16传输及MLP内必要量化，不新增INT8、普通FP8或MXFP4通信能力，不扩大模型支持范围。
 
 MXFP8继续要求原始连续BF16输入、E4M3激活、group32 E8M0激活scale和现有wire几何（H在1024～16384且为1024倍数）；MXFP元数据缺失、格式或尺寸不兼容时明确报错。量化参数中未显式指定的激活/激活scale类型沿用标准E4M3/E8M0默认语义。选中后缺wire库、ABI/接口不匹配或执行失败也直接报错，不回退BF16，不把预量化FP8直接强转BF16当作反量化。
