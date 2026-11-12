@@ -61,7 +61,6 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
-from vllm_ascend.ops.fused_moe import moe_sim_route
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -985,12 +984,8 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        # Engine bookkeeping, not user traffic: a one-token decode shape that keeps the DP
-        # collectives moving while this rank has nothing to execute. The simulated routing
-        # deliberately stays *in* this forward. Suspending it would hand the step to the
-        # real DSv4 hash gate, which faults the AI core at exactly this shape
-        # (MoeGatingTopKHash, N=1 -> MTE address out of range); injecting keeps the vendor
-        # gate off the engine's own bookkeeping forward. See ops/fused_moe/moe_sim_route.py.
+        # Engine bookkeeping: keep DP collectives progressing when this rank
+        # has no user batch. Preserve the original dummy shape and execution.
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:

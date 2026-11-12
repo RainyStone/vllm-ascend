@@ -182,24 +182,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Runtime accepts integer values in [1, E/EP] before that planner check.
     # Non-sensitive. This does not change the SDK's B parameter.
     "MOONEP_REDUNDANT_EXPERT_SLOT_COUNT": lambda: os.getenv("MOONEP_REDUNDANT_EXPERT_SLOT_COUNT", None),
-    # Synthetic expert-selection profile, for routing-skew performance experiments.
-    # Replaces the router's top-k output wholesale in ops/fused_moe/experts_selector.py
-    # (see ops/fused_moe/moe_sim_route.py). One share per expert, in percent, summing
-    # to 100; the share of the *routes* (T*top_k slots), so a single expert cannot
-    # exceed 100/top_k -- one token's top-k experts are always distinct. Empty means
-    # off. Accepts a full list ("50,30,1,..."), a sparse list ("0:50,7:30", unlisted
-    # experts split the remainder), or "@<path>" to read either form from a file.
-    "VLLM_ASCEND_MOE_SIM_ROUTE": lambda: os.getenv("VLLM_ASCEND_MOE_SIM_ROUTE", ""),
-    # RNG seed for the synthetic assignment. Same seed and same token count give a
-    # bit-identical routing table, so legs stay comparable across runs. Default 0.
-    "VLLM_ASCEND_MOE_SIM_ROUTE_SEED": lambda: int(os.getenv("VLLM_ASCEND_MOE_SIM_ROUTE_SEED", "0")),
-    # Print the full per-expert table when the token count changes, then a one-line
-    # reuse confirmation every N calls (0 disables the heartbeat). Default 43, the
-    # MoE layer count, so the heartbeat lands once per step.
-    "VLLM_ASCEND_MOE_SIM_ROUTE_EVERY": lambda: int(os.getenv("VLLM_ASCEND_MOE_SIM_ROUTE_EVERY", "43")),
-    # "0" suppresses the full per-expert table, leaving only the per-rank summary line.
-    # Use it on long served runs where the token count changes every step.
-    "VLLM_ASCEND_MOE_SIM_ROUTE_TABLE": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_SIM_ROUTE_TABLE", "1"))),
+
 }
 
 # end-env-vars-definition

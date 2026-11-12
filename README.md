@@ -258,10 +258,6 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
 | `ASCEND_MOONEP_TIME_STATS=1` | 库内分段计时（barrier/planning 核/dispatch 核/边界拷贝，`[moonep-lib-tstats]`） |
 | `MOONEP_CAP_TRACE=1` | 打印每步选中的 dispatch 容量 |
-| `VLLM_ASCEND_MOE_SIM_ROUTE=<档案>` | **仿真路由注入**：用一份指定的专家选择分布替换 router 的输出（[moe_sim_route.py](vllm_ascend/ops/fused_moe/moe_sim_route.py)）。三种写法：`@/abs/file`、稀疏 `0:16,7:10`（未列出者均分剩余）、完整列表。占比之和须为 100。**E/K/层数均从模型现取**（本 checkpoint：E=256, K=6, 43 层），编号是逻辑专家号 `[0,E)` |
-| `VLLM_ASCEND_MOE_SIM_ROUTE_SEED` | 分配随机种子（默认 0）；同 seed + 同 T → 逐位一致，便于跨腿对比 |
-| `VLLM_ASCEND_MOE_SIM_ROUTE_EVERY` | 每 N 次调用打一行复用确认（默认 43 = 本模型一步的 MoE 层数；换层数不同的模型要改） |
-| `VLLM_ASCEND_MOE_SIM_ROUTE_TABLE` | 置 0 时只打 per-rank 汇总行，不打逐专家的全表（本模型 256 行） |
 | `DUMP_TOKENS=1` | 导出贪心 token ids（`/tmp/bench_tokids_<TAG>_rank*.json`），用于跨路线对拍 |
 
 MoonEP dispatch 固定将有效行数保留在设备端，通过 count-mode `group_list` 限定 GEMM 工作量，并在 combine 中安全处理容量尾部，不再提供逐层 `.item()` 回读行数的开关。跨 rank 通信屏障、副流事件等待，以及独立开关控制的诊断/调试同步仍保留。
@@ -278,29 +274,11 @@ MoonEP 固定启用自适应容量选档，使用跨 DP 一致的 step token 数
 
 MoonEP 启用且 EP>1 时，首次运行时初始化固定在 SHMEM 集体初始化、建立跨设备映射前尝试预热 AICPU custom 调度器。保留 1-token metadata 调用及启动阶段同步，不进入逐层或逐请求路径；图捕获期间或目标算子未注册时跳过，算子调用/同步失败时告警并返回 False，延续现有失败处理策略。Off 和 EP≤1 的提前返回保持不变。
 
-上表 `SIM_ROUTE` 的硬上限是 **`max(share) ≤ 100/top_k`**（本模型 K=6 → 16.67%；K=8 → 12.5%）：
-真实 topk 每个 token 的 K 个专家互异，任何专家最多被 T 个 token 选中。**该上限只由 K 决定，与 E
-无关**——`0:16,...` 这种档案在 E=256 和 E=384 上都合法，不用改。超过直接报错退出，不是告警。
+仿真路由清理：`VLLM_ASCEND_MOE_SIM_ROUTE`、`VLLM_ASCEND_MOE_SIM_ROUTE_SEED`、`VLLM_ASCEND_MOE_SIM_ROUTE_EVERY` 和 `VLLM_ASCEND_MOE_SIM_ROUTE_TABLE` 已移除，不提供兼容别名，旧环境变量不再注入合成专家分布。真实流量继续使用模型原生的融合/非融合/自定义 router 和原有逻辑到物理专家映射；启动 profile 的原生 force_load_balance 及 DP dummy 调用保持不变。
 
-两种「步太小」的情形都不会把引擎打挂：
-**`T < top_k`**（例如 `dp=4` 时每个 rank 只剩 1 条序列的 decode，拼批后 `T = dp × 每 rank 最大 token 数 = 4`）
-照常注入——一行本来就 `top_k` 个槽，一个 token 就能填满一行的互异专家，真正的约束是 `count[e] ≤ T`
-（`_apportion` 负责修）；只是粒度变粗，所以打一行 warning（每进程一次）而不是把引擎打挂。
-**DP 同步用的 dummy step**（`NPUWorker.execute_dummy_batch`，恒为 `T=1`）**也照常注入**——这是踩过坑的：
-把注入挂起、让 dummy 走真实 router，DSv4 的 hash gate（`MoeGatingTopKHash`）正好在这个形状上打挂
-AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of range`，所有空闲 DP rank
-同时报），而同一个核、同一组 attrs/dtype/（全零的）input_ids 在 startup profile 与真实步的成批尺寸上
-都正常——**N=1 是唯一的变量**。dummy 是引擎自身的记账前向、输出被丢弃，注入对它没有语义影响。
-注意**这不是仿真路由独有的坑**：不带 `SIM_ROUTE` 的腿也会从同一个 dummy step 撞上同一个核。
+通用起服脚本已移除 `SIM_ROUTE`、`SIM_ROUTE_SEED`、`SIM_ROUTE_EVERY`、`SIM_ROUTE_TABLE` 透传入口及“仿真已开启”提示。历史合成倾斜度、二分阈值实验的脚本、路由档案与结果保留原样；这些实验需要历史代码才能按原注入方式重跑，不能把新代码忽略旧变量后的真实路由结果当作原合成实验。
 
-仿真路由的日志读法：T 变化时一张全表（`req%` / 期望条数 / 实际条数 / 偏差），随后同 T 复用同一份
-分配（层间与同长步之间逐位一致），每 `_EVERY` 次调用一行复用确认。**`SUM_act` 必须等于 `T×top_k`**，
-`max|dev|` 应 `<= 1`（最大余数法保证）。最后一行 `home-rank rows` 是**预测的** rank 级行数分布——
-即路由倾斜作用到 rank 级计算上的那一项，但假定无 EPLB（恒等 `log2phy`）且专家按 `E/R` 连续分片；
-有 EPLB 时它失效，以 dump 为准。`E` 不被 `R` 整除时该行会明说「不可预测」而不是消失（真实 EP
-布局不应走到这里）。
-真值对账用 `MOE_PAR=1` 的 dump：off 腿 `counts_scope=local` 的行按本地专家槽索引（`E/R` 项，
-本模型 32），`sum` 即该 rank 实际计算的行数，逐 rank 与 `home-rank rows[r]` 对比即可。
+真实负载统计 `VLLM_ASCEND_MOE_PAR_STATS`、目录/标签/落盘频率参数，以及 `MOONEP_PLAN_STATS`、`MOONEP_EARLY_PLAN` 等独立诊断均保留。MoonEP Slot、预取副流、缓存、MXFP8、有效行解包、融合 publish 和其他优化不变。源码曾记录仿真注入绕过特定 DSV4 单 token dummy 的原生 gating 故障；当前版本是否仍复现未重新验证，本次不新增绕过，也不认定该历史故障已修复。
 
 ## 限制与已知问题（重要）
 
@@ -329,7 +307,7 @@ AI core（`errcode:(263, 95) … DDR address of the MTE instruction is out of ra
 3. **planning 要求 B == E/R**；GPU 原版“推理用小 B”在 Ascend 移植库上暂不支持。
 4. **超容量/倾斜**：owner 模式在极端路由倾斜下可能丢行（见模块注释的容量包络）；
    计划中增加 `plan.remote_stats` 保护（越界自动回退原生 comm）。
-   **用仿真路由（`VLLM_ASCEND_MOE_SIM_ROUTE`）造倾斜时尤其要注意**：owner 模式下规划核的
+   **历史 owner 合成倾斜对照中记录**：owner 模式下规划核的
    rebalancer 会把 rank 级负载抹平，dispatch 核再把超出该 rank 容量 `S×top_k` 的行**静默丢弃**——
    于是「路由倾斜 → rank 级计算」这条链在 owner 腿上是断的（rank 级计算反映的是再平衡结果，
    不是路由本身）。**要测路由倾斜对 rank 级计算的直接影响，用 off 腿或 slot 腿**：off 腿

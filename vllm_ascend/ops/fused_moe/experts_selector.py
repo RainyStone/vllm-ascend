@@ -24,7 +24,6 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
-from vllm_ascend.ops.fused_moe import moe_sim_route
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -69,19 +68,6 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
-    # Routing-skew experiments: replaces the router's pick wholesale. Placed before every
-    # other branch so the injection is identical on all comm paths and across the quant
-    # methods, and so the fused-op capability probe is skipped entirely. Returns None
-    # unless VLLM_ASCEND_MOE_SIM_ROUTE is set, so the shipped path is untouched.
-    simulated = moe_sim_route.maybe_select_experts(
-        hidden_states=hidden_states,
-        top_k=top_k,
-        num_experts=num_logical_experts if num_logical_experts and num_logical_experts > 0 else num_experts,
-        mix_placement=mix_placement,
-    )
-    if simulated is not None:
-        return simulated
-
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
