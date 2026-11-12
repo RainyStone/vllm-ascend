@@ -243,14 +243,14 @@ class PublisherDependencyTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "ABI mismatch"):
                 self.module.CombinePublisher()
 
-    def test_valid_abi_uses_the_existing_separate_library(self):
+    def test_valid_abi_uses_the_unified_device_library(self):
         library = Mock()
         library.moonep_publish_abi.return_value = 1
         with patch.object(self.module.Path, "is_file", return_value=True), patch.object(
             self.module.ctypes, "CDLL", return_value=library
         ) as load:
             publisher = self.module.CombinePublisher()
-        expected = (ROOT.parent / "ascend-moonep/ascend_moonep/lib/libascend_moonep_publish.so").resolve()
+        expected = (ROOT.parent / "ascend-moonep/ascend_moonep/lib/libascend_moonep_kernels.so").resolve()
         self.assertEqual(publisher.library_path, expected)
         load.assert_called_once_with(str(expected))
 

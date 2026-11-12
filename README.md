@@ -68,14 +68,17 @@ export MOONEP_PREFETCH_SIDE_STREAM_OVERLAP='dispatch|home_gemm1'
 
 `VLLM_ASCEND_MOONEP_FUSED_PUBLISH` 已移除，vLLM Slot 固定使用融合 publish：与旧默认值 0 不同，未设置或旧值为 0 时也采用此前显式值 1 的优化路径。将原始 BF16 专家输出与设备端有效行 counts 交给本地融合内核，一次完成有效行写入 SHMEM 和尾部清零，保留 NaN 尾部安全处理；FP32 路由权重乘加及最终 BF16 舍入不变。SDK 公共 `fused_publish/zero_copy` 参数和默认值不变，独立调用仍可选择旧路径；历史非融合实验脚本和结果保留原样，旧变量不能再用于新代码的非融合对照。
 
-该路径要求 A5 专用 libascend_moonep_publish.so，未合入主通信库；当前构建不支持其他设备。缺库、ABI 不匹配或输入布局不合法时明确报错，不静默回退。源码位于 `ascend-moonep/kernels/combine_publish.cpp`，Python 通过 ctypes 加载 `ascend_moonep/lib/libascend_moonep_publish.so`。普通 pip install 不会自动编译此库；构建脚本只生成产物，不负责安装。需要更新时，在停止使用该库的相关服务后，于 ascend-moonep 仓根目录执行（需要匹配的 CANN/A5 工具链）：
+publish、MXFP8 wire 和 Home/Slot 范围 GEMM1 现已合入 A5 主设备库 `libascend_moonep_kernels.so`，各功能源码继续独立维护。Python 包装默认通过 ctypes 加载同一个主库，保留导出函数、wire/publish ABI检查和显式 library_path；缺库、缺符号、ABI不匹配或非法输入明确报错，不回退旧分库，不扩大设备/模型支持范围。`_C` 和 SHMEM/CANN依赖继续独立，合库不改变现有主通信 ABI。
+
+于 ascend-moonep 仓根目录构建候选（不安装）：
 
 ```bash
-bash scripts/build_combine_publish.sh
-install -m 755 build/combine_publish_20261106/lib/libascend_moonep_publish.so ascend_moonep/lib/libascend_moonep_publish.so
+bash scripts/build_kernels.sh --arch a5
 ```
 
-无需因删除环境变量重复编译已有匹配库。仅修改 vLLM 接入路径，不改变模型量化、MXFP8 dispatch、有效行解包、dispatch zero-copy、副流、Home GEMM1、缓存或原生 Off。
+候选产物为 `build/lib/libascend_moonep_kernels.so`，包含全部A5优化；原三个构建脚本保留为这个统一构建入口。验证候选并备份后，使用同目录临时文件加原子替换安装；旧进程保持已有映射，新服务重启后加载新版本。旧三个分库文件保留供既有进程和显式历史对照使用，新默认不再加载，SDK打包时排除陈旧分库。
+
+本次只合并设备库产物，保留原内核源码、数据格式、有效行解包、NaN尾部安全处理、融合publish/FP32加权归并、launch次数和流事件顺序；MTE/UDMA、副流/Home GEMM1、缓存、通信选路及原生Off不变。算子微基准结果不代替模型端到端性能结论，历史脚本与结果不改写。
 
 `ASCEND_MOONEP_NO_RECONCILE` 与 `ASCEND_MOONEP_PREFETCH_RELAXED` 已成对移除，固定采用原实验值 1/1，而非旧默认 0/0。SDK 的 `async_finish=True` 分支继续在当前流排队并返回完成事件，不再附加全设备 synchronize 和 dist.barrier；prefetch 的 C++ 入口始终不插入前后跨 rank barrier。planning/dispatch/combine 及初始化、权重发布的必要同步、预取内核内部完成机制和 UDMA 独立 QP 保护保留。
 
