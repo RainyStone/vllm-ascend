@@ -465,7 +465,7 @@ def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[in
     token count used for planning, routing and expert computation. Powers of
     two cover small steps through 512; uniformly spaced rungs cover larger
     steps. Spacing is chosen using MOONEP_POOL_MAX_RUNGS (default 32) and
-    MOONEP_POOL_BUDGET_MB (default 2048 MiB).
+    MOONEP_POOL_MEMORY_BUDGET_MB (default 2048 MiB).
 
     ``cost_per_token`` estimates hidden-buffer bytes per token of capacity
     (K*H*2). The budget guides rung spacing, not a hard cap on total memory:
@@ -496,7 +496,7 @@ def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[in
     # "aclrtMallocPhysical(...) failed with 207001" past a few dozen buffers
     # (measured: 51 rungs -> pool init dies; 31 rungs -> fine).
     max_rungs = int(os.environ.get("MOONEP_POOL_MAX_RUNGS", "32"))
-    budget = int(os.environ.get("MOONEP_POOL_BUDGET_MB", "2048")) * 2**20
+    budget = envs.MOONEP_POOL_MEMORY_BUDGET_MB * 2**20
     base = [c for c in (16, 32, 64, 128, 256, 512) if c <= s_max]
     for c in base:
         _add(c)

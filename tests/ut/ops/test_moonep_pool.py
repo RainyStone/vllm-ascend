@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU regressions for adaptive capacity selection and collective-safe fallbacks."""
 import ast
+import importlib.util
 import os
 import unittest
 from pathlib import Path
@@ -15,7 +16,12 @@ class AdaptivePoolTests(unittest.TestCase):
     def setUp(self):
         self.context = SimpleNamespace(dp_metadata=object(), max_tokens_across_dp=1)
         self.dp_world_size = 8
+        spec = importlib.util.spec_from_file_location(
+            "pool_memory_envs", SOURCE.parents[2] / "envs.py")
+        self.envs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.envs)
         self.namespace = {
+            "envs": self.envs,
             "os": os,
             "get_forward_context": self.get_context,
             "get_dp_group": lambda: SimpleNamespace(world_size=self.dp_world_size),
@@ -141,7 +147,7 @@ class AdaptivePoolTests(unittest.TestCase):
         expected = [16, 32, 64, 128, 256, 512, *range(768, 4097, 256)]
         self.assertEqual(sorted(self.pool), expected)
         with patch.dict(os.environ, {"MOONEP_POOL_MAX_RUNGS": "32",
-                                     "MOONEP_POOL_BUDGET_MB": "2048"}, clear=True):
+                                     "MOONEP_POOL_MEMORY_BUDGET_MB": "2048"}, clear=True):
             self.assertEqual(self.namespace["_moonep_pool_capacities"](
                 4096, cost_per_token=6 * 4096 * 2), expected)
 
@@ -150,10 +156,82 @@ class AdaptivePoolTests(unittest.TestCase):
             sparse = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
         self.assertLessEqual(len(sparse), 8)
         self.assertEqual(sparse[-1], 4096)
-        with patch.dict(os.environ, {"MOONEP_POOL_BUDGET_MB": "1"}, clear=True):
+        with patch.dict(os.environ, {"MOONEP_POOL_MEMORY_BUDGET_MB": "1"}, clear=True):
             low_budget = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
         self.assertLess(len(low_budget), len(self.pool))
         self.assertEqual(low_budget[-1], 4096)
+
+    def test_memory_budget_registration_and_default(self):
+        self.assertIn("MOONEP_POOL_MEMORY_BUDGET_MB", self.envs.env_variables)
+        self.assertNotIn("MOONEP_POOL_BUDGET_MB", self.envs.env_variables)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.envs.MOONEP_POOL_MEMORY_BUDGET_MB, 2048)
+
+    def test_memory_budget_preserves_integer_parsing(self):
+        for raw, expected in (("2048", 2048), (" +01024 ", 1024), ("0", 0), ("-1", -1)):
+            with self.subTest(raw=raw), patch.dict(
+                os.environ, {"MOONEP_POOL_MEMORY_BUDGET_MB": raw}, clear=True
+            ):
+                self.assertEqual(self.envs.MOONEP_POOL_MEMORY_BUDGET_MB, expected)
+
+    def test_old_budget_values_are_ignored(self):
+        for old in ("1", "0", "-1", "invalid"):
+            with self.subTest(old=old), patch.dict(
+                os.environ, {"MOONEP_POOL_BUDGET_MB": old}, clear=True
+            ):
+                caps = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+                self.assertEqual(caps, sorted(self.pool))
+
+    def test_new_budget_wins_over_old(self):
+        with patch.dict(os.environ, {
+            "MOONEP_POOL_MEMORY_BUDGET_MB": "1", "MOONEP_POOL_BUDGET_MB": "2048",
+        }, clear=True):
+            caps = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+        self.assertEqual(caps, [16, 32, 64, 128, 256, 512, 4096])
+
+    def test_invalid_new_budget_does_not_fall_back(self):
+        for value in ("", "invalid", "1.5"):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                "MOONEP_POOL_MEMORY_BUDGET_MB": value, "MOONEP_POOL_BUDGET_MB": "2048",
+            }, clear=True):
+                with self.assertRaises(ValueError):
+                    self.namespace["_moonep_pool_capacities"](4096)
+
+    def test_nonpositive_budget_disables_only_the_budget_constraint(self):
+        for value in ("0", "-1", "-2048"):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                "MOONEP_POOL_MEMORY_BUDGET_MB": value, "MOONEP_POOL_MAX_RUNGS": "100",
+            }, clear=True):
+                caps = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+                self.assertEqual(caps, [16, 32, 64, 128, 256, 512, *range(640, 4097, 128)])
+
+    def test_manual_caps_bypass_even_invalid_budget_without_reading_it(self):
+        getter = Mock(side_effect=AssertionError("Manual caps must not read the budget"))
+        with patch.dict(self.envs.env_variables, {"MOONEP_POOL_MEMORY_BUDGET_MB": getter}), patch.dict(
+            os.environ, {"MOONEP_POOL_CAPS": "1024,256", "MOONEP_POOL_MEMORY_BUDGET_MB": "invalid"},
+            clear=True,
+        ):
+            self.assertEqual(self.namespace["_moonep_pool_capacities"](4096), [256, 1024, 4096])
+        getter.assert_not_called()
+
+    def test_budget_is_read_at_ladder_generation_without_new_cache(self):
+        with patch.dict(os.environ, {"MOONEP_POOL_MEMORY_BUDGET_MB": "1"}, clear=True):
+            sparse = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+            os.environ["MOONEP_POOL_MEMORY_BUDGET_MB"] = "2048"
+            dense = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+        self.assertLess(len(sparse), len(dense))
+
+    def test_budget_remains_soft_and_keeps_maximum_capacity(self):
+        with patch.dict(os.environ, {"MOONEP_POOL_MEMORY_BUDGET_MB": "1"}, clear=True):
+            caps = self.namespace["_moonep_pool_capacities"](4096, cost_per_token=6 * 4096 * 2)
+        self.assertEqual(caps[-1], 4096)
+        self.assertGreater(sum(caps) * 6 * 4096 * 2, 2**20)
+
+    def test_old_budget_key_has_no_runtime_read_or_registration(self):
+        for relative in ("envs.py", "ops/fused_moe/moonep_comm.py"):
+            tree = ast.parse((SOURCE.parents[2] / relative).read_text())
+            self.assertFalse(any(isinstance(n, ast.Constant) and isinstance(n.value, str)
+                                 and n.value == "MOONEP_POOL_BUDGET_MB" for n in ast.walk(tree)))
 
 
 if __name__ == "__main__":

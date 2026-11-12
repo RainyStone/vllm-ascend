@@ -52,6 +52,10 @@ def _moonep_cached_redundant_expert_count() -> int:
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # MoonEP automatic capacity-ladder memory estimate, in MiB despite the MB
+    # suffix. Non-sensitive; integer, default 2048; <=0 disables the budget.
+    # Per-shape ladder heuristic, not a total device-memory allocation limit.
+    "MOONEP_POOL_MEMORY_BUDGET_MB": lambda: int(os.getenv("MOONEP_POOL_MEMORY_BUDGET_MB", "2048")),
     # Persistent remote-expert cache capacity per EP rank and MoE layer.
     # Non-sensitive; integer >=0, default 0 disables caching. No E/R or Slot
     # capacity upper bound; available memory still limits actual allocation.

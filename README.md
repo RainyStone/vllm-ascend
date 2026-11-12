@@ -229,6 +229,10 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | 崩溃日志是空的（kill 后无 traceback） | 别用 `… \| grep … \| tail -N` 跑长任务：`tail` 会缓冲到 EOF，进程被杀就什么都不落盘 |
 | `HcclBroadcast ... port 16666` 等 HCCL 建链异常 | **未定根因**（个别机器只出现过一次、未复现）。遇到时先按 HCCL 错误码定位：`19 = HCCL_E_NETWORK`、`4 = 内部错误 / TLS 配置不一致`（曾见 0-3 卡 tls disabled、4-7 enabled 导致 8 卡建链失败） |
 
+容量池预算迁移：`MOONEP_POOL_BUDGET_MB` 已重命名为 `MOONEP_POOL_MEMORY_BUDGET_MB`，只保留新名称的中央注册与读取，不提供旧名兼容别名。默认仍为 2048，后缀虽为 MB，换算仍是每单位 `2^20` 字节（MiB）；整数解析不变，正数参与估算，0 或负数取消预算约束。旧名单独设置时被忽略而使用新默认，新旧同时存在时仅采用新名。
+
+该值是每个形状容量池在自动生成档位时使用的估算预算，不是整卡或全部容量池的总显存硬上限，也不包含全部工作区、元数据及 VMM 对齐开销。基础档位和最大容量仍保留，`MOONEP_POOL_MAX_RUNGS` 及选档算法不变。显式指定 `MOONEP_POOL_CAPS` 仍先返回手动档位，不读取或解析预算；预算只在生成档位时查询，不增加逐层推理开销。历史实验脚本与结果不改写，自定义旧预算的启动配置重跑前需迁移。
+
 ## 关键配置/环境开关
 
 | 开关 | 作用 |
@@ -244,7 +248,7 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
 | `MOONEP_POOL_CAPS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
 | `MOONEP_MIN_DISPATCH_TOKENS=16` | 每步选档的最小 token 下限，必须 ≥1；仅识别此变量，未设置时默认 128，实验脚本可显式设 16 |
-| `MOONEP_POOL_BUDGET_MB=2048` | 档位表的估算预算，单位 MiB，影响档位密度；不是包含全部工作区的总显存硬限制 |
+| `MOONEP_POOL_MEMORY_BUDGET_MB=2048` | 档位表的估算预算，单位 MiB，影响档位密度；不是包含全部工作区的总显存硬限制 |
 | `MOONEP_POOL_MAX_RUNGS=32` | 档数上限。**受 VMM 物理块约束**（51 档会 `207001` 初始化失败，见排障） |
 | `MOONEP_PAD_CUT=1` | 实验性：把补零行踢出 grouped GEMM。**实测错误，默认关**（见排障） |
 | `MOONEP_TIME_STATS=1` | 分阶段计时，退出时打印 `[moonep-tstats]` |
