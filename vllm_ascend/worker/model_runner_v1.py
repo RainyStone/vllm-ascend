@@ -3833,12 +3833,9 @@ class NPUModelRunner(GPUModelRunner):
         # forward (the UDMA path stalls if initialized lazily mid-forward).
         from vllm_ascend.ops.fused_moe.moonep_comm import (
             ensure_runtime_initialized,
-            maybe_install_early_router_probe,
         )
 
         ensure_runtime_initialized()
-        # MOONEP_EARLY_PLAN=1 (no-op otherwise): the early-plan speculation probe
-        maybe_install_early_router_probe(self.model)
         from vllm_ascend.ops.fused_moe.moonep_balance import (
             maybe_install_pf_stream,
         )

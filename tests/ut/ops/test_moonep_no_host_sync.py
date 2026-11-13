@@ -54,8 +54,6 @@ class NoHostCountSyncTests(unittest.TestCase):
             "torch": torch, "time": time, "os": os,
             "_EXTRA_CTX": SimpleNamespace(capturing=False),
             "_ENV_PACE_SYNC": False,
-            "_DUMP_PLAN_DIR": None, "_PLAN_STATS_ON": False,
-            "_EARLY_PLAN_ON": False,
             "_SLOT_TLS": SimpleNamespace(state=object()),
             "get_ep_group": lambda: SimpleNamespace(world_size=2, rank_in_group=0),
             "get_moonep_tokens_capacity": lambda: capacity,

@@ -13,29 +13,26 @@
 #   --kv-cache-memory-bytes 9663676416（9 GiB）、BATCHED_TOKENS 可前缀（默认 16384）。
 # 新增：MOONEP_REAL_T 透传 + 横幅回显（本脚本不 unset 它：未设 = 引擎默认 1；
 #   slot0 消融腿用命令前缀 MOONEP_REAL_T=0）。
-# 采集开关（PROFILE/SLOT_STATS/SIM_ROUTE）语义与 DP8 版一致，默认全关，
+# 采集开关（PROFILE/SIM_ROUTE）语义与 DP8 版一致，默认全关，
 #   性能跑**什么都不加**（脚本对每个都有无条件 unset 兜底）。
 # MoE逐rank原始负载采集和BALANCE账本已移除，旧开关不再生效。
 set -euo pipefail
 
 # ---------------------------------------------------------- 模式变量 -- #
-SLOT_STATS="${SLOT_STATS:-0}"
 MODE="${1:-slot}"
 case "$MODE" in
   off)
-    unset MOONEP MOONEP_SLOT_MODE MOONEP_SLOT_STATS
+    unset MOONEP MOONEP_SLOT_MODE
     ENABLE_MOONEP=false
     MODE_DESC="非 MoonEP：标准 MC2 / all-to-all EP（对照组）"
     ;;
   owner)
     export MOONEP=1 MOONEP_SLOT_MODE=0
-    unset MOONEP_SLOT_STATS
     ENABLE_MOONEP=true
     MODE_DESC="MoonEP owner：专家行常驻本 rank"
     ;;
   slot)
     export MOONEP=1 MOONEP_SLOT_MODE=1
-    if [ "$SLOT_STATS" = 1 ]; then export MOONEP_SLOT_STATS=1; else unset MOONEP_SLOT_STATS; fi
     ENABLE_MOONEP=true
     MODE_DESC="MoonEP slot：按 slot 镜像 expert 行并预取（real-T 默认开）"
     ;;
@@ -151,7 +148,7 @@ cat <<EOF | tee -a "$LOG_FILE"
  real-T      $REAL_T_LINE
  min-tokens  MOONEP_MIN_DISPATCH_TOKENS=${MOONEP_MIN_DISPATCH_TOKENS:-未设 → 默认 128}
  引导/传输   MOONEP_SHMEM_BOOTSTRAP=$MOONEP_SHMEM_BOOTSTRAP   MOONEP_DISABLE_UDMA=$MOONEP_DISABLE_UDMA
- 采集        PROFILE=${PROFILE:-0}   SLOT_STATS=$SLOT_STATS
+ 采集        PROFILE=${PROFILE:-0}
  仿真路由    SIM_ROUTE=${SIM_ROUTE:-未设}
  服务        http://$HOST:$PORT   api-server-count=$API_SERVER_COUNT   dp=$DP tp=$TP ep=on   served-model-name=$SERVED_NAME
  模型        $MODEL

@@ -1,6 +1,6 @@
 #!/bin/bash
 # start_service_mode.sh：按原服务参数起服；模式及参数见下面的配置。
-# PROFILE=1 保留官方 profiling 接口；SLOT_STATS 由后续计划诊断清理处理。
+# PROFILE=1 保留官方 profiling 接口；开发阶段的Slot统计与负载诊断均已移除。
 # MoE逐rank负载采集、BALANCE累计账本和相应目录/报告入口已移除。
 # 旧 MOE_PAR/BALANCE 及运行时采集变量不再开启这些功能。
 # 保留 OUT_DIR、LOG_FILE、profiling/ 和正常服务日志；路径必须为绝对路径。
@@ -12,52 +12,36 @@ set -x
 # 启动前先记下外部已经存在的相关环境变量，稍后在「启动核对」横幅里列出来。
 # 只认真正的环境变量（printenv），shell 里没 export 的同名变量不算。
 PRE_ENV=""
-for v in MOONEP MOONEP_SLOT_MODE MOONEP_SLOT_STATS MOONEP_SHMEM_BOOTSTRAP MOONEP_SHMEM_IPPORT \
+for v in MOONEP MOONEP_SLOT_MODE MOONEP_SHMEM_BOOTSTRAP MOONEP_SHMEM_IPPORT \
          MOONEP_TRANSPORT_TYPE; do
   val=$(printenv "$v") || continue
   PRE_ENV="$PRE_ENV $v=$val"
 done
 
 # ---------------------------------------------------------- 模式变量 -- #
-# MoonEP 一共四个开关，三个在环境变量（库侧）、一个在命令行（引擎侧）：
+# MoonEP模式与引擎开关（现存脚本的历史模式标签保持原样）：
 #   MOONEP=1            让 ascend_moonep 库加载并初始化 shmem；off 腿不设，整套 MoonEP 不参与
 #   MOONEP_SLOT_MODE=1  slot 模式（按 slot 镜像 expert 行并预取）；=0 即 owner 模式
-#   MOONEP_SLOT_STATS=1 只对 slot 有意义：worker 退出时打印 [moonep-stats] 计数，M7 判据靠它
-#                       （注意：本脚本的停服方式是 force-kill，worker 的退出钩子不执行，
-#                        服务化这条腿**本来就拿不到这一行**；M7 要在 bench/离线跑法里看，见 docs）。
-#                       采集点在 dispatch 里每层一次 .item()（host 同步），是**只有 MoonEP 腿付**
-#                       的开销，而服务化这条腿既拿不到它的输出、又把它算进了性能——所以服务腿
-#                       默认关掉（SLOT_STATS 默认 0，零损失）；要 M7 那个数就留在 bench/离线路径上开着。
 #   --additional-config {"enable_moonep": ...}  引擎侧开关：MoE 层是否改用 MoonEP 通信
 # 环境变量和引擎开关两个都要对：只设 MOONEP=1 而不给 enable_moonep，引擎走的还是普通 EP。
-# off 腿要把三个变量都清掉——shell 里残留的值会静默让下一条腿跑错配置。
+# off 腿清掉模式变量——shell 里残留的值会静默让下一条腿跑错配置。
 #
-SLOT_STATS="${SLOT_STATS:-0}"   # 只对 slot 有意义；服务腿打不出它的输出（退出时才打），默认关
-SLOT_STATS_DESC="不适用（off/owner 没有 slot 计数）"
 MODE="${1:-owner}"
 case "$MODE" in
   off)
-    unset MOONEP MOONEP_SLOT_MODE MOONEP_SLOT_STATS
+    unset MOONEP MOONEP_SLOT_MODE
     ENABLE_MOONEP=false
     MODE_DESC="非 MoonEP：标准 MC2 / all-to-all EP（对照组）"
     ;;
   owner)
     export MOONEP=1 MOONEP_SLOT_MODE=0
-    unset MOONEP_SLOT_STATS
     ENABLE_MOONEP=true
     MODE_DESC="MoonEP owner：专家行常驻本 rank"
     ;;
   slot)
     export MOONEP=1 MOONEP_SLOT_MODE=1
-    if [ "$SLOT_STATS" = 1 ]; then
-      export MOONEP_SLOT_STATS=1
-      SLOT_STATS_DESC="on（每层一次 host 同步，只 MoonEP 腿付；SLOT_STATS=1 显式指定）"
-    else
-      unset MOONEP_SLOT_STATS
-      SLOT_STATS_DESC="off（默认：服务腿本来就打不出这一行，开了只付每层同步、零收益）"
-    fi
     ENABLE_MOONEP=true
-    MODE_DESC="MoonEP slot：按 slot 镜像 expert 行并预取（M7 计数靠 MOONEP_SLOT_STATS）"
+    MODE_DESC="MoonEP slot：按 slot 镜像 expert 行并预取"
     ;;
   *)
     echo "用法: bash $0 {off|owner|slot}" >&2
@@ -197,10 +181,9 @@ fi
 cat <<EOF | tee -a "$LOG_FILE"
 ════════════════════════════════════ 启动核对 ════════════════════════════════════
  模式        mode=$MODE —— $MODE_DESC
- MoonEP      enable_moonep=$ENABLE_MOONEP   MOONEP=${MOONEP:-未设}   MOONEP_SLOT_MODE=${MOONEP_SLOT_MODE:-未设}   MOONEP_SLOT_STATS=${MOONEP_SLOT_STATS:-未设}
+ MoonEP      enable_moonep=$ENABLE_MOONEP   MOONEP=${MOONEP:-未设}   MOONEP_SLOT_MODE=${MOONEP_SLOT_MODE:-未设}
  引导/传输   MOONEP_SHMEM_BOOTSTRAP=$MOONEP_SHMEM_BOOTSTRAP   MOONEP_SHMEM_IPPORT=${MOONEP_SHMEM_IPPORT:-未设}   MOONEP_TRANSPORT_TYPE=${MOONEP_TRANSPORT_TYPE:-未设}
  profiling   PROFILE=${PROFILE:-0} → $PROFILE_DIR（= OUT_DIR/profiling）
-             SLOT_STATS=$SLOT_STATS —— $SLOT_STATS_DESC
  服务        http://$HOST:$PORT   api-server-count=$API_SERVER_COUNT   dp=$DP tp=$TP ep=on   served-model-name=$SERVED_NAME
  模型        $MODEL
  负载口径    max-num-seqs=$MAX_NUM_SEQS   max-num-batched-tokens=$BATCHED_TOKENS   max-model-len=$MAX_MODEL_LEN   gpu-mem-util=$GPU_UTIL   chunked-prefill=on

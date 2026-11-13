@@ -23,7 +23,7 @@ MoonEP 的 vLLM 服务路径只保留 Slot：对称权重镜像（home）+ 槽 +
 
 `MOONEP_FORCE_ALLGATHER` 已移除，固定采用原默认值 0 的正常选路：A5 小步满足条件时走 MC2，其余按并行规模与 top-k 选择 AllGather 或 All-to-All，必要的原生 AllGather 分支继续保留。MoonEP 的 SHMEM/Slot 覆盖、`MOONEP_KEEP_MC2` 和容量/EP 校验不变。旧值 1 不再强制 AllGather，原有 MC2 建链问题的手动规避入口不再提供，本次不新增自动回退；历史实验记录保留原样。
 
-`MOONEP_EARLY_PREFETCH` 与专用的 `MOONEP_EARLY_PF_DEV` 已移除，固定采用原 `MOONEP_EARLY_PREFETCH=0` 的行为：不再用同一层上一次执行的 plan 在 attention 前投机预取，也不再安装对应 hook、保存预测行或进行预测修补。旧变量设为 1 不再启用该能力。同层真实 planning 后的副流预取由 `MOONEP_PREFETCH_SIDE_STREAM_OVERLAP` 控制；共享流/事件、MTE/UDMA 保护及缓存联动继续保留，Home GEMM 模式仍要求关闭持久缓存。`MOONEP_EARLY_PLAN` 独立诊断、MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变；历史实验脚本和结果保留原样。
+`MOONEP_EARLY_PREFETCH` 与专用的 `MOONEP_EARLY_PF_DEV` 已移除，固定采用原 `MOONEP_EARLY_PREFETCH=0` 的行为：不再用同一层上一次执行的 plan 在 attention 前投机预取，也不再安装对应 hook、保存预测行或进行预测修补。旧变量设为 1 不再启用该能力。同层真实 planning 后的副流预取由 `MOONEP_PREFETCH_SIDE_STREAM_OVERLAP` 控制；共享流/事件、MTE/UDMA 保护及缓存联动继续保留，Home GEMM 模式仍要求关闭持久缓存。独立的EARLY_PLAN诊断探针已随后续计划诊断清理删除；MXFP8、融合 publish、有效行解包及 BF16 zero-copy 不变；历史实验脚本和结果保留原样。
 
 
 
@@ -140,14 +140,7 @@ export MOONEP_TRANSPORT_TYPE=mte         # mte（默认）或 udma；只接受�
 
 ## 使用
 
-### 槽位使用统计
-
-`MOONEP_SLOT_STATS=1` 会在进程退出时打印：dispatch 总次数、发生槽平衡的次数、槽内行数、预取的远程专家槽数。
-
-### MoE 负载采集（打点）
-
-打点只数本 rank 的量、不做任何额外集合通信；跨 rank 聚合与峰均比（PAR）报告由离线脚本完成
-（`VLLM_ASCEND_MOE_PAR_*` 四个环境变量控制，采集模块 `moe_par_stats.py`）。
+开发阶段的Slot统计、MoE原始负载打点和计划探针已删除，迁移影响见下文“关键配置/环境开关”；原生EPLB负载更新及官方profiling保留。
 
 ## 性能优化点与收益（dispatch/combine host 段，2026-09-10/11）
 
@@ -238,15 +231,23 @@ URMA 上下文自身开销；prefill 通信占比 MTE 79% / URMA 97%。再往下
 
 ## 关键配置/环境开关
 
+Slot/计划诊断清理：MOONEP_SLOT_STATS、MOONEP_PLAN_STATS、MOONEP_EARLY_PLAN、MOONEP_DUMP_PLAN、MOONEP_DUMP_PLAN_N 已移除，不保留兼容别名；旧变量任何值均不能开启统计、预测路由、额外Planning或计划快照。固定原诊断关闭、DUMP_PLAN未设置的执行路径，删除逐层计数回读、预测缓存、模型层探针hook及退出JSON/PT导出。
+
+MOONEP_DEV_BASE仅用于上述诊断文件的rank命名，现已删除其运行时读取；真实EP rank/设备绑定不受影响。TAG仅删除early-plan与plan-stats两个诊断出口的读取，保留正常脚本标签、实验命名和历史记录。原生EPLB热度更新/计数器、真实router、Planning负载统计与必要屏障、home/slot counts和FP32路由权重快照均保留。
+
+保留真实Planning后的prefetch hook、共享decoder层枚举函数、model runner的运行时初始化→真实预取hook安装顺序、副流/Home GEMM1事件等待、槽位复用及MTE/UDMA独立QP保护；MXFP8自动分发/有效行解包、BF16 zero-copy、融合publish/加权combine、容量池/缓冲复用、持久缓存及其独立命中计数不变。两份通用起服脚本不再提供SLOT_STATS透传与诊断核对。至此四组共20项开发诊断变量及DEV_BASE均无运行时读取；SDK内部计时/trace已另行移除。
+
+官方profiling与正常起服/后端日志保留；历史实验脚本、原始日志、路由档案、计划快照和离线分析工具不改写。新代码不能使用旧变量补采负载、Slot/计划数据或框架分段计时；这不表示实际负载或Slot使用为零。仅完成CPU验证，未重编译库或运行NPU/多rank/模型实验。
+
 MoE负载诊断清理：VLLM_ASCEND_MOE_PAR_STATS、VLLM_ASCEND_MOE_PAR_STATS_DIR、VLLM_ASCEND_MOE_PAR_STATS_TAG、VLLM_ASCEND_MOE_PAR_FLUSH_EVERY、MOONEP_BALANCE_STATS、MOONEP_BALANCE_STATS_EVERY 已移除，不保留兼容别名；旧变量任何值均不能开启采集或累计账本。删除专用记录模块、逐层调用、观测用直方图、D2H回读、周期/退出输出与导出状态。两份通用 service 起服脚本不再透传 MOE_PAR/BALANCE 或提供专用dump/报告入口，保留正常运行目录、服务日志和官方profiling入口。
 
-真实router、逻辑到物理专家映射、原生EPLB热度更新及其counts/prefix处理不变；Planning继续按真实top-k重建负载，SDK兼容张量及输入校验保留。保留MLP的home/slot counts、FP32路由权重快照、融合加权combine、MXFP8/有效行解包、BF16 zero-copy、容量池/缓存、副流/Home GEMM1及MTE/UDMA必要同步和事件。Slot/计划诊断及其DEV_BASE/TAG关联留待下一组处理；不清理正常脚本标签。历史实验脚本、负载原始日志和离线分析工具不改写；新代码不能通过旧变量补采八rank负载。
+真实router、逻辑到物理专家映射、原生EPLB热度更新及其counts/prefix处理不变；Planning继续按真实top-k重建负载，SDK兼容张量及输入校验保留。保留MLP的home/slot counts、FP32路由权重快照、融合加权combine、MXFP8/有效行解包、BF16 zero-copy、容量池/缓存、副流/Home GEMM1及MTE/UDMA必要同步和事件。Slot/计划诊断及其DEV_BASE/TAG关联已配套清理；不清理正常脚本标签。历史实验脚本、负载原始日志和离线分析工具不改写；新代码不能通过旧变量补采八rank负载。
 
 vLLM执行诊断清理：`MOONEP_TIME_STATS`、`MOONEP_TIME_STATS_EVERY`、`MOONEP_MLP_SYNC`、`MOONEP_PF_TIMING`、`MOONEP_PACE_SYNC`、`MOONEP_CAP_TRACE` 已移除，不保留兼容别名；旧变量任何值均被忽略，固定原诊断关闭路径。删除阶段计时及退出/周期输出、MLP和原生dispatcher/MC2计时包装、预取/MLP/dispatch的诊断额外同步，以及容量变化日志和专用状态。
 
 保留真实容量选档、Planning/Dispatch/Combine、home/slot counts、路由权重快照、MLP数学流程、源端去重与图捕获保护；保留初始化/AICPU预热同步、副流事件等待、Home GEMM1事件传递、槽位复用、缓存回填和MTE/UDMA独立QP校验。MXFP8自动分发/有效行解包、BF16 zero-copy、融合publish/FP32加权combine及原生Off选路不变。保留常规起服与后端确认日志、缓存命中计数和官方profiling入口。
 
-SDK内部计时/trace已另行移除，逐rank负载采集与累计账本由本组清理；Slot/计划诊断留待下一组处理。历史实验脚本、原始数据和离线分析工具保留，旧的这六项参数无法再恢复框架阶段计时或诊断同步。
+SDK内部计时/trace已另行移除，逐rank负载采集与累计账本由本组清理；Slot/计划诊断也已清理。历史实验脚本、原始数据和离线分析工具保留，旧的这六项参数无法再恢复框架阶段计时或诊断同步。
 
 
 Planning 负载统计前的屏障由 SDK 参数 `MOONEP_PLANNING_LOAD_STATS_BARRIER_MODE` 控制，严格接受精确小写 `auto`/`pull`/`push`，默认 `auto`；SDK 在原 Planning 配置位置首次成功读取后缓存，各EP rank必须一致，不支持运行中切换。vLLM只增加一次性环境审计，不增加逐层解析或host同步。`auto`保留SHMEM自动选择（当前EP≤32用v3 pull，EP>32用v4 push），与此前8卡GSM8K/LongBench-v2默认路径一致；显式`pull`固定v3，`push`固定v4，不能关闭屏障，也不改变统计数据的gather方式。
@@ -301,7 +302,6 @@ SHMEM 引导参数迁移：`MOONEP_SHMEM_BOOTSTRAP` 已重命名为 `MOONEP_SHME
 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` | **开 URMA 时必需**（torch_npu expandable segments × URMA 死锁，见限制#1②） |
 | `ASCEND_MOONEP_DISPATCH_USE_UDMA` | SDK内部逐阶段后端状态；创建上下文时由SDK写入，不是vLLM统一传输类型的替代开关 |
 | `MOONEP_REDUNDANT_EXPERT_SLOT_COUNT` | 每个 EP rank 的冗余专家预取槽位数，默认 E/EP；当前 planning 要求等于 E/EP，其它值仍会报错，与持久缓存数量不同 |
-| `MOONEP_SLOT_STATS=1` | 槽位统计 |
 | `VLLM_MOONEP_DEBUG=1` / `ASCEND_MOONEP_TRACE=1` | 调试打印（引擎/库内） |
 | `MOONEP_POOL_TOKEN_CAPACITY_TIERS=128,1024` | 手动指定容量池档位（覆盖默认的"预算化档位表"） |
 | `MOONEP_MIN_DISPATCH_TOKENS=16` | 每步选档的最小 token 下限，必须 ≥1；仅识别此变量，未设置时默认 128，实验脚本可显式设 16 |
@@ -331,7 +331,7 @@ MoonEP 启用且 EP>1 时，首次运行时初始化固定在 SHMEM 集体初始
 
 通用起服脚本已移除 `SIM_ROUTE`、`SIM_ROUTE_SEED`、`SIM_ROUTE_EVERY`、`SIM_ROUTE_TABLE` 透传入口及“仿真已开启”提示。历史合成倾斜度、二分阈值实验的脚本、路由档案与结果保留原样；这些实验需要历史代码才能按原注入方式重跑，不能把新代码忽略旧变量后的真实路由结果当作原合成实验。
 
-真实负载统计及目录/标签/落盘频率参数已随本次诊断清理删除；MOONEP_PLAN_STATS、MOONEP_EARLY_PLAN等计划诊断留待下一组处理。MoonEP Slot、预取副流、缓存、MXFP8、有效行解包、融合 publish 和其他优化不变。源码曾记录仿真注入绕过特定 DSV4 单 token dummy 的原生 gating 故障；当前版本是否仍复现未重新验证，本次不新增绕过，也不认定该历史故障已修复。
+真实负载统计及目录/标签/落盘频率参数已随本次诊断清理删除；MOONEP_PLAN_STATS、MOONEP_EARLY_PLAN等计划诊断也已删除。MoonEP Slot、预取副流、缓存、MXFP8、有效行解包、融合 publish 和其他优化不变。源码曾记录仿真注入绕过特定 DSV4 单 token dummy 的原生 gating 故障；当前版本是否仍复现未重新验证，本次不新增绕过，也不认定该历史故障已修复。
 
 ## 限制与已知问题（重要）
 

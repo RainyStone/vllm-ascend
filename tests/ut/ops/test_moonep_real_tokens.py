@@ -161,50 +161,5 @@ class RealTokenBoundsTest(unittest.TestCase):
         self.assertTrue(torch.isnan(activations[3:]).all())
 
 
-class EarlyPlanRealTokensTest(unittest.TestCase):
-    def setUp(self):
-        self.calls = []
-        self.plan = SimpleNamespace(dst=torch.empty(8, dtype=torch.int32))
-
-        def compute(ctx, topk, histogram, cu, plan, **kwargs):
-            self.calls.append((ctx["num_valid_tokens"], histogram.clone()))
-
-        self.ctx = {"num_valid_tokens": 4,
-                    "kernels": {"planning": SimpleNamespace(compute=compute)}}
-        self.buffer = SimpleNamespace(_require_ctx=lambda: self.ctx)
-        self.namespace = {
-            "torch": torch,
-            "_PRED_PLAN_BUF": {4: (self.plan, torch.empty(6, dtype=torch.int32))},
-            "_early_route": lambda *args: (
-                None, torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)),
-            "_select_buffer_for_step": lambda *args: (self.buffer, 4),
-            "get_ep_group": lambda: SimpleNamespace(world_size=2, rank_in_group=0),
-        }
-        tree = ast.parse(SOURCE.read_text())
-        names = {"early_predicted_plan_ctx", "early_plan_fallback", "_plan_on_predicted_routing"}
-        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"), self.namespace)
-
-    def test_prediction_resets_reused_buffer_bound_and_excludes_tail(self):
-        result = self.namespace["early_predicted_plan_ctx"](None, None, 2, 4, 16, 2)
-        self.assertIs(result[0], self.buffer)
-        self.assertIsNone(result[2])
-        self.assertEqual(self.calls[0][0], 2)
-        self.assertEqual(self.calls[0][1].tolist(), [1, 1, 1, 1])
-
-    def test_fallback_uses_real_count_instead_of_capacity(self):
-        self.namespace["early_plan_fallback"](SimpleNamespace(E=4), 2, 1, 16)
-        self.assertEqual(self.calls[0][0], 1)
-        self.assertEqual(self.calls[0][1].tolist(), [1, 1, 0, 0])
-
-    def test_prediction_probe_histogram_ignores_unused_capacity(self):
-        self.ctx["num_valid_tokens"] = 1
-        routes = torch.tensor([[0, 1], [3, 3], [3, 3], [3, 3]], dtype=torch.int32)
-        planning = SimpleNamespace(allocate_planning_outputs=lambda ctx: (self.plan, None))
-        with patch.dict(sys.modules, {"ascend_moonep.planning": planning}):
-            self.namespace["_plan_on_predicted_routing"](self.ctx, routes, 4, 2)
-        self.assertEqual(self.calls[0][1].tolist(), [1, 1, 0, 0])
-
-
 if __name__ == "__main__":
     unittest.main()
