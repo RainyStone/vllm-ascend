@@ -273,7 +273,7 @@ Planning 源端去重使用 SDK 参数 `MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENA
 
 保留 SDK 的 `MOONEP_PLANNING_NUM_SMS`：未设置或为空时，按每个 Buffer 的容量 `S×K` 自动选核，≤8192使用8，其余在 SDK 默认值下使用32；该容量不是逐请求的实际有效 token 数。显式非空值沿用 int 解析与[8,56]校验，覆盖自动规则。最终 Planning block 数同时用于工作区大小计算和 PlanningOp 创建，不能只改变启动核数而沿用旧工作区。
 
-此次不删除或更改 SDK 公共 `Buffer(num_sms=...)` 接口，独立 SDK 调用仍可传参；不修改 SDK 自动选核算法、源码或二进制。Dispatch、Combine、Prefetch 的底层启动策略、专家 GEMM、副流、MXFP8、有效行解包、融合 publish、BF16 zero-copy 和原生 Off 均不变；不涉及独立的 `MOONEP_NUM_SMS_DEDUP` 参数。清理 vLLM 中将旧变量描述为统一控制各阶段核数的过时注释，历史实验脚本与结果不改写。
+SDK公共Buffer(num_sms=...)接口及默认值、Planning自动选核与工作区一致性继续保留。SDK中仅保存和打印、无算子消费者的MOONEP_NUM_SMS_DEDUP现已移除，不保留兼容别名；旧变量任何值均被忽略，0、越界或非法字符串不再因该变量导致初始化失败，ctx和日志中的num_sms_dedup字段也已删除，外部读取该字段的工具需调整。实际算子核数、去重算法及其开关、C++/设备库和ABI不变；Dispatch、Combine、Prefetch、专家GEMM、副流、MXFP8、有效行解包、融合publish、BF16 zero-copy及原生Off不变。历史实验脚本与结果不改写。
 
 传输类型迁移：`MOONEP_DISABLE_UDMA` 已删除，统一使用 `MOONEP_TRANSPORT_TYPE`，严格接受精确小写 `mte` 或 `udma`，不自动去空格或转换大小写。**默认改为 `mte`**：旧代码未设置/0时请求UDMA，旧值1选择MTE；新代码未设置时选择MTE。旧名不保留兼容，单独设置任何旧值（包括0）均被忽略，新旧同时存在时只采用新名；旧UDMA配置必须改为 `MOONEP_TRANSPORT_TYPE=udma`。
 
