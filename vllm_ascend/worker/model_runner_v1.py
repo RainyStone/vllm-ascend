@@ -256,6 +256,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_ascend_forward_context,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    set_moonep_tokens_capacity,
     use_cann_megamoe,
 )
 
@@ -563,6 +564,7 @@ class NPUModelRunner(GPUModelRunner):
 
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.uniform_decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.uniform_decode_query_len)
+        set_moonep_tokens_capacity(vllm_config)
         set_mc2_mask(vllm_config, self.device)
         # Compute potential_max_tokens once here; it is reused by the skip-allreduce
         # decision and the o_proj static-exchange buffer sizing (see get_potential_max_tokens).
@@ -4476,6 +4478,12 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()
+        if get_ascend_config().enable_moonep:
+            from vllm_ascend.ops.fused_moe.moonep_comm import ensure_runtime_initialized
+            from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_pf_stream
+
+            ensure_runtime_initialized()
+            maybe_install_pf_stream(self.model)
         if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_fused_copy_sfa:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
