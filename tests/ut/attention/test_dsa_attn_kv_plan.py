@@ -38,7 +38,7 @@ def _stub_dsa_c_ascend_ops():
 
 
 def _config(use_bf16: bool):
-    return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16" if use_bf16 else "auto"))
+    return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16" if use_bf16 else "fp8_e4m3"))
 
 
 def _cache_config(cache_dtype: str = "auto"):
@@ -206,12 +206,12 @@ def test_is_a5_bf16_kv_enabled_requires_vllm_config():
         is_a5_bf16_kv_enabled()
 
 
-def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
+def test_auto_and_explicit_bfloat16_select_bf16_kv_on_a5():
     with _on(AscendDeviceType.A5):
         assert is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
-        assert not is_a5_bf16_kv_enabled(_cache_config())
+        assert is_a5_bf16_kv_enabled(_cache_config())
         assert not is_a5_bf16_kv_enabled(_cache_config("fp8"))
-        # The A5 spec path rewrites cache_dtype once FP8 KV is chosen.
+        # Keep the semantic E4M3 alias accepted by existing cache callers.
         assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
 
 
@@ -226,21 +226,19 @@ def test_non_a5_pins_cache_dtype_to_the_model_dtype():
             assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
 
 
-def test_a5_collapses_non_bfloat16_requests_to_auto():
-    # "auto" resolves to the model dtype everywhere downstream, so it carries
-    # the FP8 mode without changing any value upstream would have computed.
+def test_a5_preserves_explicit_fp8_requests():
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "bfloat16"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "fp8_e4m3"
 
 
-def test_a5_mode_survives_the_spec_path_rewrite():
+def test_a5_mode_survives_dtype_normalization():
     with _on(AscendDeviceType.A5):
-        for launch in ("auto", "fp8"):
+        for launch in ("fp8", "fp8_e4m3"):
             pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
             assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
-            # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
+            # Internal callers can also provide the semantic E4M3 spelling.
             assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
 
         pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")

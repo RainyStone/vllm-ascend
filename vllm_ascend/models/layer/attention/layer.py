@@ -14,12 +14,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 # from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
+from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled, resolve_dsv4_cache_torch_dtype
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
@@ -59,7 +58,7 @@ DSV4_BLOCK_SIZES_A5_BF16 = get_dsv4_block_sizes(use_a5_bf16_kv=True)
 
 
 def dsv4_block_sizes(vllm_config: VllmConfig):
-    """Return the A5 BF16 KV table when explicitly requested, else the upstream table."""
+    """Use the A5 BF16 KV table for auto or an explicit BF16 request."""
     if is_a5_bf16_kv_enabled(vllm_config):
         return DSV4_BLOCK_SIZES_A5_BF16
     return DSV4_BLOCK_SIZES
@@ -191,7 +190,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        kv_cache_dtype = resolve_dsv4_cache_torch_dtype(vllm_config, self.kv_cache_dtype)
         if is_turboquant(vllm_config):
             kv_cache_dtype = torch.uint8 if self.compress_ratio == 4 else torch.bfloat16
         use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)

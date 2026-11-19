@@ -11,16 +11,22 @@ The companion vLLM checkout is `releases/v0.30.0`
 `ascend-moonep` `urma_dev` (`6de30d77d0f21721bce35a73018160e56fb9d656`).
 The validation container uses `urma_dev_vllm_ascend_v0.30.0` with the CANN 9.2
 header-layout compatibility commit `5a312f186bc6bf197df223f67d2cd4f7c9b1274d`.
-This migration changes vllm-ascend source only. It does not install packages,
-rebind editable installations, rebuild native libraries, or update submodules.
+The original migration changed vllm-ascend source only. The SHMEM compatibility
+fix described below additionally requires rebuilding the SDK's SHMEM library.
 
 The workspace for this work is
 `/mnt/share/x00893896/vllm_ascend_moonep_integration_latest`.
 The previous workspace and source branch remain separate baselines.
 
-**Status: MoonEP CPU regression and fresh-process native-loader checks pass.
-NPU operators, multirank collectives, model correctness, and performance remain
-unvalidated.** Successful loading does not establish device numerical correctness.
+**Status: CPU regression and fresh-process native-loader checks pass.** On A5-118
+in `xzx_moonep_latest`, two-rank SHMEM initialization/finalization passes in both
+memfabric/SHMEM load orders. Eight-rank eager model smoke tests pass for
+Qwen3-30B-A3B-Instruct-2507 with MoonEP BF16 transport, and DeepSeek-V4-Flash
+with MoonEP MXFP8 transport using either auto/BF16 or explicit FP8 attention KV.
+An explicit-FP8 DSV4 run with MoonEP disabled also passes. Each model configuration
+completes 11 short-decode, long-prefill, concurrent-completion and chat requests,
+with memfabric loaded normally in all workers. These are smoke checks, not a
+numerical-equivalence, sparse-offload feature, or performance qualification.
 
 ## Execution integration
 
@@ -56,7 +62,8 @@ reintroduced. Historical experiments remain on the old branch.
 
 ## MoonEP semantic compatibility
 
-Non-MoonEP execution follows the v0.30 baseline. MoonEP reuses its quant-method
+Apart from the DSV4 KV fixes described below, non-MoonEP execution follows the
+v0.30 baseline. MoonEP reuses its quant-method
 GMM and activation-quantization hooks through a read-only Home/Slot weight view;
 the public MLP implementation and native quantization methods are unchanged.
 
@@ -110,6 +117,34 @@ the companion SDK. Collective settings must agree across EP ranks.
 UDMA overlap retains the dedicated-QP requirement. The existing SDK runtime
 rejects expandable NPU allocator segments; keep
 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` for MoonEP.
+
+## SHMEM and DSV4 attention KV compatibility
+
+SHMEM's device-state getter must have local symbol binding when memfabric is
+loaded in the same worker. Both libraries otherwise export the legacy
+`HybmGetInitDeviceId()` name, allowing SHMEM to read memfabric's uninitialized
+device number and fail initialization. Build the SDK with the SHMEM internal
+visibility fix; keep memfabric installed and normally importable.
+
+On A5, DSV4 attention KV requests use these modes:
+
+| Request | Storage and attention |
+| --- | --- |
+| `auto`, `bfloat16` | BF16 KV and BF16 SparseFlashMla |
+| `fp8`, `fp8_e4m3` | E4M3 KV with packed 608-byte rows and MixedQuantSparseFlashMla |
+
+The `auto` behavior follows the
+[upstream cache-plan fix](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/attention/dsa_attn_kv_plan.py).
+Explicit FP8 requests remain distinct during dtype normalization. Both SWA and
+compressed attention cache specs must use the same physical dtype as the selected
+operator. Unsupported A5 FP8 encodings fail explicitly instead of being treated
+as E4M3. Other hardware retains its generic dtype mapping, and TurboQuant keeps
+its separate storage policy.
+
+Pass `--kv-cache-dtype fp8` to exercise the FP8 attention KV path. This option
+is independent of model weight quantization and MoonEP activation transport:
+BF16 attention KV can coexist with FP8 model weights and MoonEP MXFP8 transport.
+Compare accuracy, cache capacity and performance only with matching KV modes.
 
 ## Independent validation environment
 

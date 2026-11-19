@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
     mixed_quant_sparse_flash_mla_fp8,
@@ -19,9 +20,12 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE, is_turboquant
 
-_BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+# Match upstream: auto uses the BF16 model cache on A5. Explicit E4M3
+# requests retain a distinct mode through allocation and attention selection.
+_BF16_KV_CACHE_DTYPES = frozenset({"auto", "bfloat16", "bf16"})
+_FP8_KV_CACHE_DTYPES = frozenset({"fp8", "fp8_e4m3", "float8_e4m3fn"})
 
 
 def _supports_dsv4_compressed_cache() -> bool:
@@ -31,21 +35,42 @@ def _supports_dsv4_compressed_cache() -> bool:
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    A5 auto selects BF16, as does an explicit BF16 request. Keep explicit E4M3
+    requests distinct: rewriting them to auto would silently select BF16.
+    TurboQuant owns its separate storage policy.
     """
     if not _supports_dsv4_compressed_cache():
         return model_dtype
-    return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
+    requested = str(cache_dtype).lower()
+    if requested in _BF16_KV_CACHE_DTYPES:
+        return "bfloat16"
+    if requested in _FP8_KV_CACHE_DTYPES:
+        return "fp8_e4m3"
+    if requested == TURBOQUANT_CACHE_DTYPE:
+        return requested
+    raise ValueError(
+        f"Unsupported DeepSeek-V4 KV cache dtype on A5: {cache_dtype!r}. "
+        "Use auto/bfloat16, fp8/fp8_e4m3, or turboquant_4bit_nc."
+    )
+
+
+def resolve_dsv4_cache_torch_dtype(vllm_config, cache_dtype: str | None = None) -> torch.dtype:
+    """Use one physical dtype policy for SWA and compressed attention caches."""
+    if cache_dtype is None:
+        cache_dtype = vllm_config.cache_config.cache_dtype
+    if not _supports_dsv4_compressed_cache() or is_turboquant(vllm_config):
+        return kv_cache_dtype_str_to_dtype(cache_dtype, vllm_config.model_config)
+    resolved = resolve_dsv4_cache_dtype(cache_dtype, vllm_config.model_config.dtype)
+    # Generic vLLM maps fp8 aliases to uint8. The A5 cache specs use the
+    # semantic E4M3 dtype to select the packed 608-byte rows and their views.
+    return torch.bfloat16 if resolved == "bfloat16" else torch.float8_e4m3fn
 
 
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     """Return whether BF16 SparseFlashMla KV is enabled on A5.
 
-    Callers must pass the engine ``vllm_config``. Do not look it up from the
+    Auto and explicit BF16 select the same cache layout. Callers must pass the
+    engine ``vllm_config``. Do not look it up from the
     process-global current config: that context is only set during
     ``load_model()`` and a missing lookup would silently pick the FP8 plan.
     """
